@@ -16,12 +16,25 @@ export async function POST(req: Request) {
   let event: { type: string; data: { id: string } };
   try {
     event = wh.verify(payload, svixHeaders) as typeof event;
-  } catch {
+  } catch (error) {
+    console.error(
+      '[Clerk Webhook] Signature verification failed:',
+      error instanceof Error ? error.message : String(error)
+    );
     return new Response('Invalid signature', { status: 400 });
   }
 
   if (event.type === 'user.created') {
-    await createCreatorIfNotExists(event.data.id);
+    try {
+      await createCreatorIfNotExists(event.data.id);
+    } catch (error) {
+      console.error(
+        '[Clerk Webhook] Failed to create creator for user:',
+        event.data.id,
+        error instanceof Error ? error.message : String(error)
+      );
+      return new Response('Internal server error', { status: 500 });
+    }
   }
 
   return new Response('ok', { status: 200 });
