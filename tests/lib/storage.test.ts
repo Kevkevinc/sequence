@@ -1,8 +1,25 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { Readable } from 'stream';
 
 vi.mock('@aws-sdk/s3-request-presigner', () => ({
   getSignedUrl: vi.fn().mockResolvedValue('https://example.com/signed-url'),
 }));
+
+vi.mock('@aws-sdk/client-s3', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@aws-sdk/client-s3')>();
+  return {
+    ...actual,
+    S3Client: class {
+      send = vi.fn(async (command: InstanceType<typeof actual.GetObjectCommand>) => {
+        if (command instanceof actual.GetObjectCommand) {
+          const stream = Readable.from([Buffer.from('fake-video-bytes')]);
+          return { Body: stream, ContentType: 'video/mp4' };
+        }
+        throw new Error('unexpected command in test');
+      });
+    },
+  };
+});
 
 import { createUploadUrl } from '@/lib/storage';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
@@ -42,5 +59,14 @@ describe('createUploadUrl', () => {
 
     // Verify ContentType matches what was requested
     expect(ContentType).toBe(contentType);
+  });
+});
+
+describe('getClipBuffer', () => {
+  it('downloads and returns the clip as a buffer with its content type', async () => {
+    const { getClipBuffer } = await import('@/lib/storage');
+    const result = await getClipBuffer('clips/some-key.mp4');
+    expect(result.buffer.toString()).toBe('fake-video-bytes');
+    expect(result.contentType).toBe('video/mp4');
   });
 });
