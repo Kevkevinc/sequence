@@ -1,10 +1,12 @@
 import { auth } from '@clerk/nextjs/server';
-import { getCreatorByClerkId, updateCreatorProfile } from '@/db/repositories/creators';
+import { createCreatorIfNotExists, updateCreatorProfile } from '@/db/repositories/creators';
 
 export async function GET() {
   const { userId } = await auth();
   if (!userId) return new Response('Unauthorized', { status: 401 });
-  const creator = await getCreatorByClerkId(userId);
+  // Provision lazily -- see the note in app/api/jobs/route.ts. The Clerk webhook
+  // is an optimization, not the only path that creates a creator row.
+  const creator = await createCreatorIfNotExists(userId);
   return Response.json(creator);
 }
 
@@ -20,6 +22,10 @@ export async function PATCH(req: Request) {
       { status: 400 }
     );
   }
+
+  // Same lazy provisioning as GET, so a save works even if the client never
+  // loaded the profile first (e.g. the Clerk webhook never fired).
+  await createCreatorIfNotExists(userId);
 
   const updated = await updateCreatorProfile(userId, {
     height: body.height,

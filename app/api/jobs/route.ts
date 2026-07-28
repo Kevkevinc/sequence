@@ -1,5 +1,5 @@
 import { auth } from '@clerk/nextjs/server';
-import { getCreatorByClerkId } from '@/db/repositories/creators';
+import { createCreatorIfNotExists } from '@/db/repositories/creators';
 import { createJob, listJobsForCreator } from '@/db/repositories/jobs';
 import { validateJobInput } from '@/lib/validation/job';
 
@@ -7,8 +7,11 @@ export async function POST(req: Request) {
   const { userId } = await auth();
   if (!userId) return new Response('Unauthorized', { status: 401 });
 
-  const creator = await getCreatorByClerkId(userId);
-  if (!creator) return new Response('Creator profile not found', { status: 404 });
+  // Provision the creator row lazily on first authenticated call. The Clerk
+  // `user.created` webhook normally does this at sign-up, but it is only an
+  // optimization -- if it never fired (webhook not configured, delivery failed),
+  // the row is created here instead of the request failing.
+  const creator = await createCreatorIfNotExists(userId);
 
   let body;
   try {
@@ -68,8 +71,7 @@ export async function GET() {
   const { userId } = await auth();
   if (!userId) return new Response('Unauthorized', { status: 401 });
 
-  const creator = await getCreatorByClerkId(userId);
-  if (!creator) return new Response('Creator profile not found', { status: 404 });
+  const creator = await createCreatorIfNotExists(userId);
 
   const jobs = await listJobsForCreator(creator.id);
   return Response.json(jobs);
