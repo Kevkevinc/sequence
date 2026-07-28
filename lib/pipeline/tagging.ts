@@ -31,24 +31,35 @@ const TAGGING_RETRY: TransientRetryOptions = {
   label: 'Gemini tagging call',
 };
 
-const TaggingResponseSchema = z.object({
-  segments: z
-    .array(
-      z
-        .object({
-          startSeconds: z.number().min(0),
-          endSeconds: z.number().min(0),
-          contentTag: z.string(),
-          qualityTag: z.string(),
-        })
-        // A zero- or negative-duration segment is not a usable cut, so treat it
-        // as model drift rather than persisting an unrenderable row.
-        .refine((s) => s.endSeconds > s.startSeconds, {
-          message: 'endSeconds must be greater than startSeconds',
-        })
-    )
-    .min(1),
-});
+const TaggedSegmentSchema = z
+  .object({
+    startSeconds: z.number().min(0),
+    endSeconds: z.number().min(0),
+    contentTag: z.string(),
+    qualityTag: z.string(),
+  })
+  // A zero- or negative-duration segment is not a usable cut, so treat it
+  // as model drift rather than persisting an unrenderable row.
+  .refine((s) => s.endSeconds > s.startSeconds, {
+    message: 'endSeconds must be greater than startSeconds',
+  });
+
+/**
+ * Accepts either the requested `{segments: [...]}` wrapper or a bare `[...]`
+ * array of segments.
+ *
+ * The wrapper is what the prompt asks for and what the model returns for short
+ * clips, but on a real 30s+ clip it returned the bare array instead — dropping
+ * the single most useful clip in the job over a shape the caller does not care
+ * about. Both forms carry identical information, so normalising here is
+ * strictly better than failing; every element is still validated the same way.
+ */
+const TaggingResponseSchema = z
+  .union([
+    z.object({ segments: z.array(TaggedSegmentSchema).min(1) }),
+    z.array(TaggedSegmentSchema).min(1),
+  ])
+  .transform((value) => (Array.isArray(value) ? { segments: value } : value));
 
 const TAGGING_PROMPT = `Analyze this raw video clip for a short-form UGC ad edit.
 Always include one segment spanning the entire clip (start 0 to the clip's full duration),

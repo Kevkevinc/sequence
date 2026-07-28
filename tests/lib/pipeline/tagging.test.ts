@@ -175,6 +175,27 @@ describe('tagClip', () => {
     }
   });
 
+  it('accepts a bare segment array, not just the {segments: [...]} wrapper', async () => {
+    // Observed live: on a real 30s+ clip the model returned the bare array
+    // instead of the requested wrapper, dropping the job's most useful clip.
+    mockUpload.mockResolvedValue({ name: 'files/abc', uri: 'https://files/abc', mimeType: 'video/mp4', state: 'ACTIVE' });
+    mockGetFile.mockResolvedValue({ state: 'ACTIVE' });
+    mockGenerateContent.mockResolvedValue({
+      text: JSON.stringify([
+        { startSeconds: 0, endSeconds: 34, contentTag: 'whole-clip', qualityTag: 'high' },
+        { startSeconds: 4, endSeconds: 9, contentTag: 'try-on', qualityTag: 'high' },
+      ]),
+    });
+
+    const result = await tagClip(rawClipId);
+
+    expect(result).toEqual({ success: true, segmentCount: 2 });
+
+    const saved = await db.select().from(segments).where(eq(segments.rawClipId, rawClipId));
+    expect(saved).toHaveLength(2);
+    expect(saved.map((s) => s.contentTag).sort()).toEqual(['try-on', 'whole-clip']);
+  });
+
   it('returns a failure result instead of throwing when the raw clip does not exist', async () => {
     const result = await tagClip('00000000-0000-0000-0000-000000000000');
 
