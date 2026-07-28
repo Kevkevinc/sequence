@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { isTransientError, withTransientRetry } from '@/lib/pipeline/retry';
+import { isExhaustedDailyQuota, isTransientError, withTransientRetry } from '@/lib/pipeline/retry';
 
 /** Shape of `@google/genai`'s ApiError: a numeric `status` plus the body text. */
 function apiError(status: number, message: string): Error & { status: number } {
@@ -15,6 +15,23 @@ function networkError(code: string): Error {
 const LIVE_503 = apiError(
   503,
   '{"error":{"code":503,"message":"This model is currently experiencing high demand. Spikes in demand are usually temporary. Please try again later.","status":"UNAVAILABLE"}}'
+);
+
+/**
+ * The free tier's real per-day exhaustion body, verbatim in shape: a
+ * `QuotaFailure` naming a `...PerDay...` quota id, alongside a short
+ * `RetryInfo.retryDelay` that is misleading — the quota does not come back for
+ * hours.
+ */
+const DAILY_QUOTA_429 = apiError(
+  429,
+  '{"error":{"code":429,"message":"You exceeded your current quota, please check your plan and billing details.","status":"RESOURCE_EXHAUSTED","details":[{"@type":"type.googleapis.com/google.rpc.QuotaFailure","violations":[{"quotaMetric":"generativelanguage.googleapis.com/generate_content_free_tier_requests","quotaId":"GenerateRequestsPerDayPerProjectPerModel-FreeTier","quotaDimensions":{"model":"gemini-3.6-flash"},"quotaValue":"20"}]},{"@type":"type.googleapis.com/google.rpc.RetryInfo","retryDelay":"37s"}]}'
+);
+
+/** The other 429: a burst limit that genuinely clears in seconds. */
+const PER_MINUTE_429 = apiError(
+  429,
+  '{"error":{"code":429,"message":"Quota exceeded","status":"RESOURCE_EXHAUSTED","details":[{"@type":"type.googleapis.com/google.rpc.QuotaFailure","violations":[{"quotaId":"GenerateRequestsPerMinutePerProjectPerModel-FreeTier"}]},{"@type":"type.googleapis.com/google.rpc.RetryInfo","retryDelay":"11s"}]}'
 );
 
 describe('isTransientError', () => {
@@ -54,6 +71,48 @@ describe('isTransientError', () => {
   });
 });
 
+describe('daily quota exhaustion, which no amount of retrying fixes', () => {
+  it('treats a per-day quota 429 as terminal', () => {
+    // The free tier is 20 requests per day per model. Retrying this costs three
+    // attempts plus backoff and fails identically; worse, planJob chains its
+    // retries, so one exhausted quota could burn nine of the day's twenty.
+    expect(isExhaustedDailyQuota(DAILY_QUOTA_429)).toBe(true);
+    expect(isTransientError(DAILY_QUOTA_429)).toBe(false);
+  });
+
+  it('still treats a per-minute rate-limit 429 as transient', () => {
+    // The whole point of splitting the two: a burst limit clears in seconds and
+    // is exactly what the backoff exists for.
+    expect(isExhaustedDailyQuota(PER_MINUTE_429)).toBe(false);
+    expect(isTransientError(PER_MINUTE_429)).toBe(true);
+  });
+
+  it('honours a long RetryInfo delay even when no quota id names a day', () => {
+    const longWait = apiError(
+      429,
+      '{"error":{"code":429,"status":"RESOURCE_EXHAUSTED","details":[{"@type":"type.googleapis.com/google.rpc.RetryInfo","retryDelay":"1800s"}]}}'
+    );
+    // Half an hour is not a spike, and our entire budget is ~3 seconds.
+    expect(isTransientError(longWait)).toBe(false);
+  });
+
+  it('keeps retrying when the service asks for a short wait', () => {
+    const shortWait = apiError(
+      429,
+      '{"error":{"code":429,"status":"RESOURCE_EXHAUSTED","details":[{"@type":"type.googleapis.com/google.rpc.RetryInfo","retryDelay":"18s"}]}}'
+    );
+    expect(isTransientError(shortWait)).toBe(true);
+  });
+
+  it('does not misread an unrelated error that happens to mention a day', () => {
+    // The veto is gated on the error looking like a quota failure at all, so a
+    // 503 whose prose says "per day" stays retryable.
+    const busy = apiError(503, 'This model is busy; usage resets per day but try again later');
+    expect(isExhaustedDailyQuota(busy)).toBe(false);
+    expect(isTransientError(busy)).toBe(true);
+  });
+});
+
 describe('withTransientRetry', () => {
   // Real backoff would add seconds per case; the delay maths is exercised
   // separately by asserting the operation is actually re-run.
@@ -79,6 +138,13 @@ describe('withTransientRetry', () => {
 
     await expect(withTransientRetry(operation, FAST)).resolves.toBe('ok');
     expect(operation).toHaveBeenCalledTimes(2);
+  });
+
+  it('spends no attempts and no backoff on an exhausted daily quota', async () => {
+    const operation = vi.fn().mockRejectedValue(DAILY_QUOTA_429);
+
+    await expect(withTransientRetry(operation, FAST)).rejects.toBe(DAILY_QUOTA_429);
+    expect(operation).toHaveBeenCalledTimes(1);
   });
 
   it('rethrows a terminal failure immediately, without spending an attempt', async () => {

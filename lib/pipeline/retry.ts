@@ -31,6 +31,35 @@ const TRANSIENT_EMBEDDED_CODE = /"code"\s*:\s*(?:408|429|500|502|503|504)\b/;
 /** Wire-level failures, which say nothing about whether the request was valid. */
 const TRANSIENT_MESSAGE = /\b(fetch failed|socket hang up|network error|timed?\s?out|overloaded|high demand|try again later|connection (?:reset|closed))\b/i;
 
+/**
+ * A quota violation whose window is a *day*, not a minute.
+ *
+ * 429 covers two very different conditions. A per-minute rate limit clears in
+ * seconds and is exactly what the backoff below is for. A per-day quota does
+ * not clear until midnight Pacific, and on this project's free tier (20
+ * requests per day per model) it is the common one. Retrying it costs three
+ * attempts plus backoff and fails identically every time — and because
+ * `planJob` chains MAX_ATTEMPTS x DIRECTOR_RETRY, a single exhausted daily
+ * quota could burn up to nine calls against a 20-a-day budget.
+ *
+ * Google names the offending quota in the error body's `QuotaFailure` detail,
+ * e.g. `"quotaId": "GenerateRequestsPerDayPerProjectPerModel-FreeTier"`.
+ */
+const DAILY_QUOTA_MARKER = /per[\s_-]?day/i;
+
+/** Google's `RetryInfo` detail, e.g. `"retryDelay": "37s"`. */
+const RETRY_DELAY_PATTERN = /retryDelay"?\s*:\s*"?(\d+(?:\.\d+)?)s/i;
+
+/**
+ * Longest `RetryInfo.retryDelay` worth waiting out. Above this the service is
+ * telling us the condition is not a spike, and our whole budget (three tries,
+ * ~3s of backoff) cannot span it, so retrying is theatre.
+ */
+const MAX_HONOURED_RETRY_DELAY_SECONDS = 60;
+
+/** Whether an error is recognisably about quota at all. */
+const QUOTA_SHAPED = /RESOURCE_EXHAUSTED|quota/i;
+
 /** Node/undici error codes for a connection that never worked or died mid-flight. */
 const TRANSIENT_NETWORK_CODES = new Set([
   'ECONNRESET',
@@ -104,6 +133,26 @@ function messagesOf(error: unknown): string {
 }
 
 /**
+ * True when a 429 is a *daily* quota exhaustion rather than a rate limit.
+ *
+ * Deliberately gated on the error looking like a quota failure at all, so an
+ * unrelated 503 whose prose happens to say "per day" is not misread. The
+ * quota-id check comes first because Google returns a short `retryDelay`
+ * (~30s) alongside a per-day `quotaId` — honouring the delay alone would keep
+ * retrying an exhausted daily quota.
+ */
+export function isExhaustedDailyQuota(error: unknown): boolean {
+  const status = httpStatusOf(error);
+  const message = messagesOf(error);
+  if (status !== 429 && !QUOTA_SHAPED.test(message)) return false;
+
+  if (DAILY_QUOTA_MARKER.test(message)) return true;
+
+  const retryDelay = RETRY_DELAY_PATTERN.exec(message);
+  return retryDelay !== null && Number(retryDelay[1]) > MAX_HONOURED_RETRY_DELAY_SECONDS;
+}
+
+/**
  * True for "the service was busy or the wire broke", false for everything else.
  *
  * An explicit HTTP status is authoritative: a 404 (model not found) or 400
@@ -111,6 +160,10 @@ function messagesOf(error: unknown): string {
  * recognise short-circuits the text heuristics below it.
  */
 export function isTransientError(error: unknown): boolean {
+  // Checked before the status table, because 429 is in it and a spent daily
+  // quota is the one 429 that a retry cannot possibly fix.
+  if (isExhaustedDailyQuota(error)) return false;
+
   const status = httpStatusOf(error);
   if (status !== undefined) return TRANSIENT_HTTP_STATUSES.has(status);
 
