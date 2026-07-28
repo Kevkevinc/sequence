@@ -1,11 +1,12 @@
 import { z } from 'zod';
+import { FinishReason } from '@google/genai';
 import { eq, inArray } from 'drizzle-orm';
 import { db } from '@/db/client';
 import { jobs, rawClips, segments, editPlans, creators } from '@/db/schema';
 import { getEnvWithDefault } from '@/lib/env';
 import { getGeminiClient } from '@/lib/gemini/client';
 import { HOOK_STYLE_LIBRARY } from '@/lib/pipeline/hookLibrary';
-import { describeCause } from '@/lib/pipeline/errors';
+import { describeCause, MAX_CAUSE_LENGTH } from '@/lib/pipeline/errors';
 import { withTransientRetry, type TransientRetryOptions } from '@/lib/pipeline/retry';
 
 // Pro models (2.5-pro, 3.x-pro) return 429 quota-exceeded on the free API tier,
@@ -126,7 +127,28 @@ const FINAL_CUT_FLOOR_RATIO = 0.5;
 
 // Correction notes are fed back to the model, where a longer excerpt of the
 // validation failure is genuinely useful; the stored failure reason stays short.
+//
+// The budget is spent on *distinct* problems, one per variation per round (see
+// `summarizeIssues`), rather than on `ZodError.message` — which runs ~290 chars
+// per issue, admits about five, emits them in variation order, and so showed a
+// five-variation job nothing but variation 0's complaints on every attempt.
 const MAX_CORRECTION_NOTE_LENGTH = 1500;
+
+/** Joins the individual problems inside a correction note. */
+const CORRECTION_NOTE_SEPARATOR = '; ';
+
+/** Room reserved for the "(and N more problems)" tail, so the cap still holds. */
+const CORRECTION_NOTE_TAIL_BUDGET = 32;
+
+/**
+ * Longest on-screen hook the renderer can lay out.
+ *
+ * Nothing bounded this before, and Stage 3 has to fit the hook on a 9:16 frame:
+ * beyond roughly two lines of large type it either overflows or shrinks to
+ * unreadable. 120 characters is comfortably longer than every entry in the hook
+ * style library (the longest is 58) while ruling out a paragraph.
+ */
+const MAX_HOOK_LENGTH = 120;
 
 /**
  * How far a variation's total may fall *below* the job's target length.
@@ -161,16 +183,40 @@ const DURATION_AIM_TOLERANCE = 0.05;
  * Slack allowed against `maxAchievableSeconds` when the pool cannot reach the
  * target at all.
  *
- * Looser than the target tolerances on purpose. That ceiling is our own
- * estimate ("every second of footage, shown twice"), and `MIN_CUT_GAP_SECONDS`
- * makes part of it structurally unreachable: a single-clip pool must discard
- * about a second at every same-clip splice, which costs roughly a seventh of a
- * short clip's doubled length. The floor exists only to stop the model throwing
- * usable footage away, so it is set well below the estimate rather than
- * chasing it — 25% still rejects a 4s plan when 14s was achievable, which is
- * the case it was written for.
+ * Looser than the target tolerances on purpose: the ceiling is our own estimate
+ * of what the pool can yield, and the floor exists only to stop the model
+ * throwing usable footage away rather than to hit a number. 25% still rejects a
+ * 3s plan when ~12s was achievable, which is the case it was written for.
+ *
+ * Since `maxAchievableSeconds` now discounts the gap loss (see `measurePool`),
+ * this floor is a genuinely reachable number: for `fast` pacing it works out at
+ * `1.07 x availableSeconds`, comfortably under the ~1.43x a straightforward
+ * chronological edit yields. Before the discount it was `1.5 x available`,
+ * i.e. above what `fast` can produce — the rescue path could itself fail.
  */
 const FALLBACK_FLOOR_TOLERANCE = 0.25;
+
+/**
+ * How much of the estimated capacity we refuse to count on when deciding
+ * whether a pool can be held to the strict target band.
+ *
+ * `isSufficient` is a one-way door: saying yes commits the job to
+ * `[0.9T, 1.15T]` with no fallback, so being wrong by a second means three
+ * rejected attempts and a hard failure. Saying no costs a warning and a
+ * shorter video. The estimate below it is a *model* of what a straightforward
+ * chronological edit yields, and a real edit lands a little under it (a 20s
+ * clip at `medium` estimates 33.3s and the best hand-built plan we have is
+ * 31s — 93%). 15% is comfortably below that observed 93% while still leaving
+ * "20s of footage, 30s medium target" on the strict path, which subdivision
+ * genuinely reaches.
+ *
+ * It is deliberately *not* `FALLBACK_FLOOR_TOLERANCE`. Reusing 25% would make
+ * the two floors meet exactly at the crossover, which is elegant, but it also
+ * demands `maxAchievable >= 1.2T` before a job is called sufficient — pushing
+ * jobs that comfortably reach their target into the short-footage path, where
+ * the creator is told their video will be short when it will not be.
+ */
+const CAPACITY_SAFETY_MARGIN = 0.15;
 
 // The only placements Stage 3 can render. This single constant both builds the
 // prompt and validates the response, so the two cannot drift apart.
@@ -222,7 +268,9 @@ const SegmentSelectionSchema = z
 
 const VariationSchema = z.object({
   segments: z.array(SegmentSelectionSchema).min(1),
-  hookText: z.string().min(1),
+  // Capped because Stage 3 has to render this on a 9:16 frame; an unbounded
+  // hook is unlayoutable rather than merely ugly.
+  hookText: z.string().min(1).max(MAX_HOOK_LENGTH),
   // Only ever a lead-in phrase; the measurements are appended in code.
   sizingOverlayText: z.string().nullable(),
   sizingOverlayPlacement: z.enum(OVERLAY_PLACEMENTS).nullable(),
@@ -268,7 +316,10 @@ type PoolCapacity = {
   uniqueSegmentCount: number;
   /** Seconds of distinct footage the pool covers; overlapping tags count once. */
   availableSeconds: number;
-  /** The longest edit those segments can fill without breaking the reuse cap. */
+  /**
+   * The longest edit the pool can realistically fill under the reuse cap *and*
+   * the minimum-gap rule. Not the theoretical ceiling — see `measurePool`.
+   */
   maxAchievableSeconds: number;
   /** False when the pool cannot reach the bottom of the target's tolerance band. */
   isSufficient: boolean;
@@ -358,6 +409,23 @@ function unionSeconds(intervals: { start: number; end: number }[]): number {
  * condition is whether the footage is long enough to yield two cuts that are
  * not the same moment, which is a question about seconds, not about how many
  * rows the tagger happened to emit.
+ *
+ * `available x 2` is nonetheless the *theoretical* ceiling, and quoting it as
+ * the achievable one was actively harmful. `MIN_CUT_GAP_SECONDS` makes a
+ * pacing-dependent slice of it unreachable in practice: a straightforward
+ * chronological edit of one clip spends `cut + 1` seconds of timeline for every
+ * `cut` seconds of screen time, so it yields `band.max / (band.max + gap)` of
+ * theory — 88% on `slow`, 83% on `medium`, only 71% on `fast`. Measuring
+ * sufficiency against the undiscounted ceiling created a band in which a job
+ * was routed onto the strict target path while its realistic yield sat below
+ * that path's floor, so *more* footage turned a succeeding job into a failing
+ * one. The ceiling is therefore discounted here, once, and every consumer —
+ * `isSufficient`, the fallback floor, the number quoted in the prompt — gets
+ * the honest figure.
+ *
+ * A model that orders its cuts non-chronologically pays no gap at all and can
+ * beat this estimate; that is fine, because nothing is capped by it. It is only
+ * ever used as a lower bound on what to *ask* for.
  */
 function measurePool(
   pool: PoolSegment[],
@@ -378,10 +446,25 @@ function measurePool(
     (sum, ranges) => sum + unionSeconds(ranges),
     0
   );
-  // Two band-length cuts have to fit in the footage before anything can be
-  // repeated without the repeat sitting next to its original.
-  const canRepeat = availableSeconds >= 2 * band.min - 1e-9;
-  const maxAchievableSeconds = canRepeat ? availableSeconds * MAX_SEGMENT_REUSE : availableSeconds;
+  // Two band-length cuts have to fit in the footage before the pool can offer
+  // two different opening shots. Different variations may use adjacent cuts, so
+  // no gap is needed for this question — it is about how much distinct footage
+  // exists, nothing else.
+  const hasTwoDistinctCuts = availableSeconds >= 2 * band.min - 1e-9;
+
+  // Repeating a moment *within* one variation is a stricter requirement: the
+  // repeat needs another cut between it and its original, and on a single-clip
+  // pool that neighbouring cut has to be separated by the minimum gap. Without
+  // the gap term a 5s clip at `medium` claimed it could fill 8.3s when 5s is
+  // all it can legally produce, and the fallback floor became unsatisfiable.
+  const canRepeat = availableSeconds >= 2 * band.min + MIN_CUT_GAP_SECONDS - 1e-9;
+
+  // What a chronological edit actually keeps: `band.max` of screen time for
+  // every `band.max + gap` of timeline it walks through.
+  const gapEfficiency = band.max / (band.max + MIN_CUT_GAP_SECONDS);
+  const maxAchievableSeconds = canRepeat
+    ? availableSeconds * MAX_SEGMENT_REUSE * gapEfficiency
+    : availableSeconds;
 
   return {
     uniqueSegmentCount: uniqueSegments.size,
@@ -390,10 +473,14 @@ function measurePool(
     // Epsilon keeps a pool that lands exactly on the boundary out of the
     // fallback path, matching how the duration check itself rounds. Measured
     // against the *floor* of the accepted band, because that is the shortest
-    // total a sufficient pool will be allowed to produce.
+    // total a sufficient pool will be allowed to produce, and discounted by
+    // CAPACITY_SAFETY_MARGIN because committing to that floor is a one-way
+    // door: a pool that is declared sufficient and then cannot reach the floor
+    // has no fallback and fails outright.
     isSufficient:
-      maxAchievableSeconds >= targetLengthSeconds * (1 - DURATION_UNDER_TOLERANCE) - 1e-9,
-    hasTwoDistinctCuts: canRepeat,
+      maxAchievableSeconds * (1 - CAPACITY_SAFETY_MARGIN) >=
+      targetLengthSeconds * (1 - DURATION_UNDER_TOLERANCE) - 1e-9,
+    hasTwoDistinctCuts,
   };
 }
 
@@ -410,6 +497,100 @@ export function buildShortFootageWarning(
     `Only ${Math.round(availableSeconds)}s of usable footage was available, so your videos are ` +
     `shorter than the ${targetLengthSeconds}s you requested. Upload more clips for full-length videos.`
   );
+}
+
+/**
+ * Turns a validation failure into the note the next attempt is given.
+ *
+ * Built from `error.issues` rather than `ZodError.message` for two reasons the
+ * correction loop cannot work without:
+ *
+ *  - **Deduplication.** A variation with twelve identical pacing violations
+ *    used to spend the entire note repeating one sentence twelve times.
+ *  - **Round-robin across variations.** `superRefine` emits in variation order,
+ *    and `ZodError.message` runs ~290 characters per issue, so a 1500-character
+ *    note admitted roughly five issues — all of them variation 0's. A
+ *    five-variation job with a systemic problem therefore fixed variation 0,
+ *    resubmitted, saw variation 1's complaints for the first time, and ran out
+ *    of the three-attempt budget having never been told about variations 3 and
+ *    4. It could not converge however good the model was. Interleaving means
+ *    every variation contributes one problem before any contributes a second.
+ *
+ * Anything that is not a `ZodError` (a `SyntaxError` from `JSON.parse`, say)
+ * falls through to the plain description.
+ */
+/**
+ * A Zod issue, flattened to just the two fields the note needs.
+ *
+ * `invalid_union` carries its real detail in a nested `errors` array — one
+ * entry per union branch — and reports only "Invalid input" itself. The
+ * response schema *is* a union (the `{variations: [...]}` wrapper or a bare
+ * array), so without unwrapping this every structural failure would come back
+ * to the model as the single word "Invalid input" with nothing to act on.
+ */
+type FlatIssue = { path: PropertyKey[]; message: string };
+
+function flattenIssues(issues: readonly unknown[], prefix: PropertyKey[] = []): FlatIssue[] {
+  const flattened: FlatIssue[] = [];
+  for (const raw of issues) {
+    const issue = raw as { code?: string; path?: PropertyKey[]; message: string; errors?: unknown[][] };
+    const path = [...prefix, ...(issue.path ?? [])];
+    if (issue.code === 'invalid_union' && Array.isArray(issue.errors)) {
+      for (const branch of issue.errors) flattened.push(...flattenIssues(branch, path));
+      continue;
+    }
+    flattened.push({ path, message: issue.message });
+  }
+  return flattened;
+}
+
+function summarizeIssues(error: unknown, maxLength: number): string {
+  if (!(error instanceof z.ZodError)) return describeCause(error, maxLength);
+
+  // Keyed by message text, not by the full line: eight cuts breaking the pacing
+  // band by the same amount produce eight issues carrying one sentence, and
+  // saying it once (against the first offending path) is the whole of the
+  // information. Two cuts that are wrong by *different* amounts say different
+  // things and both survive.
+  const byVariation = new Map<number, Map<string, string>>();
+  for (const issue of flattenIssues(error.issues)) {
+    // `superRefine` paths are ['variations', n, ...]; anything else (a missing
+    // wrapper, a union failure) is grouped under -1 and sorts first, which is
+    // right — a whole-response problem outranks a per-variation one.
+    const variation =
+      issue.path[0] === 'variations' && typeof issue.path[1] === 'number' ? issue.path[1] : -1;
+    const location = issue.path.length > 0 ? issue.path.join('.') : 'response';
+    const message = issue.message.replace(/\s+/g, ' ').trim();
+    const lines = byVariation.get(variation) ?? new Map<string, string>();
+    if (!lines.has(message)) lines.set(message, `${location}: ${message}`);
+    byVariation.set(variation, lines);
+  }
+
+  const queues = [...byVariation.entries()]
+    .sort(([a], [b]) => a - b)
+    .map(([, lines]) => [...lines.values()]);
+  const ordered: string[] = [];
+  for (let round = 0; queues.some((queue) => queue.length > round); round++) {
+    for (const queue of queues) if (queue.length > round) ordered.push(queue[round]);
+  }
+  if (ordered.length === 0) return describeCause(error, maxLength);
+
+  // Reserve room for the tail so the stated cap is the real one.
+  const budget = ordered.length > 1 ? maxLength - CORRECTION_NOTE_TAIL_BUDGET : maxLength;
+  const chosen: string[] = [];
+  let used = 0;
+  for (const line of ordered) {
+    const cost = chosen.length === 0 ? line.length : line.length + CORRECTION_NOTE_SEPARATOR.length;
+    if (used + cost > budget) break;
+    chosen.push(line);
+    used += cost;
+  }
+  // A single issue longer than the whole budget still has to say something.
+  if (chosen.length === 0) return describeCause(new Error(ordered[0]), maxLength);
+
+  const note = chosen.join(CORRECTION_NOTE_SEPARATOR);
+  const omitted = ordered.length - chosen.length;
+  return omitted > 0 ? `${note} (and ${omitted} more problems)` : note;
 }
 
 /**
@@ -474,9 +655,10 @@ function buildValidator(context: ValidationContext) {
             code: 'custom',
             path: [...variationPath, 'segments'],
             message:
-              `total duration ${totalSeconds}s wastes the available footage: this job only has ` +
-              `${footage.availableSeconds}s of distinct footage, so aim for about ` +
-              `${footage.maxAchievableSeconds}s rather than the ${targetLengthSeconds}s target`,
+              `total duration ${round2(totalSeconds)}s wastes the available footage: this job ` +
+              `only has ${round2(footage.availableSeconds)}s of distinct footage, so aim for ` +
+              `about ${round2(footage.maxAchievableSeconds)}s rather than the ` +
+              `${targetLengthSeconds}s target`,
           });
         }
       }
@@ -517,6 +699,24 @@ function buildValidator(context: ValidationContext) {
               "sizingOverlayText must not contain any height, weight or size measurement; write only a short lead-in phrase, the creator's real measurements are appended automatically",
           });
         }
+      }
+
+      // The hook is burned onto the video exactly like the overlay is, so the
+      // same rule has to apply to it. "I'm 5'6" and 140lb and this fits
+      // perfectly" is a completely natural UGC hook for a model to write, and
+      // it is precisely the harm the overlay guard exists to prevent: invented
+      // body stats on a real creator's published video. Unlike the overlay
+      // check this is unconditional — the hook is rendered whether or not the
+      // job enabled the sizing overlay.
+      if (FABRICATED_MEASUREMENT.test(variation.hookText)) {
+        ctx.addIssue({
+          code: 'custom',
+          path: [...variationPath, 'hookText'],
+          message:
+            'hookText must not contain any height, weight or size measurement: you do not know ' +
+            "the creator's real numbers and inventing them is not acceptable. Rewrite the hook " +
+            'without any figures',
+        });
       }
 
       variation.segments.forEach((segment, segmentIndex) => {
@@ -620,6 +820,35 @@ function buildValidator(context: ValidationContext) {
     // distinct moments, and a chain in which each variation differs from the
     // one before it is already the thing being asked for.
     if (footage.hasTwoDistinctCuts) {
+      // Neighbour-only comparison is cheap and catches the observed defect, but
+      // it is trivially satisfiable by an alternating chain: ABAB, BABA, ABAB,
+      // BABA, ABAB has every neighbouring pair differing in every position
+      // while the creator receives three identical videos and two identical
+      // videos. An exact-duplicate check across *all* pairs closes that without
+      // the O(n^2) difficulty of a full all-pairs similarity rule: it costs one
+      // string per variation and can only ever reject sequences that are
+      // literally the same edit.
+      const firstUseOfSequence = new Map<string, number>();
+      value.variations.forEach((variation, index) => {
+        const sequence = variation.segments
+          .map((cut) => `${cut.rawClipId}|${cut.startSeconds}|${cut.endSeconds}`)
+          .join(',');
+        const original = firstUseOfSequence.get(sequence);
+        if (original === undefined) {
+          firstUseOfSequence.set(sequence, index);
+          return;
+        }
+        ctx.addIssue({
+          code: 'custom',
+          path: ['variations', index, 'segments'],
+          message:
+            `this variation uses exactly the same cut sequence as variation ${original + 1}, so ` +
+            `the creator would receive two identical videos with different hook text. Every ` +
+            `variation must be a different edit from every other one, not just from the one ` +
+            `before it: change the order, the subdivision boundaries and which moments are used`,
+        });
+      });
+
       for (let index = 1; index < value.variations.length; index++) {
         const previous = value.variations[index - 1].segments;
         const current = value.variations[index].segments;
@@ -723,9 +952,9 @@ Add up your cut durations: every variation should land between ${aimFloor}s and 
 A total below ${durationFloor}s or above ${durationCeiling}s is rejected outright, but do not aim for ${durationFloor}s -
 the creator asked for ${job.lengthSeconds}s, and a variation that stops short is a worse edit, not a safer one.
 If your total is under ${aimFloor}s, add another cut before you answer.`
-    : `There is only ${footage.availableSeconds}s of distinct footage in the pool, which cannot fill the
+    : `There is only ${round2(footage.availableSeconds)}s of distinct footage in the pool, which cannot fill the
 ${job.lengthSeconds}s target within the reuse limit below. Do NOT pad the video by repeating segments.
-Aim instead for a total of about ${footage.maxAchievableSeconds}s per variation - a shorter video is
+Aim instead for a total of about ${round2(footage.maxAchievableSeconds)}s per variation - a shorter video is
 much better than a repetitive one.`;
 
   // Pacing is the product: constant clip changes are what makes this read as a
@@ -800,6 +1029,9 @@ the end of that clip's listed footage.
 
 Hook text should be adapted from this style library to fit the product (not copied verbatim):
 ${JSON.stringify(HOOK_STYLE_LIBRARY)}
+Write hookText as ONE short on-screen line, under ${MAX_HOOK_LENGTH} characters. It must never contain a
+height, weight or size measurement - you do not know the creator's real numbers, and inventing them
+would print made-up body stats on a real person's published video.
 
 ${sizingInstruction}
 ${correctionNote ? `\nYour previous response was invalid: ${correctionNote}\nPlease fix it.\n` : ''}
@@ -906,14 +1138,34 @@ export async function planJob(
         DIRECTOR_RETRY
       );
 
+      // A response the model never got to finish is not a wrong answer, and
+      // must not be treated as one. Without this, hitting the output-token
+      // limit surfaces as `JSON.parse`'s "Unexpected end of JSON input", which
+      // becomes a correction note telling the model to fix a shape problem it
+      // never had — three times, ending in a misleading failure reason. Bailing
+      // out with the real reason is the only honest answer: re-asking the same
+      // question would truncate at exactly the same place.
+      const finishReason = response.candidates?.[0]?.finishReason;
+      if (finishReason && finishReason !== FinishReason.STOP) {
+        return {
+          success: false,
+          error:
+            finishReason === FinishReason.MAX_TOKENS
+              ? 'Gemini ran out of output tokens before it finished the edit plan ' +
+                '(finishReason MAX_TOKENS). Ask for fewer variations, a shorter video, or a ' +
+                'slower pacing preset, or raise the model\'s output token limit.'
+              : `Gemini stopped before finishing the edit plan (finishReason ${finishReason})`,
+        };
+      }
+
       try {
         parsed = validator.parse(JSON.parse(response.text ?? ''));
         break;
       } catch (validationError) {
-        // Feed the specific reason back into the next attempt: a blind re-roll
+        // Feed the specific reasons back into the next attempt: a blind re-roll
         // would very likely repeat the same mistake.
         lastFailure = validationError;
-        correctionNote = describeCause(validationError, MAX_CORRECTION_NOTE_LENGTH);
+        correctionNote = summarizeIssues(validationError, MAX_CORRECTION_NOTE_LENGTH);
         parsed = undefined;
       }
     }
@@ -921,7 +1173,13 @@ export async function planJob(
     if (!parsed) {
       return {
         success: false,
-        error: `Gemini did not produce a valid edit plan after ${MAX_ATTEMPTS} attempts: ${describeCause(lastFailure)}`,
+        // Summarised the same way as the correction note, so the stored reason
+        // names the rules that were actually broken rather than an excerpt of
+        // Zod's JSON blob.
+        error: `Gemini did not produce a valid edit plan after ${MAX_ATTEMPTS} attempts: ${summarizeIssues(
+          lastFailure,
+          MAX_CAUSE_LENGTH
+        )}`,
       };
     }
 

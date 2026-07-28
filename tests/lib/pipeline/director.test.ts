@@ -806,7 +806,9 @@ describe('planJob', () => {
 
       const prompt = promptTextOfCall(0);
       expect(prompt).toContain('only 7s of distinct footage');
-      expect(prompt).toContain('about 14s per variation');
+      // 7s x 2 uses, discounted for the second thrown away at every same-clip
+      // splice: the number the model is asked for is one it can actually hit.
+      expect(prompt).toContain('about 11.67s per variation');
       expect(prompt).toContain('shorter video is');
       // The unreachable rule must not also be asserted, or the model is being
       // told to satisfy two contradictory instructions.
@@ -1447,6 +1449,368 @@ describe('planJob', () => {
     });
   });
 
+  describe('fabricated body measurements in the hook', () => {
+    // The overlay guard has always covered sizingOverlayText. hookText is burned
+    // onto the video just as visibly and was completely unvalidated - and
+    // "I'm 5'6\" and 140lb and this fits perfectly" is a *natural* UGC hook for
+    // a model to write. Height, weight and size are creator-entered stored
+    // fields precisely so that AI-invented body stats can never reach a real
+    // creator's published video.
+    function hookResponse(hookText: string) {
+      return geminiResponse([
+        { ...validVariationOne(), hookText },
+        validVariationTwo(),
+      ]);
+    }
+
+    it('rejects the natural fabricated-measurement hook the guard exists for', async () => {
+      mockGenerateContent.mockResolvedValue(
+        hookResponse('I\'m 5\'6" and 140lb and this fits perfectly')
+      );
+
+      const result = await planJob(jobId);
+
+      expect(result.success).toBe(false);
+      expect(mockGenerateContent).toHaveBeenCalledTimes(3);
+      if (!result.success) expect(result.error).toContain('hookText');
+      // The rule has to reach the model, not merely fail the job.
+      expect(promptTextOfCall(1)).toContain('previous response was invalid');
+      expect(promptTextOfCall(1)).toContain('measurement');
+
+      const saved = await db.select().from(editPlans).where(eq(editPlans.jobId, jobId));
+      expect(saved).toHaveLength(0);
+    });
+
+    it.each([
+      ['metric height', 'This hoodie on my 172 cm frame is unreal'],
+      ['metric weight', 'At about 65kg this is the fit I wanted'],
+      ['imperial height', 'For my 5 ft 8 in frame this is perfect'],
+      ['spelled-out weight', 'Nobody told me 165 pounds could look this good'],
+    ])('rejects a hook containing a %s', async (_label, hookText) => {
+      mockGenerateContent.mockResolvedValue(hookResponse(hookText));
+
+      const result = await planJob(jobId);
+
+      expect(result.success).toBe(false);
+      const saved = await db.select().from(editPlans).where(eq(editPlans.jobId, jobId));
+      expect(saved).toHaveLength(0);
+    });
+
+    it('applies the rule even when the job has no sizing overlay at all', async () => {
+      // The main job runs with sizingOverlayEnabled false. The hook is rendered
+      // either way, so the guard must not be conditional on the overlay.
+      const [job] = await db.select().from(jobs).where(eq(jobs.id, jobId));
+      expect(job.sizingOverlayEnabled).toBe(false);
+
+      mockGenerateContent.mockResolvedValue(hookResponse('Wearing 140 lbs of pure comfort'));
+
+      const result = await planJob(jobId);
+
+      expect(result.success).toBe(false);
+    });
+
+    it('still accepts a hook whose number is not a measurement', async () => {
+      // The guard keys on digit-then-unit, so the hook library's own
+      // "3 reasons I'm obsessed with this [product]" style stays available.
+      mockGenerateContent.mockResolvedValue(
+        hookResponse("3 reasons I'm obsessed with this Cozy Hoodie")
+      );
+
+      const result = await planJob(jobId);
+
+      expect(result).toEqual({ success: true, variationCount: 2, warning: null });
+      expect(mockGenerateContent).toHaveBeenCalledTimes(1);
+    });
+
+    it('rejects a hook too long for Stage 3 to render', async () => {
+      // Nothing bounded hook length before; an unbounded hook is unlayoutable
+      // on a 9:16 frame rather than merely ugly.
+      mockGenerateContent.mockResolvedValue(hookResponse('Cozy Hoodie '.repeat(20)));
+
+      const result = await planJob(jobId);
+
+      expect(result.success).toBe(false);
+      if (!result.success) expect(result.error).toContain('hookText');
+    });
+
+    it('tells the model the hook rules up front', async () => {
+      mockGenerateContent.mockResolvedValue(validResponse());
+
+      await planJob(jobId);
+
+      const prompt = promptTextOfCall(0);
+      expect(prompt).toContain('under 120 characters');
+      expect(prompt).toContain('never contain a');
+      expect(prompt).toContain('height, weight or size measurement');
+    });
+  });
+
+  describe('every variation must be a different edit from every other one', () => {
+    /** Three cuts sequences that differ from each other in every position. */
+    const editA = () => [segA(0, 4), segB(0, 4), segA(4, 8), segB(5, 9)];
+    const editB = () => [segB(0, 4), segA(0, 4), segB(5, 9), segA(4, 8)];
+    const editC = () => [segA(4, 8), segB(6, 10), segA(0, 4), segB(0, 4)];
+
+    /** A three-variation job drawing on the same two-clip pool. */
+    async function createThreeVariationJob() {
+      const threeJob = await createJob({
+        creatorId,
+        productName: 'Cozy Hoodie',
+        sizingOverlayEnabled: false,
+        lengthSeconds: 15,
+        pacing: 'medium',
+        variationCount: 3,
+        clips: [
+          { storageKey: 'clips/three-a.mp4', originalFilename: 'three-a.mp4' },
+          { storageKey: 'clips/three-b.mp4', originalFilename: 'three-b.mp4' },
+        ],
+      });
+      const clips = await db.select().from(rawClips).where(eq(rawClips.jobId, threeJob.id));
+      await db.insert(segments).values([
+        { rawClipId: clips[0].id, startSeconds: '0', endSeconds: '8', contentTag: 'whole-clip', qualityTag: 'high' },
+        { rawClipId: clips[1].id, startSeconds: '0', endSeconds: '10', contentTag: 'whole-clip', qualityTag: 'medium' },
+      ]);
+      return { id: threeJob.id, clipAId: clips[0].id, clipBId: clips[1].id };
+    }
+
+    /** Rewrites a cut sequence built from the shared pool onto another job's clips. */
+    function onto(cuts: SegmentSelection[], mapping: { clipAId: string; clipBId: string }) {
+      return cuts.map((cut) => ({
+        ...cut,
+        rawClipId: cut.rawClipId === clipAId ? mapping.clipAId : mapping.clipBId,
+      }));
+    }
+
+    it('rejects an alternating chain in which two variations are identical', async () => {
+      // The hole neighbour-only distinctness leaves wide open: ABAB / BABA /
+      // ABAB passes every neighbouring comparison in all positions, and the
+      // creator still receives two byte-identical videos.
+      const three = await createThreeVariationJob();
+      mockGenerateContent.mockResolvedValue(
+        geminiResponse([
+          variation(onto(editA(), three), HOOK_ONE),
+          variation(onto(editB(), three), HOOK_TWO),
+          variation(onto(editA(), three), 'Nobody told me this Cozy Hoodie would look this good'),
+        ])
+      );
+
+      const result = await planJob(three.id);
+
+      expect(result.success).toBe(false);
+      expect(mockGenerateContent).toHaveBeenCalledTimes(3);
+      if (!result.success) expect(result.error).toContain('same cut sequence as variation 1');
+      expect(promptTextOfCall(1)).toContain('two identical videos');
+
+      const saved = await db.select().from(editPlans).where(eq(editPlans.jobId, three.id));
+      expect(saved).toHaveLength(0);
+    });
+
+    it('accepts three variations that are all genuinely different edits', async () => {
+      // Proves the all-pairs rule is an exact-duplicate check and nothing more:
+      // it must not make three-variation jobs harder to satisfy.
+      const three = await createThreeVariationJob();
+      mockGenerateContent.mockResolvedValue(
+        geminiResponse([
+          variation(onto(editA(), three), HOOK_ONE),
+          variation(onto(editB(), three), HOOK_TWO),
+          variation(onto(editC(), three), 'Nobody told me this Cozy Hoodie would look this good'),
+        ])
+      );
+
+      const result = await planJob(three.id);
+
+      expect(result).toEqual({ success: true, variationCount: 3, warning: null });
+      expect(mockGenerateContent).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not apply the rule to a pool too small to offer a second edit', async () => {
+      // Same satisfiability guard as the neighbour rules: a 3s clip can only
+      // produce one cut, so two identical variations are the best it can do.
+      const tinyJob = await createJob({
+        creatorId,
+        productName: 'Cozy Hoodie',
+        sizingOverlayEnabled: false,
+        lengthSeconds: 15,
+        pacing: 'slow',
+        variationCount: 2,
+        clips: [{ storageKey: 'clips/tiny-dup.mp4', originalFilename: 'tiny-dup.mp4' }],
+      });
+      const [clip] = await db.select().from(rawClips).where(eq(rawClips.jobId, tinyJob.id));
+      await db.insert(segments).values([
+        { rawClipId: clip.id, startSeconds: '0', endSeconds: '3', contentTag: 'whole-clip', qualityTag: 'high' },
+      ]);
+      const onlyCut = { rawClipId: clip.id, startSeconds: 0, endSeconds: 3 };
+      mockGenerateContent.mockResolvedValue(
+        geminiResponse([
+          { segments: [onlyCut], hookText: HOOK_ONE, sizingOverlayText: null, sizingOverlayPlacement: null },
+          { segments: [onlyCut], hookText: HOOK_TWO, sizingOverlayText: null, sizingOverlayPlacement: null },
+        ])
+      );
+
+      const result = await planJob(tinyJob.id);
+
+      expect(result.success).toBe(true);
+      expect(mockGenerateContent).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('correction notes a multi-variation job can converge on', () => {
+    let noteJobId: string;
+    let noteClipId: string;
+
+    beforeEach(async () => {
+      const noteJob = await createJob({
+        creatorId,
+        productName: 'Cozy Hoodie',
+        sizingOverlayEnabled: false,
+        lengthSeconds: 30,
+        pacing: 'medium',
+        variationCount: 5,
+        clips: [{ storageKey: 'clips/note.mp4', originalFilename: 'note.mp4' }],
+      });
+      noteJobId = noteJob.id;
+      const [clip] = await db.select().from(rawClips).where(eq(rawClips.jobId, noteJobId));
+      noteClipId = clip.id;
+      await db.insert(segments).values([
+        { rawClipId: noteClipId, startSeconds: '0', endSeconds: '30', contentTag: 'whole-clip', qualityTag: 'high' },
+      ]);
+    });
+
+    function cutsOf(ranges: number[][]) {
+      return ranges.map(([startSeconds, endSeconds]) => ({
+        rawClipId: noteClipId,
+        startSeconds,
+        endSeconds,
+      }));
+    }
+
+    /**
+     * Five variations with a *systemic* problem, plus one variation carrying a
+     * violation repeated eight times. This is the exact shape that could not
+     * converge: `ZodError.message` runs ~290 chars an issue, `superRefine`
+     * emits in variation order, and the note is capped, so variation 0's eight
+     * repeats consumed the entire budget on every one of the three attempts and
+     * variations 1-4 were never mentioned at all.
+     */
+    function unconvergeableResponse() {
+      // Eight 6s cuts: over the 5s medium ceiling, and every one produces the
+      // identical sentence. 48s also misses the duration window.
+      const overlong = [
+        [0, 6],
+        [7, 13],
+        [14, 20],
+        [21, 27],
+      ];
+      const short = (offset: number) => [
+        [offset, offset + 4],
+        [offset + 5, offset + 9],
+        [offset + 10, offset + 14],
+        [offset + 15, offset + 19],
+      ];
+      return geminiResponse([
+        {
+          segments: cutsOf([...overlong, ...overlong]),
+          hookText: HOOK_ONE,
+          sizingOverlayText: null,
+          sizingOverlayPlacement: null,
+        },
+        ...[0, 2, 4, 6].map((offset, index) => ({
+          segments: cutsOf(short(offset)),
+          hookText: `${HOOK_TWO} ${index}`,
+          sizingOverlayText: null,
+          sizingOverlayPlacement: null,
+        })),
+      ]);
+    }
+
+    it('gives every variation a voice in the correction note', async () => {
+      mockGenerateContent.mockResolvedValue(unconvergeableResponse());
+
+      const result = await planJob(noteJobId);
+
+      expect(result.success).toBe(false);
+      const note = promptTextOfCall(1);
+      // Every variation must be named, or the model fixes variation 0, is shown
+      // variation 1 for the first time, and runs out of attempts.
+      for (const index of [0, 1, 2, 3, 4]) {
+        expect(note).toContain(`variations.${index}.`);
+      }
+    });
+
+    it('says a repeated violation once instead of eight times', async () => {
+      mockGenerateContent.mockResolvedValue(unconvergeableResponse());
+
+      await planJob(noteJobId);
+
+      const note = promptTextOfCall(1);
+      const repeats = note.split('this cut is 6s long').length - 1;
+      expect(repeats).toBe(1);
+    });
+
+    it('keeps the note inside its length cap', async () => {
+      mockGenerateContent.mockResolvedValue(unconvergeableResponse());
+
+      await planJob(noteJobId);
+
+      const prompt = promptTextOfCall(1);
+      const note = prompt.slice(
+        prompt.indexOf('previous response was invalid:'),
+        prompt.indexOf('\nPlease fix it.')
+      );
+      expect(note.length).toBeLessThan(1600);
+    });
+  });
+
+  describe('a response the model never finished', () => {
+    it('fails with the real reason instead of a bogus schema correction', async () => {
+      // Truncation at the output-token limit surfaces as "Unexpected end of
+      // JSON input", which used to become a correction note telling the model
+      // to fix a shape problem it never had - three times, ending in a
+      // misleading failure reason.
+      mockGenerateContent.mockResolvedValue({
+        text: '{"variations": [{"segments": [{"rawClipId": "abc", "startSec',
+        candidates: [{ finishReason: 'MAX_TOKENS' }],
+      });
+
+      const result = await planJob(jobId);
+
+      expect(result.success).toBe(false);
+      if (!result.success) {
+        expect(result.error).toContain('MAX_TOKENS');
+        expect(result.error).not.toContain('JSON');
+      }
+      // Re-asking the same question truncates in exactly the same place, so
+      // spending the correction budget on it is pure waste.
+      expect(mockGenerateContent).toHaveBeenCalledTimes(1);
+      const saved = await db.select().from(editPlans).where(eq(editPlans.jobId, jobId));
+      expect(saved).toHaveLength(0);
+    });
+
+    it('reports any other early stop accurately too', async () => {
+      mockGenerateContent.mockResolvedValue({
+        text: '',
+        candidates: [{ finishReason: 'SAFETY' }],
+      });
+
+      const result = await planJob(jobId);
+
+      expect(result.success).toBe(false);
+      if (!result.success) expect(result.error).toContain('SAFETY');
+      expect(mockGenerateContent).toHaveBeenCalledTimes(1);
+    });
+
+    it('is unbothered by a normal STOP finish reason', async () => {
+      mockGenerateContent.mockResolvedValue({
+        ...validResponse(),
+        candidates: [{ finishReason: 'STOP' }],
+      });
+
+      const result = await planJob(jobId);
+
+      expect(result).toEqual({ success: true, variationCount: 2, warning: null });
+    });
+  });
+
   describe('transient Gemini failures', () => {
     /** The 503 that the live run hit; see tests/lib/pipeline/retry.test.ts. */
     function highDemand503() {
@@ -1516,6 +1880,199 @@ describe('planJob', () => {
       expect(result.success).toBe(false);
       expect(mockGenerateContent).toHaveBeenCalledTimes(1);
       if (!result.success) expect(result.error).toContain('is not found');
+    });
+  });
+
+  describe('more footage must never turn a succeeding job into a failing one', () => {
+    // The defect this block exists for: `isSufficient` measured the pool
+    // against `available x 2`, the absolute theoretical ceiling, while
+    // MIN_CUT_GAP_SECONDS made 12-29% of it structurally unreachable. A job
+    // whose theoretical ceiling grazed the accepted floor was routed onto the
+    // strict [0.9T, 1.15T] path with no fallback, and then could not reach it.
+    // Worked example: a 30s `fast` job with a single 14s clip measured 28s
+    // achievable, was held to a 27s floor, and could realistically produce
+    // ~20s - three rejected attempts and a hard failure. Dropping the clip to
+    // 13s made the same job *succeed*, via the fallback path.
+    const TARGET_SECONDS = 30;
+    const MIN_GAP_SECONDS = 1;
+    const BANDS = {
+      slow: { min: 3.75, max: 7.5 },
+      medium: { min: 2.25, max: 5 },
+      fast: { min: 0.75, max: 2.5 },
+    } as const;
+
+    /**
+     * The best plan a straightforward chronological editor can build from one
+     * clip: tile the clip with equal cuts separated by the minimum gap, choose
+     * the tile size that yields the most screen time, then play the whole
+     * tiling twice (the pass boundary jumps backwards, so it needs no gap) and
+     * stop on the target.
+     *
+     * Deliberately *not* superhuman. A model that orders its cuts
+     * non-chronologically pays no gap cost at all and can do better; this is
+     * the naive-but-competent behaviour the live runs actually exhibited, and
+     * the floor the validator sets has to be reachable by it.
+     */
+    function bestChronologicalPlan(
+      clipId: string,
+      clipSeconds: number,
+      pacing: keyof typeof BANDS
+    ): SegmentSelection[] {
+      const band = BANDS[pacing];
+      let best: { tiles: number; cut: number; screen: number } | undefined;
+      const maxTiles = Math.floor((clipSeconds + MIN_GAP_SECONDS) / (band.min + MIN_GAP_SECONDS));
+      for (let tiles = 1; tiles <= maxTiles; tiles++) {
+        // Floored to 3dp so the last tile provably ends inside the footage:
+        // the clip-bounds check has no epsilon.
+        const raw = Math.min(band.max, (clipSeconds - (tiles - 1) * MIN_GAP_SECONDS) / tiles);
+        const cut = Math.floor(raw * 1000) / 1000;
+        if (cut < band.min - 1e-9) continue;
+        const screen = tiles >= 2 ? 2 * tiles * cut : cut;
+        if (!best || screen > best.screen) best = { tiles, cut, screen };
+      }
+
+      // A clip too short to yield even one band-length cut still yields one
+      // cut; the validator exempts such clips from the pacing floor.
+      const tiling = best
+        ? Array.from({ length: best.tiles }, (_, index) => {
+            const start = index * (best!.cut + MIN_GAP_SECONDS);
+            return [start, start + best!.cut] as const;
+          })
+        : ([[0, Math.min(clipSeconds, band.max)]] as const as readonly (readonly [number, number])[]);
+
+      // One tile cannot be repeated: its second use would sit next to its first.
+      const sequence = tiling.length >= 2 ? [...tiling, ...tiling] : [...tiling];
+
+      const cuts: SegmentSelection[] = [];
+      let total = 0;
+      for (const [start, end] of sequence) {
+        if (total >= TARGET_SECONDS - 1e-9) break;
+        const tileLength = end - start;
+        const remaining = TARGET_SECONDS - total;
+        const length =
+          remaining < tileLength
+            ? Math.min(tileLength, Math.max(remaining, band.min))
+            : tileLength;
+        cuts.push({ rawClipId: clipId, startSeconds: start, endSeconds: start + length });
+        total += length;
+      }
+      return cuts;
+    }
+
+    /** Footage lengths bracketing every pacing preset's sufficiency crossover. */
+    const CLIP_LENGTHS = [4, 8, 12, 13, 14, 16, 18, 19, 20, 22, 24, 27, 30];
+
+    async function sweep(pacing: keyof typeof BANDS) {
+      const sweepJob = await createJob({
+        creatorId,
+        productName: 'Cozy Hoodie',
+        sizingOverlayEnabled: false,
+        lengthSeconds: TARGET_SECONDS,
+        pacing,
+        variationCount: 1,
+        clips: [{ storageKey: `clips/sweep-${pacing}.mp4`, originalFilename: 'sweep.mp4' }],
+      });
+      const [clip] = await db.select().from(rawClips).where(eq(rawClips.jobId, sweepJob.id));
+
+      const outcomes: { clipSeconds: number; success: boolean; error?: string }[] = [];
+      for (const clipSeconds of CLIP_LENGTHS) {
+        await db.delete(segments).where(eq(segments.rawClipId, clip.id));
+        await db.insert(segments).values([
+          {
+            rawClipId: clip.id,
+            startSeconds: '0',
+            endSeconds: String(clipSeconds),
+            contentTag: 'whole-clip',
+            qualityTag: 'high',
+          },
+        ]);
+        mockGenerateContent.mockReset();
+        mockGenerateContent.mockResolvedValue(
+          geminiResponse([
+            {
+              segments: bestChronologicalPlan(clip.id, clipSeconds, pacing),
+              hookText: HOOK_ONE,
+              sizingOverlayText: null,
+              sizingOverlayPlacement: null,
+            },
+          ])
+        );
+
+        const result = await planJob(sweepJob.id);
+        outcomes.push({
+          clipSeconds,
+          success: result.success,
+          error: result.success ? undefined : result.error,
+        });
+      }
+      return outcomes;
+    }
+
+    it.each(['fast', 'medium', 'slow'] as const)(
+      'never regresses from success to failure as footage grows, at %s pacing',
+      async (pacing) => {
+        const outcomes = await sweep(pacing);
+
+        const firstSuccess = outcomes.findIndex((outcome) => outcome.success);
+        // A vacuous pass (nothing ever succeeds) would satisfy monotonicity, so
+        // require the sweep to actually work somewhere.
+        expect(firstSuccess).toBeGreaterThanOrEqual(0);
+
+        const regressions = outcomes
+          .slice(firstSuccess)
+          .filter((outcome) => !outcome.success)
+          .map((outcome) => `${outcome.clipSeconds}s: ${outcome.error}`);
+        expect(regressions).toEqual([]);
+      },
+      120_000
+    );
+
+    it('routes the 14s-clip fast job to the fallback instead of failing it', async () => {
+      // The brief's worked example, pinned by its own numbers. On the old code
+      // 14s measured 28s achievable, cleared the 27s sufficiency bar, and then
+      // failed all three attempts against a 27s floor it could not reach - while
+      // 13s (26s achievable, below the bar) succeeded via the fallback.
+      const fastJob = await createJob({
+        creatorId,
+        productName: 'Cozy Hoodie',
+        sizingOverlayEnabled: false,
+        lengthSeconds: 30,
+        pacing: 'fast',
+        variationCount: 1,
+        clips: [{ storageKey: 'clips/fast-14.mp4', originalFilename: 'fast-14.mp4' }],
+      });
+      const [clip] = await db.select().from(rawClips).where(eq(rawClips.jobId, fastJob.id));
+
+      for (const clipSeconds of [13, 14]) {
+        await db.delete(segments).where(eq(segments.rawClipId, clip.id));
+        await db.insert(segments).values([
+          {
+            rawClipId: clip.id,
+            startSeconds: '0',
+            endSeconds: String(clipSeconds),
+            contentTag: 'whole-clip',
+            qualityTag: 'high',
+          },
+        ]);
+        mockGenerateContent.mockReset();
+        mockGenerateContent.mockResolvedValue(
+          geminiResponse([
+            {
+              segments: bestChronologicalPlan(clip.id, clipSeconds, 'fast'),
+              hookText: HOOK_ONE,
+              sizingOverlayText: null,
+              sizingOverlayPlacement: null,
+            },
+          ])
+        );
+
+        const result = await planJob(fastJob.id);
+
+        expect(result.success).toBe(true);
+        // The honest outcome: a short video plus a warning, not a hard failure.
+        if (result.success) expect(result.warning).toContain('Upload more clips');
+        expect(mockGenerateContent).toHaveBeenCalledTimes(1);
+      }
     });
   });
 });
