@@ -2,15 +2,17 @@ import { z } from 'zod';
 import { eq, inArray } from 'drizzle-orm';
 import { db } from '@/db/client';
 import { jobs, rawClips, segments, editPlans, creators } from '@/db/schema';
+import { getEnvWithDefault } from '@/lib/env';
 import { getGeminiClient } from '@/lib/gemini/client';
 import { HOOK_STYLE_LIBRARY } from '@/lib/pipeline/hookLibrary';
 import { describeCause } from '@/lib/pipeline/errors';
 import { withTransientRetry, type TransientRetryOptions } from '@/lib/pipeline/retry';
 
 // Pro models (2.5-pro, 3.x-pro) return 429 quota-exceeded on the free API tier,
-// so the director runs on Flash too. Revisit if plan quality proves insufficient
-// and billing is enabled — this is the step that would benefit most from Pro.
-const DIRECTOR_MODEL = 'gemini-3.6-flash';
+// so the director runs on Flash too. Overridable so a Pro model can be selected
+// once billing is enabled without a code change — this is the step that would
+// benefit most from Pro, since it reasons against several hard constraints at once.
+const DIRECTOR_MODEL = getEnvWithDefault('GEMINI_DIRECTOR_MODEL', 'gemini-3.6-flash');
 
 // One initial call plus two correction retries, as specified for this step.
 // This budget is for *validation* failures only: a 503 is not the model getting

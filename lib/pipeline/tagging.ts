@@ -4,15 +4,17 @@ import { FileState, type GoogleGenAI } from '@google/genai';
 import { db } from '@/db/client';
 import { rawClips, segments } from '@/db/schema';
 import { getClipBuffer } from '@/lib/storage';
+import { getEnvWithDefault } from '@/lib/env';
 import { getGeminiClient } from '@/lib/gemini/client';
 import { describeCause } from '@/lib/pipeline/errors';
 import { withTransientRetry, type TransientRetryOptions } from '@/lib/pipeline/retry';
 
-// gemini-2.5-flash was retired for new API accounts ("no longer available to
-// new users") and the 2.5/3.x Pro models return 429 quota-exceeded on the free
-// tier, so both pipeline steps run on a current Flash model. Verified working
-// against the live API before being chosen.
-const TAGGING_MODEL = 'gemini-3.6-flash';
+// Overridable because model availability is genuinely volatile per account:
+// gemini-2.5-flash was retired for new API accounts mid-build, Pro models are
+// quota-blocked on the free tier, and the free tier's 20-requests-per-day cap
+// is *per model*, so switching models is a normal operational move rather than
+// a code change. Default is the model verified working against the live API.
+const TAGGING_MODEL = getEnvWithDefault('GEMINI_TAGGING_MODEL', 'gemini-3.6-flash');
 
 // How long to wait for Gemini to finish processing an uploaded video before
 // giving up: 30 polls x 2s = up to ~60s.
