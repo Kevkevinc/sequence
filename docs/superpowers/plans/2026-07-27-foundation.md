@@ -312,18 +312,20 @@ git commit -m "feat: add database schema for creators, jobs, and raw clips"
 
 ## Task 3: Clerk auth + creator auto-provisioning
 
+> **Deviation from original plan (2026-07-27):** at the human's request, the generic Clerk plumbing (installing `@clerk/nextjs`, wrapping the app in `ClerkProvider`, route protection, sign-in/sign-up pages) was done by running Clerk's own official CLI (`clerk init`) instead of hand-written per the original Steps 1, 6, and 7 below. That CLI created **`proxy.ts`** (not `middleware.ts` — this is current Next.js/Clerk convention) with a matcher that covers the whole app, and routes are **public by default** under this model (no `auth.protect()` calls exist yet). This is fine for V1: every data-touching API route in this plan (`/api/profile`, `/api/jobs`, `/api/uploads/presign`) already manually checks `const { userId } = await auth(); if (!userId) return 401` before doing anything, so there is no unauthenticated access to data even though the page routes themselves aren't gated at the proxy level. Steps 6 and 7 below are struck out as already done. The remaining steps — the webhook and the creator repository — are Clerk-CLI-agnostic application logic and still need to be built exactly as written.
+
 **Files:**
-- Modify: `app/layout.tsx`
-- Create: `middleware.ts`, `db/repositories/creators.ts`, `app/api/webhooks/clerk/route.ts`
+- ~~Modify: `app/layout.tsx`~~ (done via `clerk init`)
+- Create: `db/repositories/creators.ts`, `app/api/webhooks/clerk/route.ts`
 - Test: `tests/db/repositories/creators.test.ts`
 
 **Interfaces:**
 - Consumes: `db`, `creators` (Task 2), `getRequiredEnv` (Task 1)
 - Produces: `createCreatorIfNotExists(clerkUserId: string): Promise<Creator>`, `getCreatorByClerkId(clerkUserId: string): Promise<Creator | undefined>` — used by Task 4 (profile) and Task 6 (job creation).
 
-- [ ] **Step 1: Install Clerk and svix (webhook verification)**
+- [ ] **Step 1: Install svix (webhook verification) — `@clerk/nextjs` is already installed**
 
-Run: `npm install @clerk/nextjs svix`
+Run: `npm install svix`
 
 - [ ] **Step 2: Write the failing repository test**
 
@@ -393,42 +395,9 @@ export async function getCreatorByClerkId(clerkUserId: string) {
 Run: `npm test -- tests/db/repositories/creators.test.ts`
 Expected: PASS (2 tests)
 
-- [ ] **Step 6: Wrap the app in `ClerkProvider`**
+- [x] ~~Step 6: Wrap the app in `ClerkProvider`~~ — already done, see `app/layout.tsx` (commit `7c89c45`)
 
-```tsx
-// app/layout.tsx
-import { ClerkProvider } from '@clerk/nextjs';
-import './globals.css';
-
-export default function RootLayout({ children }: { children: React.ReactNode }) {
-  return (
-    <ClerkProvider>
-      <html lang="en">
-        <body>{children}</body>
-      </html>
-    </ClerkProvider>
-  );
-}
-```
-
-- [ ] **Step 7: Add middleware to protect `/profile` and `/jobs`**
-
-```typescript
-// middleware.ts
-import { clerkMiddleware, createRouteMatcher } from '@clerk/nextjs/server';
-
-const isProtectedRoute = createRouteMatcher(['/profile(.*)', '/jobs(.*)']);
-
-export default clerkMiddleware(async (auth, req) => {
-  if (isProtectedRoute(req)) {
-    await auth.protect();
-  }
-});
-
-export const config = {
-  matcher: ['/((?!_next|.*\\..*).*)', '/(api|trpc)(.*)'],
-};
-```
+- [x] ~~Step 7: Add middleware to protect `/profile` and `/jobs`~~ — superseded by Clerk CLI's `proxy.ts` (commit `7c89c45`); see the Deviation note above for why per-route API auth checks are sufficient without page-level gating in V1.
 
 - [ ] **Step 8: Add the Clerk webhook route**
 
@@ -477,8 +446,8 @@ Add `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY`, `CLERK_SECRET_KEY`, and `CLERK_WEBHOOK_
 - [ ] **Step 11: Commit**
 
 ```bash
-git add app middleware.ts db/repositories package.json package-lock.json tests
-git commit -m "feat: add Clerk auth and auto-provision creator on sign-up"
+git add app/api/webhooks db/repositories package.json package-lock.json tests
+git commit -m "feat: auto-provision creator record via Clerk webhook on sign-up"
 ```
 
 ---
