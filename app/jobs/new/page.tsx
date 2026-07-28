@@ -19,40 +19,59 @@ export default function NewJobPage() {
     setSubmitting(true);
     setErrors([]);
 
-    const clips = [];
-    for (const file of files) {
-      const presignRes = await fetch('/api/uploads/presign', {
+    try {
+      const clips = [];
+      for (const file of files) {
+        const presignRes = await fetch('/api/uploads/presign', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ filename: file.name, contentType: file.type }),
+        });
+        if (!presignRes.ok) {
+          throw new Error(`Failed to get an upload URL for "${file.name}".`);
+        }
+        const { url, storageKey } = await presignRes.json();
+
+        const uploadRes = await fetch(url, {
+          method: 'PUT',
+          body: file,
+          headers: { 'Content-Type': file.type },
+        });
+        if (!uploadRes.ok) {
+          throw new Error(`Failed to upload "${file.name}". Please try again.`);
+        }
+
+        clips.push({ storageKey, originalFilename: file.name });
+      }
+
+      const res = await fetch('/api/jobs', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ filename: file.name, contentType: file.type }),
+        body: JSON.stringify({
+          productName,
+          sizingOverlayEnabled: sizingOn,
+          sizeWorn: sizingOn ? sizeWorn : undefined,
+          lengthSeconds,
+          pacing,
+          variationCount,
+          clips,
+        }),
       });
-      const { url, storageKey } = await presignRes.json();
-      await fetch(url, { method: 'PUT', body: file, headers: { 'Content-Type': file.type } });
-      clips.push({ storageKey, originalFilename: file.name });
-    }
 
-    const res = await fetch('/api/jobs', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        productName,
-        sizingOverlayEnabled: sizingOn,
-        sizeWorn: sizingOn ? sizeWorn : undefined,
-        lengthSeconds,
-        pacing,
-        variationCount,
-        clips,
-      }),
-    });
+      if (!res.ok) {
+        const body = await res.json();
+        setErrors(body.errors ?? [{ field: 'form', message: 'Something went wrong.' }]);
+        setSubmitting(false);
+        return;
+      }
 
-    if (!res.ok) {
-      const body = await res.json();
-      setErrors(body.errors ?? [{ field: 'form', message: 'Something went wrong.' }]);
+      router.push('/jobs');
+    } catch (err) {
+      setErrors([
+        { field: 'form', message: err instanceof Error ? err.message : 'Something went wrong.' },
+      ]);
       setSubmitting(false);
-      return;
     }
-
-    router.push('/jobs');
   }
 
   return (

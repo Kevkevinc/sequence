@@ -24,7 +24,12 @@ export function validateJobInput(input: {
   if (!ALLOWED_PACINGS.includes(input.pacing as (typeof ALLOWED_PACINGS)[number])) {
     errors.push({ field: 'pacing', message: 'Pacing must be slow, medium, or fast.' });
   }
-  if (input.variationCount < 1 || input.variationCount > MAX_VARIATION_COUNT) {
+  if (
+    typeof input.variationCount !== 'number' ||
+    Number.isNaN(input.variationCount) ||
+    input.variationCount < 1 ||
+    input.variationCount > MAX_VARIATION_COUNT
+  ) {
     errors.push({
       field: 'variationCount',
       message: `Variation count must be between 1 and ${MAX_VARIATION_COUNT}.`,

@@ -46,4 +46,39 @@ describe('validateJobInput', () => {
     const errors = validateJobInput({ ...validInput, clipCount: 0 });
     expect(errors).toContainEqual({ field: 'clips', message: 'At least one raw clip is required.' });
   });
+
+  it('rejects an invalid pacing value', () => {
+    const errors = validateJobInput({ ...validInput, pacing: 'blazing' });
+    expect(errors).toContainEqual({
+      field: 'pacing',
+      message: 'Pacing must be slow, medium, or fast.',
+    });
+  });
+
+  it('rejects a variation count below the minimum', () => {
+    const errors = validateJobInput({ ...validInput, variationCount: 0 });
+    expect(errors).toContainEqual({
+      field: 'variationCount',
+      message: 'Variation count must be between 1 and 20.',
+    });
+  });
+
+  it('rejects a variation count above the maximum', () => {
+    const errors = validateJobInput({ ...validInput, variationCount: 21 });
+    expect(errors).toContainEqual({
+      field: 'variationCount',
+      message: 'Variation count must be between 1 and 20.',
+    });
+  });
+
+  it('rejects a missing/undefined variation count instead of silently passing', () => {
+    const errors = validateJobInput({
+      ...validInput,
+      variationCount: undefined as unknown as number,
+    });
+    expect(errors).toContainEqual({
+      field: 'variationCount',
+      message: 'Variation count must be between 1 and 20.',
+    });
+  });
 });

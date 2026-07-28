@@ -10,7 +10,16 @@ export async function POST(req: Request) {
   const creator = await getCreatorByClerkId(userId);
   if (!creator) return new Response('Creator profile not found', { status: 404 });
 
-  const body = await req.json();
+  let body;
+  try {
+    body = await req.json();
+  } catch {
+    return Response.json(
+      { errors: [{ field: 'form', message: 'Request body must be valid JSON.' }] },
+      { status: 400 }
+    );
+  }
+
   const errors = validateJobInput({
     productName: body.productName ?? '',
     lengthSeconds: body.lengthSeconds,
@@ -20,6 +29,22 @@ export async function POST(req: Request) {
     sizeWorn: body.sizeWorn,
     clipCount: Array.isArray(body.clips) ? body.clips.length : 0,
   });
+
+  const clips: unknown[] = Array.isArray(body.clips) ? body.clips : [];
+  const hasInvalidClip = clips.some(
+    (clip: any) =>
+      !clip ||
+      typeof clip.storageKey !== 'string' ||
+      !clip.storageKey.trim() ||
+      typeof clip.originalFilename !== 'string' ||
+      !clip.originalFilename.trim()
+  );
+  if (hasInvalidClip) {
+    errors.push({
+      field: 'clips',
+      message: 'Each clip must have a storage key and an original filename.',
+    });
+  }
 
   if (errors.length > 0) {
     return Response.json({ errors }, { status: 400 });
