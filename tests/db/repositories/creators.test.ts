@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { eq } from 'drizzle-orm';
 import { db } from '@/db/client';
 import { creators } from '@/db/schema';
-import { createCreatorIfNotExists, getCreatorByClerkId } from '@/db/repositories/creators';
+import { createCreatorIfNotExists, getCreatorByClerkId, updateCreatorProfile } from '@/db/repositories/creators';
 
 describe('creator repository', () => {
   const CLERK_ID = 'test_clerk_user_1';
@@ -23,5 +23,12 @@ describe('creator repository', () => {
     const first = await createCreatorIfNotExists(CLERK_ID);
     const second = await createCreatorIfNotExists(CLERK_ID);
     expect(second.id).toBe(first.id);
+  });
+
+  it('updates height and weight for an existing creator', async () => {
+    await createCreatorIfNotExists(CLERK_ID);
+    const updated = await updateCreatorProfile(CLERK_ID, { height: "5'6\"", weight: '135 lbs' });
+    expect(updated.height).toBe("5'6\"");
+    expect(updated.weight).toBe('135 lbs');
   });
 });

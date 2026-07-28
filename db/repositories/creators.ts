@@ -40,3 +40,15 @@ export async function getCreatorByClerkId(clerkUserId: string) {
     where: eq(creators.clerkUserId, clerkUserId),
   });
 }
+
+export async function updateCreatorProfile(
+  clerkUserId: string,
+  data: { height?: string; weight?: string }
+) {
+  const [updated] = await db
+    .update(creators)
+    .set(data)
+    .where(eq(creators.clerkUserId, clerkUserId))
+    .returning();
+  return updated;
+}
