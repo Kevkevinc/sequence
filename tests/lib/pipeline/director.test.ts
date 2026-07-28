@@ -92,14 +92,19 @@ describe('planJob', () => {
     return { id: overlayJob.id, clipId: clip.id };
   }
 
-  /** A one-variation overlay response with the given model-authored lead-in. */
+  /**
+   * A one-variation overlay response with the given model-authored lead-in.
+   * 15s from a single 15s clip: 1.5s of footage is discarded at the one
+   * same-clip splice so the cut is actually visible, and the opening shot
+   * returns at the end as a bookend.
+   */
   function overlayResponse(clipId: string, sizingOverlayText: string | null, placement = 'bottom-center') {
     return geminiResponse([
       {
         segments: [
           { rawClipId: clipId, startSeconds: 0, endSeconds: 5 },
-          { rawClipId: clipId, startSeconds: 5, endSeconds: 10 },
-          { rawClipId: clipId, startSeconds: 10, endSeconds: 15 },
+          { rawClipId: clipId, startSeconds: 6.5, endSeconds: 11.5 },
+          { rawClipId: clipId, startSeconds: 0, endSeconds: 5 },
         ],
         hookText: 'Wait until you see how this Cozy Hoodie fits',
         sizingOverlayText,
@@ -261,10 +266,13 @@ describe('planJob', () => {
   });
 
   it('rejects a variation reaching past the end of its clip footage', async () => {
-    // Totals 13s with every cut inside the pacing band, so only the overrun is
-    // at fault.
+    // Totals 14.5s with every cut inside the pacing band and a discarded gap at
+    // each same-clip splice, so only the overrun is at fault.
     mockGenerateContent.mockResolvedValue(
-      geminiResponse([variation([segA(0, 4), segB(2, 6), segB(6, 11)], HOOK_ONE), validVariationTwo()])
+      geminiResponse([
+        variation([segA(0, 4), segA(5.5, 8), segB(0, 4), segB(7, 11)], HOOK_ONE),
+        validVariationTwo(),
+      ])
     );
 
     const result = await planJob(jobId);
@@ -279,7 +287,7 @@ describe('planJob', () => {
     mockGenerateContent.mockResolvedValue(
       geminiResponse([
         // 16s with every cut in the pacing band: duration is fine, order is not.
-        variation([segA(0, 4), segA(0, 4), segB(0, 4), segB(4, 8)], HOOK_ONE),
+        variation([segA(0, 4), segA(0, 4), segB(0, 4), segB(5, 9)], HOOK_ONE),
         validVariationTwo(),
       ])
     );
@@ -292,8 +300,8 @@ describe('planJob', () => {
     expect(saved).toHaveLength(0);
   });
 
-  it('rejects a variation whose cuts do not sum to within 15% of the target length', async () => {
-    // 8s against a 15s target: outside the 12.75s - 17.25s window. Both cuts sit
+  it('rejects a variation whose cuts do not sum to near the target length', async () => {
+    // 8s against a 15s target: outside the 13.5s - 17.25s window. Both cuts sit
     // inside the pacing band, so the total is the only thing wrong.
     mockGenerateContent.mockResolvedValue(
       geminiResponse([variation([segA(0, 4), segB(0, 4)], HOOK_ONE), validVariationTwo()])
@@ -310,12 +318,14 @@ describe('planJob', () => {
     expect(saved).toHaveLength(0);
   });
 
-  it('accepts variations sitting exactly on the duration tolerance boundary', async () => {
-    // 12.75s and 17.25s are the extremes of the allowed window for a 15s target.
+  it('accepts variations sitting exactly on the duration tolerance boundaries', async () => {
+    // 13.5s (-10%) and 17.25s (+15%) are the extremes of the allowed window for
+    // a 15s target. The band is asymmetric: the floor was tightened because the
+    // live run consistently stopped short, the ceiling was left alone.
     mockGenerateContent.mockResolvedValue(
       geminiResponse([
-        variation([segA(0, 4), segB(0, 4), segB(4, 8.75)], HOOK_ONE),
-        variation([segA(0, 4), segB(0, 4.625), segA(4, 8), segB(4.625, 9.25)], HOOK_TWO),
+        variation([segA(0, 4), segB(0, 4), segA(5, 8), segB(5, 7.5)], HOOK_ONE),
+        variation([segB(0, 4.625), segA(0, 4), segB(4.625, 9.25), segA(4, 8)], HOOK_TWO),
       ])
     );
 
@@ -577,7 +587,7 @@ describe('planJob', () => {
       // 16s, both cuts in the band, only 0.1s apart: distinct keys, same shot.
       mockGenerateContent.mockResolvedValue(
         geminiResponse([
-          variation([segA(0, 4), segA(0.1, 4.1), segB(0, 4), segB(4, 8)], HOOK_ONE),
+          variation([segA(0, 4), segA(0.1, 4.1), segB(0, 4), segB(5, 9)], HOOK_ONE),
           validVariationTwo(),
         ])
       );
@@ -589,11 +599,12 @@ describe('planJob', () => {
     });
 
     it('treats non-overlapping cuts from one clip as distinct footage', async () => {
-      // Clip A subdivided into three neighbouring cuts and clip B into two:
-      // eight seconds of clip A, but never the same moment twice. This is the
-      // behaviour the pacing rule depends on, so it must not read as reuse.
+      // Each clip subdivided into two cuts with 1.5s of footage discarded
+      // between them: same clip twice in a row, but never the same moment, and
+      // never chronologically adjacent. This is the behaviour the pacing rule
+      // depends on, so it must not read as reuse.
       const subdivided = variation(
-        [segA(0, 2.5), segA(2.5, 5), segA(5, 8), segB(0, 3), segB(3, 6)],
+        [segA(0, 3.5), segA(5, 8), segB(0, 3.5), segB(5, 9.5)],
         HOOK_ONE
       );
       mockGenerateContent.mockResolvedValue(geminiResponse([subdivided, validVariationTwo()]));
@@ -630,8 +641,10 @@ describe('planJob', () => {
     // 7s of distinct footage against a 30s target: with the reuse cap the pool
     // can fill 14s at most, so the +-15% rule is unreachable. This is the shape
     // of the first live run, where 3 short clips got looped 12 times each.
-    const CUT_ONE = { startSeconds: 0, endSeconds: 4 };
-    const CUT_TWO = { startSeconds: 4, endSeconds: 7 };
+    // 1.25s of footage is discarded between the two cuts so the splice between
+    // them is a visible cut rather than the take playing straight through.
+    const CUT_ONE = { startSeconds: 0, endSeconds: 3 };
+    const CUT_TWO = { startSeconds: 4.25, endSeconds: 7 };
 
     let shortJobId: string;
     let shortClipId: string;
@@ -673,8 +686,8 @@ describe('planJob', () => {
     }
 
     it('accepts a short video rather than failing the job', async () => {
-      // 14s against a 30s target: nowhere near the +-15% band, but it is every
-      // second the footage honestly has, which beats a padded 30s.
+      // 11.5s against a 30s target: nowhere near the accepted band, but it is
+      // every second the footage honestly has, which beats a padded 30s.
       mockGenerateContent.mockResolvedValue(shortResponse([CUT_ONE, CUT_TWO, CUT_ONE, CUT_TWO]));
 
       const result = await planJob(shortJobId);
@@ -710,14 +723,24 @@ describe('planJob', () => {
       await db.insert(segments).values([
         { rawClipId: extraClip.id, startSeconds: '0', endSeconds: '30', contentTag: 'whole-clip', qualityTag: 'high' },
       ]);
-      // 30s of footage cut into eight 3.75s pieces, as medium pacing demands.
+      // 31.5s of medium-paced cuts: five 4.5s pieces spaced 1.5s apart down the
+      // new clip, then the first two again as a callback.
+      const spacedCuts = [
+        [0, 4.5],
+        [6, 10.5],
+        [12, 16.5],
+        [18, 22.5],
+        [24, 28.5],
+        [0, 4.5],
+        [6, 10.5],
+      ];
       mockGenerateContent.mockResolvedValue(
         geminiResponse([
           {
-            segments: Array.from({ length: 8 }, (_, i) => ({
+            segments: spacedCuts.map(([startSeconds, endSeconds]) => ({
               rawClipId: extraClip.id,
-              startSeconds: i * 3.75,
-              endSeconds: (i + 1) * 3.75,
+              startSeconds,
+              endSeconds,
             })),
             hookText: HOOK_ONE,
             sizingOverlayText: null,
@@ -733,7 +756,7 @@ describe('planJob', () => {
     });
 
     it('still rejects a plan that throws away footage it could have used', async () => {
-      // 4s when 14s was achievable: the relaxed rule is "best achievable", not
+      // 3s when 14s was achievable: the relaxed rule is "best achievable", not
       // "any length goes".
       mockGenerateContent.mockResolvedValue(shortResponse([CUT_ONE]));
 
@@ -747,8 +770,8 @@ describe('planJob', () => {
     });
 
     it('still enforces the reuse cap, so the fallback cannot be padded either', async () => {
-      // 21s: closer to the 30s target than the honest 14s, and exactly the kind
-      // of padding this whole path exists to prevent.
+      // 17.25s: closer to the 30s target than the honest 11.5s, and exactly the
+      // kind of padding this whole path exists to prevent.
       mockGenerateContent.mockResolvedValue(
         shortResponse([CUT_ONE, CUT_TWO, CUT_ONE, CUT_TWO, CUT_ONE, CUT_TWO])
       );
@@ -770,7 +793,7 @@ describe('planJob', () => {
       expect(prompt).toContain('shorter video is');
       // The unreachable rule must not also be asserted, or the model is being
       // told to satisfy two contradictory instructions.
-      expect(prompt).not.toContain('must sum to within 15%');
+      expect(prompt).not.toContain('AIM FOR 30 SECONDS');
     });
 
     it('counts overlapping tags on one clip once, not twice', async () => {
@@ -792,11 +815,11 @@ describe('planJob', () => {
         { rawClipId: clip.id, startSeconds: '0', endSeconds: '10', contentTag: 'whole-clip', qualityTag: 'high' },
         { rawClipId: clip.id, startSeconds: '2', endSeconds: '6', contentTag: 'try-on', qualityTag: 'high' },
       ]);
-      // 10s of footage cut three ways and shown twice: 20s, the honest ceiling.
+      // 10s of footage cut two ways and shown twice: 16s, close to the honest
+      // 20s ceiling once the discarded gaps are paid for.
       const cuts = [
-        { startSeconds: 0, endSeconds: 3.5 },
-        { startSeconds: 3.5, endSeconds: 7 },
-        { startSeconds: 7, endSeconds: 10 },
+        { startSeconds: 0, endSeconds: 4 },
+        { startSeconds: 5.5, endSeconds: 9.5 },
       ];
       mockGenerateContent.mockResolvedValue(
         geminiResponse([
@@ -816,7 +839,7 @@ describe('planJob', () => {
       expect(await warningOf(overlapJob.id)).toContain('Only 10s of usable footage');
     });
 
-    it('leaves the +-15% rule in force when the footage is sufficient', async () => {
+    it('leaves the target-length rule in force when the footage is sufficient', async () => {
       // The normal job's pool is ample, so the fallback must not apply to it.
       mockGenerateContent.mockResolvedValue(
         geminiResponse([variation([segA(0, 4), segB(0, 4)], HOOK_ONE), validVariationTwo()])
@@ -826,7 +849,7 @@ describe('planJob', () => {
 
       expect(result.success).toBe(false);
       if (!result.success) expect(result.error).toContain('total duration');
-      expect(promptTextOfCall(0)).toContain('must sum to within 15%');
+      expect(promptTextOfCall(0)).toContain('AIM FOR 15 SECONDS');
       expect(await warningOf(jobId)).toBeNull();
     });
   });
@@ -840,7 +863,7 @@ describe('planJob', () => {
       // legal under every other rule, but the first cut runs 8s.
       mockGenerateContent.mockResolvedValue(
         geminiResponse([
-          variation([segA(0, 8), segB(0, 4), segB(4, 8)], HOOK_ONE),
+          variation([segA(0, 8), segB(0, 4), segB(5, 9)], HOOK_ONE),
           validVariationTwo(),
         ])
       );
@@ -862,10 +885,10 @@ describe('planJob', () => {
     });
 
     it('rejects a cut that is too short for the pacing preset', async () => {
-      // 13.5s total, but the second cut is a 1.5s flash mid-video.
+      // 14s total, but the second cut is a 1.5s flash mid-video.
       mockGenerateContent.mockResolvedValue(
         geminiResponse([
-          variation([segA(0, 4), segB(0, 1.5), segA(4, 8), segB(4, 8)], HOOK_ONE),
+          variation([segA(0, 4), segB(0, 1.5), segA(4, 8), segB(4, 8.5)], HOOK_ONE),
           validVariationTwo(),
         ])
       );
@@ -877,10 +900,10 @@ describe('planJob', () => {
     });
 
     it('allows a short final cut so a variation can land on the target length', async () => {
-      // 13.5s: the tail cut is 1.5s, above the 1.125s floor the last cut gets.
+      // 14s: the tail cut is 1.5s, above the 1.125s floor the last cut gets.
       mockGenerateContent.mockResolvedValue(
         geminiResponse([
-          variation([segA(0, 4), segB(0, 4), segA(4, 8), segB(4, 5.5)], HOOK_ONE),
+          variation([segA(0, 4), segB(0, 4.5), segA(4, 8), segB(5, 6.5)], HOOK_ONE),
           validVariationTwo(),
         ])
       );
@@ -892,11 +915,11 @@ describe('planJob', () => {
     });
 
     it('never lets the final cut run long, only short', async () => {
-      // 13.25s total and the overrun is only 0.25s past the band, but a long
+      // 16.25s total and the overrun is only 0.25s past the band, but a long
       // tail cut is exactly the defect this rule exists to catch.
       mockGenerateContent.mockResolvedValue(
         geminiResponse([
-          variation([segA(0, 4), segB(0, 4), segB(4, 9.25)], HOOK_ONE),
+          variation([segA(0, 4), segB(0, 3.5), segA(4.5, 8), segB(4.75, 10)], HOOK_ONE),
           validVariationTwo(),
         ])
       );
@@ -964,6 +987,359 @@ describe('planJob', () => {
     });
   });
 
+  describe('cuts the viewer can actually see', () => {
+    // The second live run's defect: a 30s medium job answered with seven cuts
+    // from one continuous take, chronologically consecutive. Every rule the
+    // validator had passed, and the finished video contained no cuts at all.
+    // Reproduced here on a 30s single-clip pool, one variation, so nothing else
+    // can be at fault.
+    let takeJobId: string;
+    let takeClipId: string;
+
+    beforeEach(async () => {
+      const takeJob = await createJob({
+        creatorId,
+        productName: 'Cozy Hoodie',
+        sizingOverlayEnabled: false,
+        lengthSeconds: 30,
+        pacing: 'medium',
+        variationCount: 1,
+        clips: [{ storageKey: 'clips/take.mp4', originalFilename: 'take.mp4' }],
+      });
+      takeJobId = takeJob.id;
+      const [clip] = await db.select().from(rawClips).where(eq(rawClips.jobId, takeJobId));
+      takeClipId = clip.id;
+      await db.insert(segments).values([
+        { rawClipId: takeClipId, startSeconds: '0', endSeconds: '30', contentTag: 'whole-clip', qualityTag: 'high' },
+      ]);
+    });
+
+    /** A one-variation response cutting the single 30s take. */
+    function takeResponse(cuts: number[][]) {
+      return geminiResponse([
+        {
+          segments: cuts.map(([startSeconds, endSeconds]) => ({
+            rawClipId: takeClipId,
+            startSeconds,
+            endSeconds,
+          })),
+          hookText: HOOK_ONE,
+          sizingOverlayText: null,
+          sizingOverlayPlacement: null,
+        },
+      ]);
+    }
+
+    it('rejects consecutive chronological ranges of one take, which show no cut at all', async () => {
+      // The exact sequence the live run produced: 0-4, 4-8, 8-12, 12-16, 16-20,
+      // 20-24, 24-27. Seven cuts, all inside the 2.25-5s band, none overlapping,
+      // none repeated, and 27s exactly on the -10% duration floor - so the
+      // visible-cut rule is the only thing that can reject it. Concatenated it
+      // is the original take playing straight through.
+      mockGenerateContent.mockResolvedValue(
+        takeResponse([
+          [0, 4],
+          [4, 8],
+          [8, 12],
+          [12, 16],
+          [16, 20],
+          [20, 24],
+          [24, 27],
+        ])
+      );
+
+      const result = await planJob(takeJobId);
+
+      expect(result.success).toBe(false);
+      expect(mockGenerateContent).toHaveBeenCalledTimes(3);
+      if (!result.success) expect(result.error).toContain('no cut at all');
+      // The rule has to reach the model, not merely fail the job.
+      const retryPrompt = promptTextOfCall(1);
+      expect(retryPrompt).toContain('previous response was invalid');
+      expect(retryPrompt).toContain('with only 0s between them');
+      expect(retryPrompt).toContain('no cut at all');
+
+      const saved = await db.select().from(editPlans).where(eq(editPlans.jobId, takeJobId));
+      expect(saved).toHaveLength(0);
+    });
+
+    it('rejects the milder form: one adjacent pair inside an otherwise fine edit', async () => {
+      // 12-16.5 followed immediately by 16.5-21, the shape the live run's other
+      // variations took. Every other splice discards 1.5s, the total is 31.5s.
+      mockGenerateContent.mockResolvedValue(
+        takeResponse([
+          [0, 4.5],
+          [6, 10.5],
+          [12, 16.5],
+          [16.5, 21],
+          [24, 28.5],
+          [0, 4.5],
+          [6, 10.5],
+        ])
+      );
+
+      const result = await planJob(takeJobId);
+
+      expect(result.success).toBe(false);
+      if (!result.success) expect(result.error).toContain('no cut at all');
+    });
+
+    it('accepts the same footage once a second of it is discarded at each splice', async () => {
+      // The fix the product owner described: same clip, same coverage, but a
+      // 1.5s break thrown away at every same-clip splice so each one reads as a
+      // scene change. 31.5s against the 30s target.
+      mockGenerateContent.mockResolvedValue(
+        takeResponse([
+          [0, 4.5],
+          [6, 10.5],
+          [12, 16.5],
+          [18, 22.5],
+          [24, 28.5],
+          [0, 4.5],
+          [6, 10.5],
+        ])
+      );
+
+      const result = await planJob(takeJobId);
+
+      expect(result).toEqual({ success: true, variationCount: 1, warning: null });
+      expect(mockGenerateContent).toHaveBeenCalledTimes(1);
+    });
+
+    it('accepts a non-chronological order, because jumping backwards reads as a cut', async () => {
+      // No discarded gaps needed: every splice jumps to a different part of the
+      // clip, which is a visible change however the ranges are spaced.
+      mockGenerateContent.mockResolvedValue(
+        takeResponse([
+          [12, 16.5],
+          [6, 10.5],
+          [18, 22.5],
+          [0, 4.5],
+          [24, 28.5],
+          [12, 16.5],
+          [6, 10.5],
+        ])
+      );
+
+      const result = await planJob(takeJobId);
+
+      expect(result).toEqual({ success: true, variationCount: 1, warning: null });
+      expect(mockGenerateContent).toHaveBeenCalledTimes(1);
+    });
+
+    it('accepts a gap of exactly the one-second minimum', async () => {
+      mockGenerateContent.mockResolvedValue(
+        takeResponse([
+          [0, 4],
+          [5, 9],
+          [10, 14],
+          [15, 19],
+          [20, 24],
+          [0, 4],
+          [5, 9],
+        ])
+      );
+
+      const result = await planJob(takeJobId);
+
+      expect(result).toEqual({ success: true, variationCount: 1, warning: null });
+    });
+
+    it('rejects a gap just under the one-second minimum', async () => {
+      // 0.9s: identical to the accepted plan above but for a tenth of a second,
+      // which pins where the line actually sits.
+      mockGenerateContent.mockResolvedValue(
+        takeResponse([
+          [0, 4],
+          [4.9, 8.9],
+          [10, 14],
+          [15, 19],
+          [20, 24],
+          [0, 4],
+          [4.9, 8.9],
+        ])
+      );
+
+      const result = await planJob(takeJobId);
+
+      expect(result.success).toBe(false);
+      if (!result.success) expect(result.error).toContain('with only 0.9s between them');
+    });
+
+    it('leaves interleaved reuse of one clip alone, because another clip separates the pieces', async () => {
+      // A(0-4), B(0-2.5), A(4-8): A's two halves are chronologically adjacent
+      // but a cut to B sits between them, so the viewer plainly sees a change.
+      // The rule must only look at neighbouring positions.
+      const interleaved = variation(
+        [segA(0, 4), segB(0, 2.5), segA(4, 8), segB(4, 8)],
+        HOOK_ONE
+      );
+      mockGenerateContent.mockResolvedValue(
+        geminiResponse([interleaved, validVariationTwo()])
+      );
+
+      const result = await planJob(jobId);
+
+      expect(result).toEqual({ success: true, variationCount: 2, warning: null });
+      expect(mockGenerateContent).toHaveBeenCalledTimes(1);
+    });
+
+    it('tells the model up front that adjacent ranges are not cuts', async () => {
+      mockGenerateContent.mockResolvedValue(validResponse());
+
+      await planJob(jobId);
+
+      const prompt = promptTextOfCall(0);
+      expect(prompt).toContain('EVERY CUT MUST BE VISIBLE');
+      expect(prompt).toContain('WRONG: 0-4 then 4-8 then 8-12 from one clip');
+      expect(prompt).toContain('leave at least 1s of footage OUT between them');
+      expect(prompt).toContain('jump BACKWARDS');
+    });
+  });
+
+  describe('aiming at the target length rather than the floor', () => {
+    it('rejects a variation that stops 12% short of the target', async () => {
+      // 13.2s against 15s. Legal under the old +-15% window (12.75s) and the
+      // shape every variation of the live run took: satisfying the floor rather
+      // than aiming at the goal. Every other rule is satisfied.
+      mockGenerateContent.mockResolvedValue(
+        geminiResponse([
+          variation([segA(0, 4), segB(0, 4), segA(5, 8), segB(5, 7.2)], HOOK_ONE),
+          validVariationTwo(),
+        ])
+      );
+
+      const result = await planJob(jobId);
+
+      expect(result.success).toBe(false);
+      expect(mockGenerateContent).toHaveBeenCalledTimes(3);
+      if (!result.success) expect(result.error).toContain('misses the 15s target length');
+      expect(promptTextOfCall(1)).toContain('must total between 13.5s and 17.25s');
+
+      const saved = await db.select().from(editPlans).where(eq(editPlans.jobId, jobId));
+      expect(saved).toHaveLength(0);
+    });
+
+    it('asks the model for a tighter window than it enforces', async () => {
+      mockGenerateContent.mockResolvedValue(validResponse());
+
+      await planJob(jobId);
+
+      const prompt = promptTextOfCall(0);
+      expect(prompt).toContain('AIM FOR 15 SECONDS');
+      // The stated aim is +-5%; the validator accepts -10%/+15%.
+      expect(prompt).toContain('should land between 14.25s and 15.75s');
+      expect(prompt).toContain('below 13.5s or above 17.25s is rejected outright');
+      expect(prompt).toContain('do not aim for 13.5s');
+    });
+  });
+
+  describe('structural distinctness between variations', () => {
+    it('rejects two variations that open on the same footage', async () => {
+      // Different cuts after the first, but the viewer meets both videos with
+      // the same shot - the one difference that is always noticed.
+      mockGenerateContent.mockResolvedValue(
+        geminiResponse([
+          validVariationOne(),
+          variation([segA(0, 4), segB(2, 6), segA(4.5, 8), segB(6.5, 10)], HOOK_TWO),
+        ])
+      );
+
+      const result = await planJob(jobId);
+
+      expect(result.success).toBe(false);
+      expect(mockGenerateContent).toHaveBeenCalledTimes(3);
+      if (!result.success) expect(result.error).toContain('opens on the same footage');
+      expect(promptTextOfCall(1)).toContain('start this one on a different moment');
+    });
+
+    it('rejects a variation that differs from its neighbour in only one position', async () => {
+      // Variations 4 and 5 of the live run: same skeleton, one substituted clip
+      // and a new hook. The opening differs, so only the sequence rule can
+      // catch this.
+      mockGenerateContent.mockResolvedValue(
+        geminiResponse([
+          validVariationOne(),
+          variation([segB(2, 6), segB(0, 4), segA(4, 8), segB(4, 8)], HOOK_TWO),
+        ])
+      );
+
+      const result = await planJob(jobId);
+
+      expect(result.success).toBe(false);
+      if (!result.success) expect(result.error).toContain('the same edit as variation 1');
+      expect(promptTextOfCall(1)).toContain('at least two positions must differ');
+    });
+
+    it('accepts a variation that differs in two positions', async () => {
+      // Deliberately not stricter than that: on a two-clip pool, demanding more
+      // than "a different opening and one more change" would be retry churn.
+      mockGenerateContent.mockResolvedValue(
+        geminiResponse([
+          validVariationOne(),
+          variation([segB(2, 6), segB(0, 4), segA(4, 8), segA(0, 4)], HOOK_TWO),
+        ])
+      );
+
+      const result = await planJob(jobId);
+
+      expect(result).toEqual({ success: true, variationCount: 2, warning: null });
+      expect(mockGenerateContent).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not apply the rule to a pool too small to offer a second opening', async () => {
+      // A single 3s clip cannot yield two distinct band-length cuts, so
+      // demanding distinct openings would make the job unsatisfiable. Two
+      // identical variations are the best this pool can do.
+      const tinyJob = await createJob({
+        creatorId,
+        productName: 'Cozy Hoodie',
+        sizingOverlayEnabled: false,
+        lengthSeconds: 15,
+        pacing: 'slow',
+        variationCount: 2,
+        clips: [{ storageKey: 'clips/tiny-two.mp4', originalFilename: 'tiny-two.mp4' }],
+      });
+      const [clip] = await db.select().from(rawClips).where(eq(rawClips.jobId, tinyJob.id));
+      await db.insert(segments).values([
+        { rawClipId: clip.id, startSeconds: '0', endSeconds: '3', contentTag: 'whole-clip', qualityTag: 'high' },
+      ]);
+      const onlyCut = { rawClipId: clip.id, startSeconds: 0, endSeconds: 3 };
+      mockGenerateContent.mockResolvedValue(
+        geminiResponse([
+          { segments: [onlyCut], hookText: HOOK_ONE, sizingOverlayText: null, sizingOverlayPlacement: null },
+          { segments: [onlyCut], hookText: HOOK_TWO, sizingOverlayText: null, sizingOverlayPlacement: null },
+        ])
+      );
+
+      const result = await planJob(tinyJob.id);
+
+      expect(result.success).toBe(true);
+      expect(mockGenerateContent).toHaveBeenCalledTimes(1);
+    });
+
+    it('tells the model the variations must be different edits', async () => {
+      mockGenerateContent.mockResolvedValue(validResponse());
+
+      await planJob(jobId);
+
+      const prompt = promptTextOfCall(0);
+      expect(prompt).toContain('THE 2 VARIATIONS MUST BE STRUCTURALLY DIFFERENT EDITS');
+      expect(prompt).toContain('a different OPENING shot');
+      expect(prompt).toContain('different SUBDIVISION BOUNDARIES');
+      expect(prompt).toContain('match in every position but one will be rejected');
+    });
+
+    it('says nothing about distinctness when only one variation was asked for', async () => {
+      const overlayJob = await createOverlayJob({ sizeWorn: 'M' });
+      mockGenerateContent.mockResolvedValue(overlayResponse(overlayJob.clipId, 'For reference'));
+
+      await planJob(overlayJob.id);
+
+      expect(promptTextOfCall(0)).not.toContain('STRUCTURALLY DIFFERENT EDITS');
+    });
+  });
+
   describe('subdividing one long segment', () => {
     // A single 20s tagged segment against a 30s medium job. Before subdivision
     // was asked for, the pool measured one unrepeatable segment worth 20s and
@@ -991,16 +1367,18 @@ describe('planJob', () => {
     });
 
     it('accepts one long segment split into many short cuts', async () => {
-      // Five 4s cuts covering the clip, then two of them again later: 28s from
-      // a single tagged segment, with no moment shown more than twice.
+      // Four cuts spaced 1.5s apart down the clip, then the same four again:
+      // 31s from a single tagged segment, with no moment shown more than twice
+      // and a second of footage thrown away at every splice.
       const cuts = [
         [0, 4],
-        [4, 8],
-        [8, 12],
-        [12, 16],
-        [16, 20],
+        [5.5, 9.5],
+        [11, 15],
+        [16.5, 20],
         [0, 4],
-        [4, 8],
+        [5.5, 9.5],
+        [11, 15],
+        [16.5, 20],
       ];
       mockGenerateContent.mockResolvedValue(
         geminiResponse([
@@ -1025,7 +1403,7 @@ describe('planJob', () => {
       expect(mockGenerateContent).toHaveBeenCalledTimes(1);
       const [row] = await db.select().from(jobs).where(eq(jobs.id, longJobId));
       expect(row.warning).toBeNull();
-      expect(promptTextOfCall(0)).toContain('must sum to within 15%');
+      expect(promptTextOfCall(0)).toContain('AIM FOR 30 SECONDS');
     });
 
     it('still rejects using that segment as one long take', async () => {

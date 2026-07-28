@@ -59,6 +59,42 @@ const MAX_SEGMENT_REUSE = 2;
 const SAME_FOOTAGE_OVERLAP_RATIO = 0.5;
 
 /**
+ * How much footage two neighbouring cuts from one clip must throw away between
+ * them before the splice reads as a cut.
+ *
+ * The second live run produced a variation of seven cuts — 0-4, 4-8, 8-12,
+ * 12-16, 16-20, 20-24, 24-27 — all from one clip. Every existing rule passed:
+ * the cuts are in the pacing band, none overlap, none repeat. But concatenating
+ * chronologically-adjacent ranges of one continuous take just replays the take,
+ * so the viewer sees *zero* cuts. The pacing rule reported success while
+ * delivering the exact opposite of what it exists to guarantee.
+ *
+ * One second is the smallest gap that reliably reads as a scene change rather
+ * than a dropped frame: in handheld UGC the subject, framing and hands all move
+ * appreciably in a second, so the splice looks deliberate. Below that it reads
+ * as a stutter or an encoding glitch. It is also at or above the shortest cut
+ * any preset allows (`fast` floors at 0.75s), so the discarded material is a
+ * real beat rather than rounding noise, and it costs at most ~1s of footage per
+ * same-clip splice — cheap enough that the pool measurement absorbs it.
+ *
+ * Measured as the absolute distance between the previous cut's end and the next
+ * cut's start, so a backwards jump (playing an earlier part of the clip next)
+ * satisfies it too: non-chronological order reads as a cut all by itself.
+ */
+const MIN_CUT_GAP_SECONDS = 1;
+
+/**
+ * Shortest variation the near-identical-sequence check applies to.
+ *
+ * The check rejects neighbouring variations that match in all but one position.
+ * On a two-cut variation that bar is unreachable once the distinct-opening rule
+ * has already forced position 0 apart, so applying it there would reject plans
+ * that are as different as the pool allows. Three is the shortest length where
+ * "all but one position matches" describes a genuinely lazy copy.
+ */
+const MIN_CUTS_FOR_SEQUENCE_DISTINCTNESS = 3;
+
+/**
  * Seconds per cut for each pacing preset, taken verbatim from the product spec:
  * "Slow ~5-6s/clip, Medium ~3-4s/clip, Fast ~1-2s/clip". The whole product is
  * fast-cut UGC pacing, so this is a core requirement, not a stylistic hint.
@@ -92,8 +128,49 @@ const FINAL_CUT_FLOOR_RATIO = 0.5;
 // validation failure is genuinely useful; the stored failure reason stays short.
 const MAX_CORRECTION_NOTE_LENGTH = 1500;
 
-// A variation's cuts must sum to within this fraction of the job's target length.
-const DURATION_TOLERANCE = 0.15;
+/**
+ * How far a variation's total may fall *below* the job's target length.
+ *
+ * Was 15% in both directions. The second live run answered a 30s job with
+ * 25.5s, 26.0s, 26.0s, 26.5s and 27.0s — every one legal, every one 10-15%
+ * short. A window of +-15% on a 30s job is +-4.5s, wider than a whole medium
+ * cut, so "add one more cut" and "stop here" are both legal and the model
+ * reliably picks the cheaper one. Tightening the floor to 10% (3s on a 30s job,
+ * less than one cut) means landing short is no longer free: four of those five
+ * variations would now be rejected.
+ */
+const DURATION_UNDER_TOLERANCE = 0.1;
+
+/**
+ * How far a variation's total may run *over* the target. Left at the original
+ * 15%: overshoot has never been observed, and tightening a boundary with no
+ * evidence behind it only buys retries. The band is deliberately asymmetric
+ * because the defect is one-sided.
+ */
+const DURATION_OVER_TOLERANCE = 0.15;
+
+/**
+ * The tighter window the prompt asks for. The model treats whatever number it
+ * is given as the edge of acceptable, so it is given a target narrower than the
+ * validator enforces; "close enough" then lands inside the accepted band with
+ * room to spare instead of on its floor.
+ */
+const DURATION_AIM_TOLERANCE = 0.05;
+
+/**
+ * Slack allowed against `maxAchievableSeconds` when the pool cannot reach the
+ * target at all.
+ *
+ * Looser than the target tolerances on purpose. That ceiling is our own
+ * estimate ("every second of footage, shown twice"), and `MIN_CUT_GAP_SECONDS`
+ * makes part of it structurally unreachable: a single-clip pool must discard
+ * about a second at every same-clip splice, which costs roughly a seventh of a
+ * short clip's doubled length. The floor exists only to stop the model throwing
+ * usable footage away, so it is set well below the estimate rather than
+ * chasing it — 25% still rejects a 4s plan when 14s was achievable, which is
+ * the case it was written for.
+ */
+const FALLBACK_FLOOR_TOLERANCE = 0.25;
 
 // The only placements Stage 3 can render. This single constant both builds the
 // prompt and validates the response, so the two cannot drift apart.
@@ -180,6 +257,13 @@ type PoolCapacity = {
   maxAchievableSeconds: number;
   /** False when the pool cannot reach the bottom of the target's tolerance band. */
   isSufficient: boolean;
+  /**
+   * Whether the pool holds two band-length cuts that are not the same moment.
+   * Below this line a variation cannot repeat anything, and neighbouring
+   * variations cannot be given different opening shots, so both rules that
+   * depend on having a choice are switched off rather than made unsatisfiable.
+   */
+  hasTwoDistinctCuts: boolean;
 };
 
 /** Identity of a *tagged* segment, used to de-duplicate the offered pool. */
@@ -289,9 +373,12 @@ function measurePool(
     availableSeconds,
     maxAchievableSeconds,
     // Epsilon keeps a pool that lands exactly on the boundary out of the
-    // fallback path, matching how the duration check itself rounds.
+    // fallback path, matching how the duration check itself rounds. Measured
+    // against the *floor* of the accepted band, because that is the shortest
+    // total a sufficient pool will be allowed to produce.
     isSufficient:
-      maxAchievableSeconds >= targetLengthSeconds * (1 - DURATION_TOLERANCE) - 1e-9,
+      maxAchievableSeconds >= targetLengthSeconds * (1 - DURATION_UNDER_TOLERANCE) - 1e-9,
+    hasTwoDistinctCuts: canRepeat,
   };
 }
 
@@ -343,16 +430,22 @@ function buildValidator(context: ValidationContext) {
         (sum, s) => sum + (s.endSeconds - s.startSeconds),
         0
       );
-      const allowedDrift = targetLengthSeconds * DURATION_TOLERANCE;
       if (footage.isSufficient) {
-        // Epsilon keeps an exactly-on-the-boundary total from failing on float noise.
-        if (Math.abs(totalSeconds - targetLengthSeconds) > allowedDrift + 1e-9) {
+        // Asymmetric: the observed defect is variations that stop short, so the
+        // floor is the tighter of the two. Epsilon keeps an exactly-on-the-
+        // boundary total from failing on float noise.
+        const floor = targetLengthSeconds * (1 - DURATION_UNDER_TOLERANCE);
+        const ceiling = targetLengthSeconds * (1 + DURATION_OVER_TOLERANCE);
+        if (totalSeconds < floor - 1e-9 || totalSeconds > ceiling + 1e-9) {
           ctx.addIssue({
             code: 'custom',
             path: [...variationPath, 'segments'],
-            message: `total duration ${totalSeconds}s is not within ${Math.round(
-              DURATION_TOLERANCE * 100
-            )}% of the ${targetLengthSeconds}s target length`,
+            message:
+              `total duration ${round2(totalSeconds)}s misses the ${targetLengthSeconds}s target ` +
+              `length: every variation must total between ${round2(floor)}s and ${round2(
+                ceiling
+              )}s, and should land close to ${targetLengthSeconds}s rather than at the edge of ` +
+              `that window`,
           });
         }
       } else {
@@ -360,7 +453,7 @@ function buildValidator(context: ValidationContext) {
         // segments past the cap, so the target becomes "as much as the footage
         // can honestly fill". Only a floor is checked: the reuse cap below is
         // what stops the total climbing, and a short video beats a padded one.
-        const achievableFloor = footage.maxAchievableSeconds * (1 - DURATION_TOLERANCE);
+        const achievableFloor = footage.maxAchievableSeconds * (1 - FALLBACK_FLOOR_TOLERANCE);
         if (totalSeconds < achievableFloor - 1e-9) {
           ctx.addIssue({
             code: 'custom',
@@ -473,9 +566,88 @@ function buildValidator(context: ValidationContext) {
               'the same segment must not appear in two consecutive positions; these two cuts ' +
               'overlap by more than half, so they show the same moment twice in a row',
           });
+        } else if (previous && previous.rawClipId === segment.rawClipId) {
+          // The defect the seven-cut live variation exposed: 0-4 then 4-8 then
+          // 8-12 out of one continuous take passes every other rule and yet
+          // produces no visible cut, because concatenating adjacent ranges just
+          // replays the take. A splice is only visible if footage was thrown
+          // away at it, or if the next cut jumps backwards.
+          const jump = Math.abs(segment.startSeconds - previous.endSeconds);
+          if (jump < MIN_CUT_GAP_SECONDS - 1e-9) {
+            ctx.addIssue({
+              code: 'custom',
+              path,
+              message:
+                `this cut continues the previous one from the same clip with only ` +
+                `${round2(jump)}s between them, so playing them back to back replays the ` +
+                `original take and the viewer sees no cut at all. Two neighbouring cuts from ` +
+                `one clip must either leave at least ${MIN_CUT_GAP_SECONDS}s of footage out ` +
+                `between them (${round2(previous.startSeconds)}-${round2(
+                  previous.endSeconds
+                )}s then ${round2(previous.endSeconds + MIN_CUT_GAP_SECONDS)}s or later), or ` +
+                `jump backwards to an earlier part of the clip`,
+            });
+          }
         }
       });
     });
+
+    // Structural distinctness between variations.
+    //
+    // The product's premise is N *different* edits of one shoot. The second
+    // live run returned five variations sharing one skeleton — long-clip chunk,
+    // short clip, long-clip chunk — with variations 4 and 5 differing only in
+    // hook text and a single substituted cut. Nothing checked it, because every
+    // rule until now looked at one variation at a time.
+    //
+    // Only neighbouring variations are compared. Comparing every pair would
+    // scale the difficulty as O(n^2) on a pool that may only hold a handful of
+    // distinct moments, and a chain in which each variation differs from the
+    // one before it is already the thing being asked for.
+    if (footage.hasTwoDistinctCuts) {
+      for (let index = 1; index < value.variations.length; index++) {
+        const previous = value.variations[index - 1].segments;
+        const current = value.variations[index].segments;
+        if (previous.length === 0 || current.length === 0) continue;
+        const path = ['variations', index, 'segments'];
+
+        // Cheapest and most visible difference: the first thing the viewer sees.
+        if (isSameFootage(previous[0], current[0])) {
+          ctx.addIssue({
+            code: 'custom',
+            path: [...path, 0],
+            message:
+              `this variation opens on the same footage as variation ${index} ` +
+              `(${current[0].rawClipId} ${round2(current[0].startSeconds)}-` +
+              `${round2(current[0].endSeconds)}s). Consecutive variations must be different ` +
+              `edits, not one edit with a new hook: start this one on a different moment`,
+          });
+        }
+
+        // "Different hook, one clip swapped" — the exact shape variations 4 and
+        // 5 took. Compared position by position, so reordering the same cuts
+        // counts as a different edit, which is what it looks like on screen.
+        if (
+          previous.length === current.length &&
+          current.length >= MIN_CUTS_FOR_SEQUENCE_DISTINCTNESS
+        ) {
+          const matching = current.filter((cut, position) =>
+            isSameFootage(previous[position], cut)
+          ).length;
+          if (matching >= current.length - 1) {
+            ctx.addIssue({
+              code: 'custom',
+              path,
+              message:
+                `this variation is the same edit as variation ${index}: ${matching} of its ` +
+                `${current.length} cuts are the same footage in the same position. Change the ` +
+                `order, the subdivision boundaries and which moments are used - at least two ` +
+                `positions must differ`,
+            });
+          }
+        }
+      }
+    }
   });
 }
 
@@ -522,10 +694,20 @@ function buildPrompt(
 
   // When the pool cannot fill the requested length, the model is told the real
   // ceiling instead of the target it cannot reach, so it stops padding.
+  //
+  // The accepted window is stated too, but the *aim* is stated first and
+  // tighter: the live run showed the model treating whatever bound it is given
+  // as the goal, so the goal it is given has to be the target itself.
+  const durationFloor = round2(job.lengthSeconds * (1 - DURATION_UNDER_TOLERANCE));
+  const durationCeiling = round2(job.lengthSeconds * (1 + DURATION_OVER_TOLERANCE));
+  const aimFloor = round2(job.lengthSeconds * (1 - DURATION_AIM_TOLERANCE));
+  const aimCeiling = round2(job.lengthSeconds * (1 + DURATION_AIM_TOLERANCE));
   const durationInstruction = footage.isSufficient
-    ? `Each variation's segment durations must sum to within ${Math.round(
-        DURATION_TOLERANCE * 100
-      )}% of the target length.`
+    ? `TOTAL LENGTH: AIM FOR ${job.lengthSeconds} SECONDS.
+Add up your cut durations: every variation should land between ${aimFloor}s and ${aimCeiling}s.
+A total below ${durationFloor}s or above ${durationCeiling}s is rejected outright, but do not aim for ${durationFloor}s -
+the creator asked for ${job.lengthSeconds}s, and a variation that stops short is a worse edit, not a safer one.
+If your total is under ${aimFloor}s, add another cut before you answer.`
     : `There is only ${footage.availableSeconds}s of distinct footage in the pool, which cannot fill the
 ${job.lengthSeconds}s target within the reuse limit below. Do NOT pad the video by repeating segments.
 Aim instead for a total of about ${footage.maxAchievableSeconds}s per variation - a shorter video is
@@ -553,6 +735,31 @@ SPLIT IT into several shorter cuts and place them at DIFFERENT POINTS in the vid
 as one long take. An 8s segment becomes, for example, a cut early in the video and a separate,
 non-overlapping cut later on. This is how you reach ${approximateCuts} cuts from a handful of long clips.`;
 
+  // The rule the seven-cut live variation needed and did not have. Stated in
+  // the prompt as well as enforced, so the model aims for it rather than
+  // discovering it through three correction rounds.
+  const visibleCutInstruction = `EVERY CUT MUST BE VISIBLE. Splitting a clip is only a cut if footage is thrown away at the
+splice. If two cuts NEXT TO EACH OTHER in the sequence come from the same clip, they must not be
+chronologically adjacent: leave at least ${MIN_CUT_GAP_SECONDS}s of footage OUT between them, or make the second cut
+jump BACKWARDS to an earlier part of the clip.
+  WRONG: 0-4 then 4-8 then 8-12 from one clip. That is the original take playing straight through -
+  the viewer sees no cut at all, and it will be rejected however many "cuts" you list.
+  RIGHT: 0-4 then 5-9 then 10-14 (a second of footage discarded at each splice), or 0-4 then 12-16
+  then 6-10 (out of order), or interleave a different clip between them.
+A ${MIN_CUT_GAP_SECONDS}s gap costs you almost nothing and is what makes the edit read as edited.`;
+
+  // The product is N different edits of one shoot, not one edit with N hooks.
+  const distinctnessInstruction =
+    job.variationCount > 1
+      ? `THE ${job.variationCount} VARIATIONS MUST BE STRUCTURALLY DIFFERENT EDITS, not one edit with different hook text.
+Each variation must differ from the one before it in ALL of these ways:
+- a different OPENING shot (a different moment, not the same shot re-trimmed);
+- a different ORDER (do not reuse one skeleton with a single clip swapped out);
+- different SUBDIVISION BOUNDARIES (if variation 1 splits a clip 0-4 / 8-12, variation 2 should
+  split it somewhere else, e.g. 2-6 / 13-17), and a different number of cuts where the length allows.
+Two neighbouring variations that match in every position but one will be rejected.`
+      : '';
+
   return `You are editing a short-form UGC ad video for the product "${job.productName}".
 Target length: ${job.lengthSeconds} seconds. Pacing: ${job.pacing}.
 Produce exactly ${job.variationCount} distinct variations.
@@ -562,13 +769,17 @@ ${JSON.stringify(segmentPool)}
 
 ${pacingInstruction}
 
+${visibleCutInstruction}
+
 ${durationInstruction}
+${distinctnessInstruction}
 If there are not enough distinct good segments to reach the target length, you may reuse a moment,
 but never in two consecutive positions in the sequence and never more than ${MAX_SEGMENT_REUSE} times in
 the same variation. Two cuts count as the SAME moment when they come from the same clip and overlap by
 more than half of the shorter one - so nudging a boundary (0-8 then 0.1-8) is still a repeat, while two
-non-overlapping cuts from one clip are different footage and are exactly what you should be doing.
-Prefer a shorter video over a repetitive one.
+non-overlapping cuts from one clip are different footage and are exactly what you should be doing,
+provided they obey the visible-cut rule above when they sit next to each other.
+If you ever have to choose between padding a variation and letting it run short, let it run short.
 Never reference a rawClipId that is not listed above, and never let endSeconds run past
 the end of that clip's listed footage.
 
