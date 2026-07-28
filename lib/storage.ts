@@ -59,9 +59,17 @@ export async function downloadClipToTempFile(storageKey: string): Promise<LocalC
   );
 
   const path = join(tmpdir(), `ugc-clip-${randomUUID()}`);
-  await pipeline(result.Body as Readable, createWriteStream(path));
-
   let removed = false;
+  try {
+    await pipeline(result.Body as Readable, createWriteStream(path));
+  } catch (error) {
+    // The caller never receives a handle for a download that failed, so a
+    // half-written file would be orphaned with nothing left to remove it.
+    removed = true;
+    await unlink(path).catch(() => {});
+    throw error;
+  }
+
   return {
     path,
     contentType: result.ContentType ?? 'application/octet-stream',
