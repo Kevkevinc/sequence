@@ -228,9 +228,24 @@ const VariationSchema = z.object({
   sizingOverlayPlacement: z.enum(OVERLAY_PLACEMENTS).nullable(),
 });
 
-const DirectorResponseSchema = z.object({
-  variations: z.array(VariationSchema).min(1),
-});
+/**
+ * Accepts either the requested `{variations: [...]}` wrapper or a bare `[...]`
+ * array of variations.
+ *
+ * The tagging step hit exactly this and was fixed the same way: the model
+ * returns the wrapper most of the time but drops it under load or on weaker
+ * models, and a live run failed all three correction attempts on nothing but
+ * the missing wrapper. Both shapes carry identical information, and the wrapper
+ * is our formatting preference rather than something any caller depends on, so
+ * normalising is strictly better than spending the retry budget on it. Every
+ * variation is still validated identically either way.
+ */
+const DirectorResponseSchema = z
+  .union([
+    z.object({ variations: z.array(VariationSchema).min(1) }),
+    z.array(VariationSchema).min(1),
+  ])
+  .transform((value) => (Array.isArray(value) ? { variations: value } : value));
 
 type DirectorResponse = z.infer<typeof DirectorResponseSchema>;
 

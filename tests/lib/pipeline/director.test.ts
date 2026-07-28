@@ -151,6 +151,23 @@ describe('planJob', () => {
     ]);
   });
 
+  it('accepts a bare variations array, not just the {variations: [...]} wrapper', async () => {
+    // Observed live: the model dropped the wrapper and the job burned all three
+    // correction attempts on nothing but the response shape.
+    mockGenerateContent.mockResolvedValue({
+      text: JSON.stringify([validVariationOne(), validVariationTwo()]),
+    });
+
+    const result = await planJob(jobId);
+
+    expect(result).toEqual({ success: true, variationCount: 2, warning: null });
+    // One call: the shape was normalised rather than sent back for correction.
+    expect(mockGenerateContent).toHaveBeenCalledTimes(1);
+
+    const saved = await db.select().from(editPlans).where(eq(editPlans.jobId, jobId));
+    expect(saved).toHaveLength(2);
+  });
+
   it('produces and saves the requested number of variations', async () => {
     mockGenerateContent.mockResolvedValue(validResponse());
 
