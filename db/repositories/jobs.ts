@@ -1,3 +1,4 @@
+import { desc, eq } from 'drizzle-orm';
 import { db } from '@/db/client';
 import { jobs, rawClips } from '@/db/schema';
 
@@ -38,5 +39,12 @@ export async function createJob(input: CreateJobInput) {
     }
 
     return job;
+  });
+}
+
+export async function listJobsForCreator(creatorId: string) {
+  return db.query.jobs.findMany({
+    where: eq(jobs.creatorId, creatorId),
+    orderBy: desc(jobs.createdAt),
   });
 }

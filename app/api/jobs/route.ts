@@ -1,6 +1,6 @@
 import { auth } from '@clerk/nextjs/server';
 import { getCreatorByClerkId } from '@/db/repositories/creators';
-import { createJob } from '@/db/repositories/jobs';
+import { createJob, listJobsForCreator } from '@/db/repositories/jobs';
 import { validateJobInput } from '@/lib/validation/job';
 
 export async function POST(req: Request) {
@@ -62,4 +62,15 @@ export async function POST(req: Request) {
   });
 
   return Response.json(job, { status: 201 });
+}
+
+export async function GET() {
+  const { userId } = await auth();
+  if (!userId) return new Response('Unauthorized', { status: 401 });
+
+  const creator = await getCreatorByClerkId(userId);
+  if (!creator) return new Response('Creator profile not found', { status: 404 });
+
+  const jobs = await listJobsForCreator(creator.id);
+  return Response.json(jobs);
 }
