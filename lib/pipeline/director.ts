@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { eq, inArray } from 'drizzle-orm';
 import { db } from '@/db/client';
-import { jobs, rawClips, segments, editPlans } from '@/db/schema';
+import { jobs, rawClips, segments, editPlans, creators } from '@/db/schema';
 import { getGeminiClient } from '@/lib/gemini/client';
 import { HOOK_STYLE_LIBRARY } from '@/lib/pipeline/hookLibrary';
 import { describeCause } from '@/lib/pipeline/errors';
@@ -15,8 +15,44 @@ const MAX_ATTEMPTS = 3;
 // validation failure is genuinely useful; the stored failure reason stays short.
 const MAX_CORRECTION_NOTE_LENGTH = 1500;
 
+// A variation's cuts must sum to within this fraction of the job's target length.
+const DURATION_TOLERANCE = 0.15;
+
+// The only placements Stage 3 can render. This single constant both builds the
+// prompt and validates the response, so the two cannot drift apart.
+const OVERLAY_PLACEMENTS = [
+  'top-left',
+  'top-center',
+  'top-right',
+  'bottom-left',
+  'bottom-center',
+  'bottom-right',
+] as const;
+
+// Separator between the measurement fields we assemble ourselves.
+const MEASUREMENT_SEPARATOR = ' · ';
+
+/**
+ * Any digit immediately followed by a length/weight unit. The creator's real
+ * height and weight come from their profile and are assembled in code; a model
+ * that writes measurements itself is inventing them, which would burn fabricated
+ * body stats into a real creator's published video.
+ */
+const FABRICATED_MEASUREMENT =
+  /\d\s*(?:lbs?|pounds?|kgs?|kilos?|cm|mm|ft|feet|foot|in(?:ch(?:es)?)?\b|['"′″])/i;
+
 type Job = typeof jobs.$inferSelect;
-type Segment = typeof segments.$inferSelect;
+type Creator = typeof creators.$inferSelect;
+
+/** A segment as offered to the model: times as numbers, not drizzle's numeric strings. */
+type PoolSegment = {
+  id: string;
+  rawClipId: string;
+  startSeconds: number;
+  endSeconds: number;
+  contentTag: string | null;
+  qualityTag: string | null;
+};
 
 const SegmentSelectionSchema = z
   .object({
@@ -33,8 +69,9 @@ const SegmentSelectionSchema = z
 const VariationSchema = z.object({
   segments: z.array(SegmentSelectionSchema).min(1),
   hookText: z.string().min(1),
+  // Only ever a lead-in phrase; the measurements are appended in code.
   sizingOverlayText: z.string().nullable(),
-  sizingOverlayPlacement: z.string().nullable(),
+  sizingOverlayPlacement: z.enum(OVERLAY_PLACEMENTS).nullable(),
 });
 
 const DirectorResponseSchema = z.object({
@@ -43,12 +80,23 @@ const DirectorResponseSchema = z.object({
 
 type DirectorResponse = z.infer<typeof DirectorResponseSchema>;
 
+type ValidationContext = {
+  expectedVariationCount: number;
+  targetLengthSeconds: number;
+  footageEndByClipId: Map<string, number>;
+  sizingOverlayEnabled: boolean;
+};
+
 /**
  * Wraps the structural schema with the checks that need this job's context:
- * the exact variation count that was ordered, and the footage that actually
- * exists. Anything that survives this is safe for the renderer to execute.
+ * the exact variation count that was ordered, the target length, the footage
+ * that actually exists, and the rule that the model never authors measurements.
+ * Anything that survives this is safe for the renderer to execute.
  */
-function buildValidator(expectedVariationCount: number, footageEndByClipId: Map<string, number>) {
+function buildValidator(context: ValidationContext) {
+  const { expectedVariationCount, targetLengthSeconds, footageEndByClipId, sizingOverlayEnabled } =
+    context;
+
   return DirectorResponseSchema.superRefine((value, ctx) => {
     if (value.variations.length !== expectedVariationCount) {
       ctx.addIssue({
@@ -59,8 +107,37 @@ function buildValidator(expectedVariationCount: number, footageEndByClipId: Map<
     }
 
     value.variations.forEach((variation, variationIndex) => {
+      const variationPath = ['variations', variationIndex];
+
+      const totalSeconds = variation.segments.reduce(
+        (sum, s) => sum + (s.endSeconds - s.startSeconds),
+        0
+      );
+      const allowedDrift = targetLengthSeconds * DURATION_TOLERANCE;
+      // Epsilon keeps an exactly-on-the-boundary total from failing on float noise.
+      if (Math.abs(totalSeconds - targetLengthSeconds) > allowedDrift + 1e-9) {
+        ctx.addIssue({
+          code: 'custom',
+          path: [...variationPath, 'segments'],
+          message: `total duration ${totalSeconds}s is not within ${Math.round(
+            DURATION_TOLERANCE * 100
+          )}% of the ${targetLengthSeconds}s target length`,
+        });
+      }
+
+      if (sizingOverlayEnabled && variation.sizingOverlayText) {
+        if (FABRICATED_MEASUREMENT.test(variation.sizingOverlayText)) {
+          ctx.addIssue({
+            code: 'custom',
+            path: [...variationPath, 'sizingOverlayText'],
+            message:
+              "sizingOverlayText must not contain any height, weight or size measurement; write only a short lead-in phrase, the creator's real measurements are appended automatically",
+          });
+        }
+      }
+
       variation.segments.forEach((segment, segmentIndex) => {
-        const path = ['variations', variationIndex, 'segments', segmentIndex];
+        const path = [...variationPath, 'segments', segmentIndex];
 
         const footageEnd = footageEndByClipId.get(segment.rawClipId);
         if (footageEnd === undefined) {
@@ -98,9 +175,39 @@ function buildValidator(expectedVariationCount: number, footageEndByClipId: Map<
   });
 }
 
-function buildPrompt(job: Job, segmentPool: Segment[], correctionNote?: string): string {
+/**
+ * Builds the overlay caption from stored values only: the creator's profile
+ * measurements and the size they recorded for this job. The model may supply a
+ * lead-in phrase, never a number. Returns null when there is nothing truthful to
+ * show, so a job with an unfilled profile degrades to no overlay rather than a
+ * broken or invented one.
+ */
+function buildSizingOverlayText(
+  creator: Creator,
+  job: Job,
+  leadIn: string | null
+): string | null {
+  const measurements = [
+    creator.height,
+    creator.weight,
+    job.sizeWorn ? `size ${job.sizeWorn}` : null,
+  ]
+    .map((part) => part?.trim())
+    .filter((part): part is string => Boolean(part));
+
+  if (measurements.length === 0) return null;
+
+  const caption = measurements.join(MEASUREMENT_SEPARATOR);
+  const phrase = leadIn?.trim();
+  return phrase ? `${phrase} ${caption}` : caption;
+}
+
+function buildPrompt(job: Job, segmentPool: PoolSegment[], correctionNote?: string): string {
+  const placements = OVERLAY_PLACEMENTS.map((p) => `"${p}"`).join(', ');
   const sizingInstruction = job.sizingOverlayEnabled
-    ? `This ad shows a sizing overlay${job.sizeWorn ? ` (size worn: ${job.sizeWorn})` : ''}. Write sizingOverlayText as a short on-screen fit note and sizingOverlayPlacement as one of "top-left", "top-center", "top-right", "bottom-left", "bottom-center", "bottom-right".`
+    ? `This ad shows a sizing overlay. The creator's real height and weight are appended automatically from their stored profile${
+        job.sizeWorn ? `, along with the size worn: ${job.sizeWorn}` : ''
+      }. So write sizingOverlayText as a short lead-in phrase ONLY (for example "For reference" or "Fit check") and never write any height, weight, or size numbers yourself - you do not know them and inventing them is not acceptable. Set sizingOverlayPlacement to one of: ${placements}.`
     : 'Set sizingOverlayText and sizingOverlayPlacement to null.';
 
   return `You are editing a short-form UGC ad video for the product "${job.productName}".
@@ -108,18 +215,11 @@ Target length: ${job.lengthSeconds} seconds. Pacing: ${job.pacing}.
 Produce exactly ${job.variationCount} distinct variations.
 
 Available segments (choose from these only, by rawClipId):
-${JSON.stringify(
-  segmentPool.map((s) => ({
-    id: s.id,
-    rawClipId: s.rawClipId,
-    startSeconds: s.startSeconds,
-    endSeconds: s.endSeconds,
-    contentTag: s.contentTag,
-    qualityTag: s.qualityTag,
-  }))
-)}
+${JSON.stringify(segmentPool)}
 
-Each variation's segments should sum to within 15% of the target length.
+Each variation's segment durations must sum to within ${Math.round(
+    DURATION_TOLERANCE * 100
+  )}% of the target length.
 If there are not enough distinct good segments to reach the target length, you may
 reuse a segment more than once, but never in two consecutive positions in the sequence.
 Never reference a rawClipId that is not listed above, and never let endSeconds run past
@@ -138,11 +238,18 @@ export async function planJob(
   jobId: string
 ): Promise<{ success: true; variationCount: number } | { success: false; error: string }> {
   try {
-    const [job] = await db.select().from(jobs).where(eq(jobs.id, jobId));
-    if (!job) return { success: false, error: `Job ${jobId} not found` };
+    // The creator is joined in because their stored height/weight are the only
+    // legitimate source for sizing-overlay measurements.
+    const [row] = await db
+      .select({ job: jobs, creator: creators })
+      .from(jobs)
+      .innerJoin(creators, eq(jobs.creatorId, creators.id))
+      .where(eq(jobs.id, jobId));
+    if (!row) return { success: false, error: `Job ${jobId} not found` };
+    const { job, creator } = row;
 
     const clips = await db.select().from(rawClips).where(eq(rawClips.jobId, jobId));
-    const segmentPool =
+    const poolRows =
       clips.length === 0
         ? []
         : await db
@@ -155,19 +262,37 @@ export async function planJob(
               )
             );
 
-    if (segmentPool.length === 0) {
+    if (poolRows.length === 0) {
       return { success: false, error: 'No usable segments were found for this job' };
     }
+
+    // Drizzle returns numeric columns as strings; the model is asked to answer
+    // in numbers, so offer the pool in numbers too rather than making it convert.
+    const segmentPool: PoolSegment[] = poolRows.map((s) => ({
+      id: s.id,
+      rawClipId: s.rawClipId,
+      startSeconds: Number(s.startSeconds),
+      endSeconds: Number(s.endSeconds),
+      contentTag: s.contentTag,
+      qualityTag: s.qualityTag,
+    }));
 
     // The furthest tagged end time per clip is the most footage we know exists,
     // so it bounds what the director is allowed to cut.
     const footageEndByClipId = new Map<string, number>();
     for (const segment of segmentPool) {
-      const end = Number(segment.endSeconds);
-      footageEndByClipId.set(segment.rawClipId, Math.max(footageEndByClipId.get(segment.rawClipId) ?? 0, end));
+      footageEndByClipId.set(
+        segment.rawClipId,
+        Math.max(footageEndByClipId.get(segment.rawClipId) ?? 0, segment.endSeconds)
+      );
     }
 
-    const validator = buildValidator(job.variationCount, footageEndByClipId);
+    const validator = buildValidator({
+      expectedVariationCount: job.variationCount,
+      targetLengthSeconds: job.lengthSeconds,
+      footageEndByClipId,
+      sizingOverlayEnabled: job.sizingOverlayEnabled,
+    });
     const client = getGeminiClient();
 
     let correctionNote: string | undefined;
@@ -207,16 +332,24 @@ export async function planJob(
     await db.transaction(async (tx) => {
       await tx.delete(editPlans).where(eq(editPlans.jobId, jobId));
       await tx.insert(editPlans).values(
-        variations.map((v, index) => ({
-          jobId,
-          variationNumber: index + 1,
-          segments: v.segments,
-          hookText: v.hookText,
-          // Never persist overlay copy for a job that turned the overlay off;
-          // Stage 3 renders whatever is stored here.
-          sizingOverlayText: job.sizingOverlayEnabled ? v.sizingOverlayText : null,
-          sizingOverlayPlacement: job.sizingOverlayEnabled ? v.sizingOverlayPlacement : null,
-        }))
+        variations.map((v, index) => {
+          // Never persist overlay copy for a job that turned the overlay off,
+          // and never persist a caption the model wrote the numbers for; Stage 3
+          // renders whatever is stored here.
+          const overlayText = job.sizingOverlayEnabled
+            ? buildSizingOverlayText(creator, job, v.sizingOverlayText)
+            : null;
+
+          return {
+            jobId,
+            variationNumber: index + 1,
+            segments: v.segments,
+            hookText: v.hookText,
+            sizingOverlayText: overlayText,
+            // A placement without a caption would render an empty overlay.
+            sizingOverlayPlacement: overlayText ? v.sizingOverlayPlacement : null,
+          };
+        })
       );
     });
 
