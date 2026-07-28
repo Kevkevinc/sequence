@@ -160,7 +160,7 @@ describe('planJob', () => {
     expect(mockGenerateContent).toHaveBeenCalledTimes(1);
     expect(mockGenerateContent).toHaveBeenCalledWith(
       expect.objectContaining({
-        model: 'gemini-2.5-pro',
+        model: 'gemini-3.6-flash',
         config: expect.objectContaining({ responseMimeType: 'application/json' }),
         contents: expect.arrayContaining([
           expect.objectContaining({

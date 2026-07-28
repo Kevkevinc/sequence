@@ -7,7 +7,11 @@ import { getClipBuffer } from '@/lib/storage';
 import { getGeminiClient } from '@/lib/gemini/client';
 import { describeCause } from '@/lib/pipeline/errors';
 
-const TAGGING_MODEL = 'gemini-2.5-flash';
+// gemini-2.5-flash was retired for new API accounts ("no longer available to
+// new users") and the 2.5/3.x Pro models return 429 quota-exceeded on the free
+// tier, so both pipeline steps run on a current Flash model. Verified working
+// against the live API before being chosen.
+const TAGGING_MODEL = 'gemini-3.6-flash';
 
 // How long to wait for Gemini to finish processing an uploaded video before
 // giving up: 30 polls x 2s = up to ~60s.

@@ -6,7 +6,10 @@ import { getGeminiClient } from '@/lib/gemini/client';
 import { HOOK_STYLE_LIBRARY } from '@/lib/pipeline/hookLibrary';
 import { describeCause } from '@/lib/pipeline/errors';
 
-const DIRECTOR_MODEL = 'gemini-2.5-pro';
+// Pro models (2.5-pro, 3.x-pro) return 429 quota-exceeded on the free API tier,
+// so the director runs on Flash too. Revisit if plan quality proves insufficient
+// and billing is enabled — this is the step that would benefit most from Pro.
+const DIRECTOR_MODEL = 'gemini-3.6-flash';
 
 // One initial call plus two correction retries, as specified for this step.
 const MAX_ATTEMPTS = 3;
