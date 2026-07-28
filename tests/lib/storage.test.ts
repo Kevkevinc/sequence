@@ -6,6 +6,7 @@ vi.mock('@aws-sdk/s3-request-presigner', () => ({
 
 import { createUploadUrl } from '@/lib/storage';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
+import type { PutObjectCommand } from '@aws-sdk/client-s3';
 
 describe('createUploadUrl', () => {
   beforeEach(() => {
@@ -30,8 +31,8 @@ describe('createUploadUrl', () => {
     const calls = vi.mocked(getSignedUrl).mock.calls;
     expect(calls.length).toBeGreaterThan(0);
 
-    const [client, command] = calls[0];
-    const { Bucket, Key, ContentType } = command.input;
+    const [, command] = calls[0];
+    const { Bucket, Key, ContentType } = (command as PutObjectCommand).input;
 
     // Verify Bucket matches R2_BUCKET_NAME env var (test value is 'test-bucket')
     expect(Bucket).toBe('test-bucket');
