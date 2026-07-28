@@ -26,6 +26,7 @@ describe('database schema', () => {
         'jobs.variation_count',
         'jobs.status',
         'jobs.failure_reason',
+        'jobs.warning',
         'raw_clips.storage_key',
         'raw_clips.original_filename',
         'raw_clips.job_id',

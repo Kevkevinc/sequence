@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { eq } from 'drizzle-orm';
 
 const mockGenerateContent = vi.fn();
@@ -8,7 +8,7 @@ vi.mock('@/lib/gemini/client', () => ({
 }));
 
 import { db } from '@/db/client';
-import { creators, rawClips, segments, editPlans } from '@/db/schema';
+import { creators, jobs, rawClips, segments, editPlans } from '@/db/schema';
 import { createCreatorIfNotExists } from '@/db/repositories/creators';
 import { createJob } from '@/db/repositories/jobs';
 import { planJob } from '@/lib/pipeline/director';
@@ -141,7 +141,7 @@ describe('planJob', () => {
 
     const result = await planJob(jobId);
 
-    expect(result).toEqual({ success: true, variationCount: 2 });
+    expect(result).toEqual({ success: true, variationCount: 2, warning: null });
 
     const saved = await db.select().from(editPlans).where(eq(editPlans.jobId, jobId));
     expect(saved).toHaveLength(2);
@@ -199,7 +199,7 @@ describe('planJob', () => {
 
     const result = await planJob(jobId);
 
-    expect(result).toEqual({ success: true, variationCount: 2 });
+    expect(result).toEqual({ success: true, variationCount: 2, warning: null });
     expect(mockGenerateContent).toHaveBeenCalledTimes(2);
 
     // The second prompt must actually carry the reason the first was rejected,
@@ -305,7 +305,7 @@ describe('planJob', () => {
 
     const result = await planJob(jobId);
 
-    expect(result).toEqual({ success: true, variationCount: 2 });
+    expect(result).toEqual({ success: true, variationCount: 2, warning: null });
   });
 
   it('rejects a response that does not contain the requested number of variations', async () => {
@@ -338,7 +338,7 @@ describe('planJob', () => {
     await planJob(jobId);
     const second = await planJob(jobId);
 
-    expect(second).toEqual({ success: true, variationCount: 2 });
+    expect(second).toEqual({ success: true, variationCount: 2, warning: null });
     const saved = await db.select().from(editPlans).where(eq(editPlans.jobId, jobId));
     expect(saved).toHaveLength(2);
   });
@@ -353,7 +353,7 @@ describe('planJob', () => {
 
     const result = await planJob(jobId);
 
-    expect(result).toEqual({ success: true, variationCount: 2 });
+    expect(result).toEqual({ success: true, variationCount: 2, warning: null });
     const saved = await db.select().from(editPlans).where(eq(editPlans.jobId, jobId));
     expect(saved.map((p) => p.sizingOverlayText)).toEqual([null, null]);
     expect(saved.map((p) => p.sizingOverlayPlacement)).toEqual([null, null]);
@@ -367,7 +367,7 @@ describe('planJob', () => {
 
     const result = await planJob(overlayJob.id);
 
-    expect(result).toEqual({ success: true, variationCount: 1 });
+    expect(result).toEqual({ success: true, variationCount: 1, warning: null });
     expect(promptTextOfCall(0)).toContain('sizing overlay');
     expect(promptTextOfCall(0)).toContain('size worn: M');
 
@@ -386,7 +386,7 @@ describe('planJob', () => {
 
     const result = await planJob(overlayJob.id);
 
-    expect(result).toEqual({ success: true, variationCount: 1 });
+    expect(result).toEqual({ success: true, variationCount: 1, warning: null });
     const saved = await db.select().from(editPlans).where(eq(editPlans.jobId, overlayJob.id));
     expect(saved[0].sizingOverlayText).toBe(`${CREATOR_HEIGHT} · ${CREATOR_WEIGHT} · size M`);
   });
@@ -435,7 +435,7 @@ describe('planJob', () => {
 
     const result = await planJob(overlayJob.id);
 
-    expect(result).toEqual({ success: true, variationCount: 1 });
+    expect(result).toEqual({ success: true, variationCount: 1, warning: null });
     const saved = await db.select().from(editPlans).where(eq(editPlans.jobId, overlayJob.id));
     expect(saved[0].sizingOverlayText).toBe('size L');
     expect(saved[0].sizingOverlayPlacement).toBe('top-left');
@@ -453,7 +453,7 @@ describe('planJob', () => {
 
     const result = await planJob(overlayJob.id);
 
-    expect(result).toEqual({ success: true, variationCount: 1 });
+    expect(result).toEqual({ success: true, variationCount: 1, warning: null });
     const saved = await db.select().from(editPlans).where(eq(editPlans.jobId, overlayJob.id));
     // A placement with no caption would render an empty overlay box.
     expect(saved[0].sizingOverlayText).toBeNull();
@@ -484,5 +484,324 @@ describe('planJob', () => {
     expect(result.success).toBe(false);
     if (!result.success) expect(result.error).toContain('00000000-0000-0000-0000-000000000000');
     expect(mockGenerateContent).not.toHaveBeenCalled();
+  });
+
+  describe('segment reuse cap', () => {
+    // Two short cuts from the existing pool, so a variation can hit the 15s
+    // target while still repeating one of them several times. That isolates the
+    // reuse rule: every other rule in the validator is satisfied.
+    const shortCut = () => segB(2, 6); // 4s
+    const spacer = () => segA(0, 1); // 1s
+
+    it('rejects a variation that uses the same segment three times', async () => {
+      // 14s total and no back-to-back repeat: legal under every rule the first
+      // live run had, which is exactly how it looped 3 segments 12 times.
+      const overused = variation(
+        [shortCut(), spacer(), shortCut(), spacer(), shortCut()],
+        HOOK_ONE
+      );
+      mockGenerateContent.mockResolvedValue(geminiResponse([overused, validVariationTwo()]));
+
+      const result = await planJob(jobId);
+
+      expect(result.success).toBe(false);
+      if (!result.success) expect(result.error).toContain('more than 2 times');
+      // The cap must feed the correction-note loop, not just sit in the prompt.
+      expect(mockGenerateContent).toHaveBeenCalledTimes(3);
+      expect(promptTextOfCall(1)).toContain('previous response was invalid');
+      expect(promptTextOfCall(1)).toContain('more than 2 times');
+
+      const saved = await db.select().from(editPlans).where(eq(editPlans.jobId, jobId));
+      expect(saved).toHaveLength(0);
+    });
+
+    it('still allows a segment to be used twice', async () => {
+      // 15s exactly: the cap is a cap, not a ban on reuse.
+      const reusedTwice = variation([shortCut(), segA(0, 7), shortCut()], HOOK_ONE);
+      mockGenerateContent.mockResolvedValue(geminiResponse([reusedTwice, validVariationTwo()]));
+
+      const result = await planJob(jobId);
+
+      expect(result).toEqual({ success: true, variationCount: 2, warning: null });
+      expect(mockGenerateContent).toHaveBeenCalledTimes(1);
+    });
+
+    it('tells the model the reuse limit up front', async () => {
+      mockGenerateContent.mockResolvedValue(validResponse());
+
+      await planJob(jobId);
+
+      expect(promptTextOfCall(0)).toContain('never more than 2 times');
+    });
+  });
+
+  describe('when there is not enough footage to fill the target length', () => {
+    // 7s of distinct footage against a 30s target: with the reuse cap the pool
+    // can fill 14s at most, so the +-15% rule is unreachable. This is the shape
+    // of the first live run, where 3 short clips got looped 12 times each.
+    const CUT_ONE = { startSeconds: 0, endSeconds: 4 };
+    const CUT_TWO = { startSeconds: 4, endSeconds: 7 };
+
+    let shortJobId: string;
+    let shortClipId: string;
+
+    beforeEach(async () => {
+      const shortJob = await createJob({
+        creatorId,
+        productName: 'Cozy Hoodie',
+        sizingOverlayEnabled: false,
+        lengthSeconds: 30,
+        pacing: 'medium',
+        variationCount: 1,
+        clips: [{ storageKey: 'clips/short.mp4', originalFilename: 'short.mp4' }],
+      });
+      shortJobId = shortJob.id;
+      const [clip] = await db.select().from(rawClips).where(eq(rawClips.jobId, shortJobId));
+      shortClipId = clip.id;
+      await db.insert(segments).values([
+        { rawClipId: shortClipId, startSeconds: '0', endSeconds: '4', contentTag: 'whole-clip', qualityTag: 'high' },
+        { rawClipId: shortClipId, startSeconds: '4', endSeconds: '7', contentTag: 'b-roll', qualityTag: 'medium' },
+      ]);
+    });
+
+    /** A one-variation response built from the short clip's cuts, in order. */
+    function shortResponse(cuts: { startSeconds: number; endSeconds: number }[]) {
+      return geminiResponse([
+        {
+          segments: cuts.map((cut) => ({ rawClipId: shortClipId, ...cut })),
+          hookText: HOOK_ONE,
+          sizingOverlayText: null,
+          sizingOverlayPlacement: null,
+        },
+      ]);
+    }
+
+    async function warningOf(id: string) {
+      const [row] = await db.select().from(jobs).where(eq(jobs.id, id));
+      return row.warning;
+    }
+
+    it('accepts a short video rather than failing the job', async () => {
+      // 14s against a 30s target: nowhere near the +-15% band, but it is every
+      // second the footage honestly has, which beats a padded 30s.
+      mockGenerateContent.mockResolvedValue(shortResponse([CUT_ONE, CUT_TWO, CUT_ONE, CUT_TWO]));
+
+      const result = await planJob(shortJobId);
+
+      expect(result.success).toBe(true);
+      expect(mockGenerateContent).toHaveBeenCalledTimes(1);
+      const saved = await db.select().from(editPlans).where(eq(editPlans.jobId, shortJobId));
+      expect(saved).toHaveLength(1);
+    });
+
+    it('records a plain-language warning on the job so the creator can be told', async () => {
+      mockGenerateContent.mockResolvedValue(shortResponse([CUT_ONE, CUT_TWO, CUT_ONE, CUT_TWO]));
+
+      const result = await planJob(shortJobId);
+
+      const expected =
+        'Only 7s of usable footage was available, so your videos are shorter than the 30s you ' +
+        'requested. Upload more clips for full-length videos.';
+      expect(result).toEqual({ success: true, variationCount: 1, warning: expected });
+      expect(await warningOf(shortJobId)).toBe(expected);
+    });
+
+    it('clears a stale warning when the job is re-planned with enough footage', async () => {
+      mockGenerateContent.mockResolvedValue(shortResponse([CUT_ONE, CUT_TWO, CUT_ONE, CUT_TWO]));
+      await planJob(shortJobId);
+      expect(await warningOf(shortJobId)).not.toBeNull();
+
+      // The creator uploads more: 30s of new footage now covers the target.
+      const [extraClip] = await db
+        .insert(rawClips)
+        .values({ jobId: shortJobId, storageKey: 'clips/extra.mp4', originalFilename: 'extra.mp4' })
+        .returning();
+      await db.insert(segments).values([
+        { rawClipId: extraClip.id, startSeconds: '0', endSeconds: '30', contentTag: 'whole-clip', qualityTag: 'high' },
+      ]);
+      mockGenerateContent.mockResolvedValue(
+        geminiResponse([
+          {
+            segments: [{ rawClipId: extraClip.id, startSeconds: 0, endSeconds: 30 }],
+            hookText: HOOK_ONE,
+            sizingOverlayText: null,
+            sizingOverlayPlacement: null,
+          },
+        ])
+      );
+
+      const result = await planJob(shortJobId);
+
+      expect(result).toEqual({ success: true, variationCount: 1, warning: null });
+      expect(await warningOf(shortJobId)).toBeNull();
+    });
+
+    it('still rejects a plan that throws away footage it could have used', async () => {
+      // 4s when 14s was achievable: the relaxed rule is "best achievable", not
+      // "any length goes".
+      mockGenerateContent.mockResolvedValue(shortResponse([CUT_ONE]));
+
+      const result = await planJob(shortJobId);
+
+      expect(result.success).toBe(false);
+      if (!result.success) expect(result.error).toContain('wastes the available footage');
+      expect(mockGenerateContent).toHaveBeenCalledTimes(3);
+      const saved = await db.select().from(editPlans).where(eq(editPlans.jobId, shortJobId));
+      expect(saved).toHaveLength(0);
+    });
+
+    it('still enforces the reuse cap, so the fallback cannot be padded either', async () => {
+      // 21s: closer to the 30s target than the honest 14s, and exactly the kind
+      // of padding this whole path exists to prevent.
+      mockGenerateContent.mockResolvedValue(
+        shortResponse([CUT_ONE, CUT_TWO, CUT_ONE, CUT_TWO, CUT_ONE, CUT_TWO])
+      );
+
+      const result = await planJob(shortJobId);
+
+      expect(result.success).toBe(false);
+      if (!result.success) expect(result.error).toContain('more than 2 times');
+    });
+
+    it('tells the model the real ceiling instead of the target it cannot reach', async () => {
+      mockGenerateContent.mockResolvedValue(shortResponse([CUT_ONE, CUT_TWO, CUT_ONE, CUT_TWO]));
+
+      await planJob(shortJobId);
+
+      const prompt = promptTextOfCall(0);
+      expect(prompt).toContain('only 7s of distinct footage');
+      expect(prompt).toContain('about 14s per variation');
+      expect(prompt).toContain('shorter video is');
+      // The unreachable rule must not also be asserted, or the model is being
+      // told to satisfy two contradictory instructions.
+      expect(prompt).not.toContain('must sum to within 15%');
+    });
+
+    it('counts overlapping tags on one clip once, not twice', async () => {
+      // The tagger always emits a whole-clip segment plus the good moments
+      // inside it, so a 10s clip arrives as 14s of tagged segments. Summing
+      // those would call this job "sufficient" and licence showing 10s of
+      // footage three times over to reach 30s.
+      const overlapJob = await createJob({
+        creatorId,
+        productName: 'Cozy Hoodie',
+        sizingOverlayEnabled: false,
+        lengthSeconds: 30,
+        pacing: 'medium',
+        variationCount: 1,
+        clips: [{ storageKey: 'clips/overlap.mp4', originalFilename: 'overlap.mp4' }],
+      });
+      const [clip] = await db.select().from(rawClips).where(eq(rawClips.jobId, overlapJob.id));
+      await db.insert(segments).values([
+        { rawClipId: clip.id, startSeconds: '0', endSeconds: '10', contentTag: 'whole-clip', qualityTag: 'high' },
+        { rawClipId: clip.id, startSeconds: '2', endSeconds: '6', contentTag: 'try-on', qualityTag: 'high' },
+      ]);
+      mockGenerateContent.mockResolvedValue(
+        geminiResponse([
+          {
+            segments: [
+              { rawClipId: clip.id, startSeconds: 0, endSeconds: 10 },
+              { rawClipId: clip.id, startSeconds: 2, endSeconds: 6 },
+              { rawClipId: clip.id, startSeconds: 0, endSeconds: 10 },
+            ],
+            hookText: HOOK_ONE,
+            sizingOverlayText: null,
+            sizingOverlayPlacement: null,
+          },
+        ])
+      );
+
+      const result = await planJob(overlapJob.id);
+
+      expect(result.success).toBe(true);
+      // 10s of real footage, not the 14s the tagged rows add up to.
+      expect(await warningOf(overlapJob.id)).toContain('Only 10s of usable footage');
+    });
+
+    it('leaves the +-15% rule in force when the footage is sufficient', async () => {
+      // The normal job's pool is ample, so the fallback must not apply to it.
+      mockGenerateContent.mockResolvedValue(
+        geminiResponse([variation([segA(0, 8)], HOOK_ONE), validVariationTwo()])
+      );
+
+      const result = await planJob(jobId);
+
+      expect(result.success).toBe(false);
+      if (!result.success) expect(result.error).toContain('total duration');
+      expect(promptTextOfCall(0)).toContain('must sum to within 15%');
+      expect(await warningOf(jobId)).toBeNull();
+    });
+  });
+
+  describe('transient Gemini failures', () => {
+    /** The 503 that the live run hit; see tests/lib/pipeline/retry.test.ts. */
+    function highDemand503() {
+      return Object.assign(new Error('503 high demand, please try again later'), { status: 503 });
+    }
+
+    const invalidResponse = { text: 'not valid json' };
+
+    beforeEach(() => {
+      vi.spyOn(console, 'warn').mockImplementation(() => {});
+    });
+
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
+
+    it('retries a transient failure without turning it into a correction note', async () => {
+      mockGenerateContent
+        .mockRejectedValueOnce(highDemand503())
+        .mockResolvedValueOnce(invalidResponse)
+        .mockResolvedValueOnce(validResponse());
+
+      const result = await planJob(jobId);
+
+      expect(result).toEqual({ success: true, variationCount: 2, warning: null });
+      expect(mockGenerateContent).toHaveBeenCalledTimes(3);
+      // The call replacing the 503 asks the same question again: the model never
+      // answered, so there is nothing for it to correct.
+      expect(promptTextOfCall(1)).not.toContain('previous response was invalid');
+      // The call after the genuinely invalid answer does carry the correction.
+      expect(promptTextOfCall(2)).toContain('previous response was invalid');
+    });
+
+    it('does not let a transient failure consume a validation attempt', async () => {
+      mockGenerateContent
+        .mockRejectedValueOnce(highDemand503())
+        .mockResolvedValue(invalidResponse);
+
+      const result = await planJob(jobId);
+
+      expect(result.success).toBe(false);
+      // 1 transient retry + the full 3-attempt validation budget.
+      expect(mockGenerateContent).toHaveBeenCalledTimes(4);
+      if (!result.success) expect(result.error).toContain('after 3 attempts');
+    });
+
+    it('fails with an error saying it was retried when the outage does not clear', async () => {
+      mockGenerateContent.mockRejectedValue(highDemand503());
+
+      const result = await planJob(jobId);
+
+      expect(result.success).toBe(false);
+      expect(mockGenerateContent).toHaveBeenCalledTimes(3);
+      if (!result.success) {
+        expect(result.error).toContain('still failed after 3 attempts');
+        expect(result.error).toContain('high demand');
+      }
+    });
+
+    it('does not retry a terminal 404 model-not-found failure', async () => {
+      mockGenerateContent.mockRejectedValue(
+        Object.assign(new Error('models/gemini-nope is not found'), { status: 404 })
+      );
+
+      const result = await planJob(jobId);
+
+      expect(result.success).toBe(false);
+      expect(mockGenerateContent).toHaveBeenCalledTimes(1);
+      if (!result.success) expect(result.error).toContain('is not found');
+    });
   });
 });

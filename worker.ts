@@ -26,20 +26,35 @@ const POLL_INTERVAL_MS = 5000;
  *  - The redundant outer `status = 'pending'` is belt and braces: if a
  *    concurrent update ever does slip through, Postgres re-checks the WHERE
  *    clause against the updated row, sees `tagging`, and claims nothing.
+ *
+ * `restrictToCreatorId` narrows the queue to one creator's jobs. Production
+ * never passes it — the queue is global and oldest-first, which is correct.
+ * It exists because the test suite runs against the shared dev database, where
+ * an unscoped claim once grabbed a real creator's job and stranded it in
+ * `tagging`. Tests pass their own throwaway creator's id so a test run can only
+ * ever claim jobs that same test seeded. It narrows the row set only; the
+ * ordering and the `FOR UPDATE SKIP LOCKED` claim are untouched, so the
+ * concurrency behaviour under test is exactly production's.
  */
-export async function claimNextPendingJob(): Promise<{ id: string } | undefined> {
+export async function claimNextPendingJob(
+  options: { restrictToCreatorId?: string } = {}
+): Promise<{ id: string } | undefined> {
+  const claimable = options.restrictToCreatorId
+    ? and(eq(jobs.status, 'pending'), eq(jobs.creatorId, options.restrictToCreatorId))
+    : eq(jobs.status, 'pending');
+
   const [claimed] = await db
     .update(jobs)
     .set({ status: 'tagging' })
     .where(
       and(
-        eq(jobs.status, 'pending'),
+        claimable,
         eq(
           jobs.id,
           db
             .select({ id: jobs.id })
             .from(jobs)
-            .where(eq(jobs.status, 'pending'))
+            .where(claimable)
             // Oldest first, so a job cannot be starved by newer arrivals.
             .orderBy(jobs.createdAt)
             .limit(1)
@@ -127,6 +142,12 @@ export async function processJob(jobId: string): Promise<void> {
     }
 
     plansCommitted = true;
+
+    if (planResult.warning) {
+      // Already stored on the job for the creator to read; logged too so the
+      // reason a job produced short videos is visible in the worker's output.
+      console.warn(`Job ${jobId}: ${planResult.warning}`);
+    }
 
     await db
       .update(jobs)

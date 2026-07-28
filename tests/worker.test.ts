@@ -14,14 +14,17 @@ import { claimNextPendingJob, processJob } from '@/worker';
 
 describe('worker', () => {
   const CLERK_ID = 'test_clerk_user_worker';
+  // A second throwaway creator, used to prove the claim stays inside its scope.
+  const OTHER_CLERK_ID = 'test_clerk_user_worker_other';
   let creatorId: string;
+  let otherCreatorId: string | undefined;
 
   /**
    * Removes every row this file created on a previous run. Child rows go first
    * because raw_clips/edit_plans reference jobs and segments reference raw_clips.
    */
-  async function cleanUpCreatorJobs() {
-    const ownJobs = await db.select({ id: jobs.id }).from(jobs).where(eq(jobs.creatorId, creatorId));
+  async function cleanUpCreatorJobs(ownerId: string) {
+    const ownJobs = await db.select({ id: jobs.id }).from(jobs).where(eq(jobs.creatorId, ownerId));
     if (ownJobs.length === 0) return;
     const jobIds = ownJobs.map((j) => j.id);
 
@@ -54,34 +57,78 @@ describe('worker', () => {
     return row;
   }
 
+  /** Deletes a throwaway creator and everything it owns, if it still exists. */
+  async function removeCreator(clerkUserId: string) {
+    const stillThere = await db.query.creators.findFirst({
+      where: eq(creators.clerkUserId, clerkUserId),
+    });
+    if (!stillThere) return;
+    await cleanUpCreatorJobs(stillThere.id);
+    await db.delete(creators).where(eq(creators.id, stillThere.id));
+  }
+
   beforeEach(async () => {
     vi.clearAllMocks();
     const creator = await createCreatorIfNotExists(CLERK_ID);
     creatorId = creator.id;
-    await cleanUpCreatorJobs();
+    otherCreatorId = undefined;
+    await cleanUpCreatorJobs(creatorId);
+    // A leftover foreign job from an interrupted run would otherwise sit
+    // `pending` forever and confuse the scoping test.
+    await removeCreator(OTHER_CLERK_ID);
   });
 
   afterEach(async () => {
-    await cleanUpCreatorJobs();
-    const stillThere = await db.query.creators.findFirst({ where: eq(creators.clerkUserId, CLERK_ID) });
-    if (stillThere) await db.delete(creators).where(eq(creators.id, stillThere.id));
+    await cleanUpCreatorJobs(creatorId);
+    await removeCreator(CLERK_ID);
+    if (otherCreatorId) await removeCreator(OTHER_CLERK_ID);
   });
 
+  /**
+   * Claims only from this file's throwaway creator.
+   *
+   * These tests run against the shared dev database, where an unscoped claim is
+   * indistinguishable from the worker's and once grabbed a real creator's job,
+   * stranding it in `tagging` with nothing to move it on. Scoping is a filter
+   * on the same statement — the ordering and the `FOR UPDATE SKIP LOCKED` claim
+   * are untouched, so what is under test is still exactly production's claim.
+   */
+  function claimOwnJob() {
+    return claimNextPendingJob({ restrictToCreatorId: creatorId });
+  }
+
   it('claims a pending job and moves it to tagging', async () => {
-    await makeJob();
+    const job = await makeJob();
 
-    // The queue is global, so record which jobs were actually claimable before
-    // claiming: the claim must return one of those, not an arbitrary row.
-    const pendingBefore = await db.select({ id: jobs.id }).from(jobs).where(eq(jobs.status, 'pending'));
-    const pendingIds = pendingBefore.map((j) => j.id);
+    const claimed = await claimOwnJob();
 
-    const claimed = await claimNextPendingJob();
-
-    expect(claimed?.id).toBeDefined();
-    expect(pendingIds).toContain(claimed!.id);
+    // Exact, not "one of the pending rows": the claim must never reach outside
+    // the jobs this test seeded.
+    expect(claimed?.id).toBe(job.id);
 
     const updated = await statusOf(claimed!.id);
     expect(updated.status).toBe('tagging');
+  });
+
+  it('never claims a job belonging to someone else', async () => {
+    // The guard that makes the rest of this file safe on a shared database.
+    const other = await createCreatorIfNotExists(OTHER_CLERK_ID);
+    otherCreatorId = other.id;
+    const foreignJob = await createJob({
+      creatorId: other.id,
+      productName: 'Someone Else Product',
+      sizingOverlayEnabled: false,
+      lengthSeconds: 15,
+      pacing: 'fast',
+      variationCount: 1,
+      clips: [{ storageKey: 'clips/other.mp4', originalFilename: 'other.mp4' }],
+    });
+
+    const claimed = await claimOwnJob();
+
+    expect(claimed).toBeUndefined();
+    const untouched = await statusOf(foreignJob.id);
+    expect(untouched.status).toBe('pending');
   });
 
   it('never hands the same job to two concurrent workers', async () => {
@@ -89,9 +136,10 @@ describe('worker', () => {
     // rather than double-claiming: this is the check a plain
     // "select ... limit 1" subquery (no row lock) fails under READ COMMITTED.
     const CLAIMERS = 6;
-    await Promise.all([makeJob(), makeJob(), makeJob(), makeJob()]);
+    const seeded = await Promise.all([makeJob(), makeJob(), makeJob(), makeJob()]);
+    const seededIds = new Set(seeded.map((j) => j.id));
 
-    const claims = await Promise.all(Array.from({ length: CLAIMERS }, () => claimNextPendingJob()));
+    const claims = await Promise.all(Array.from({ length: CLAIMERS }, () => claimOwnJob()));
     const claimedIds = claims.filter((c): c is { id: string } => c !== undefined).map((c) => c.id);
 
     // Uniqueness alone passes vacuously if nothing is claimed at all, which an
@@ -100,6 +148,7 @@ describe('worker', () => {
     // loser retries against the remaining rows rather than giving up.
     expect(claimedIds.length).toBeGreaterThanOrEqual(4);
     expect(new Set(claimedIds).size).toBe(claimedIds.length);
+    expect(claimedIds.every((id) => seededIds.has(id))).toBe(true);
 
     // Every claimed job must have actually landed in `tagging`.
     const claimedRows = await db.select().from(jobs).where(inArray(jobs.id, claimedIds));
@@ -109,7 +158,7 @@ describe('worker', () => {
   it('processes a job end to end: tags all clips, plans it, marks planned', async () => {
     const job = await makeJob();
     vi.mocked(tagClip).mockResolvedValue({ success: true, segmentCount: 1 });
-    vi.mocked(planJob).mockResolvedValue({ success: true, variationCount: 1 });
+    vi.mocked(planJob).mockResolvedValue({ success: true, variationCount: 1, warning: null });
 
     await processJob(job.id);
 
@@ -121,13 +170,32 @@ describe('worker', () => {
     expect(updated.failureReason).toBeNull();
   });
 
+  it('logs the planner warning but still marks a short-footage job planned', async () => {
+    const job = await makeJob();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.mocked(tagClip).mockResolvedValue({ success: true, segmentCount: 1 });
+    vi.mocked(planJob).mockResolvedValue({
+      success: true,
+      variationCount: 1,
+      warning: 'Only 7s of usable footage was available',
+    });
+
+    await processJob(job.id);
+
+    // A short video is a usable result: this must not become a failure.
+    const updated = await statusOf(job.id);
+    expect(updated.status).toBe('planned');
+    expect(warn.mock.calls.flat().join(' ')).toContain('Only 7s of usable footage');
+    warn.mockRestore();
+  });
+
   it('continues with the clips that tagged successfully when only some fail', async () => {
     const job = await makeJob(2);
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     vi.mocked(tagClip)
       .mockResolvedValueOnce({ success: false, error: 'clip unreadable' })
       .mockResolvedValueOnce({ success: true, segmentCount: 3 });
-    vi.mocked(planJob).mockResolvedValue({ success: true, variationCount: 1 });
+    vi.mocked(planJob).mockResolvedValue({ success: true, variationCount: 1, warning: null });
 
     await processJob(job.id);
 
@@ -191,7 +259,7 @@ describe('worker', () => {
     let statusDuringPlanning: string | undefined;
     vi.mocked(planJob).mockImplementation(async () => {
       statusDuringPlanning = (await statusOf(job.id)).status;
-      return { success: true, variationCount: 1 };
+      return { success: true, variationCount: 1, warning: null };
     });
 
     await processJob(job.id);

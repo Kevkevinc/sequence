@@ -10,6 +10,7 @@ type Job = {
   lengthSeconds: number;
   pacing: string;
   variationCount: number;
+  warning: string | null;
   createdAt: string;
 };
 
@@ -65,6 +66,8 @@ export default function JobsPage() {
             <li key={job.id}>
               {job.productName} — {job.lengthSeconds}s, {job.pacing} pacing, {job.variationCount}{' '}
               variations — {job.status}
+              {/* The job succeeded, so this is advice rather than an error. */}
+              {job.warning && <p style={{ color: '#a15c00' }}>{job.warning}</p>}
             </li>
           ))}
         </ul>

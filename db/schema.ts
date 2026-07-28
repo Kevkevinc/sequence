@@ -22,6 +22,10 @@ export const jobs = pgTable('jobs', {
   variationCount: integer('variation_count').notNull(),
   status: jobStatusEnum('status').notNull().default('pending'),
   failureReason: text('failure_reason'),
+  // A plain-language note for a job that succeeded with a caveat -- currently
+  // "your footage could not fill the length you asked for". Distinct from
+  // failureReason: the job is `planned` and the result is usable.
+  warning: text('warning'),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 });
 
