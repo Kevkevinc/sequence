@@ -5,6 +5,7 @@ import { db } from '@/db/client';
 import { rawClips, segments } from '@/db/schema';
 import { getClipBuffer } from '@/lib/storage';
 import { getGeminiClient } from '@/lib/gemini/client';
+import { describeCause } from '@/lib/pipeline/errors';
 
 const TAGGING_MODEL = 'gemini-2.5-flash';
 
@@ -41,19 +42,6 @@ times in seconds. Tag each segment's contentTag as one of: "whole-clip", "b-roll
 engaging/usable the moment is (steady footage, clear subject, good lighting).
 Respond with JSON only, matching this shape:
 {"segments": [{"startSeconds": number, "endSeconds": number, "contentTag": string, "qualityTag": string}]}`;
-
-// Longest cause detail we fold into a returned error string. Zod reports every
-// failing field, which for a large malformed response would otherwise flood the
-// job's failure_reason column.
-const MAX_CAUSE_LENGTH = 300;
-
-function describeCause(error: unknown): string {
-  const message = error instanceof Error ? error.message : String(error);
-  const collapsed = message.replace(/\s+/g, ' ').trim();
-  return collapsed.length > MAX_CAUSE_LENGTH
-    ? `${collapsed.slice(0, MAX_CAUSE_LENGTH)}...`
-    : collapsed;
-}
 
 async function waitUntilActive(client: GoogleGenAI, fileName: string): Promise<void> {
   for (let attempt = 0; attempt < FILE_POLL_ATTEMPTS; attempt++) {
