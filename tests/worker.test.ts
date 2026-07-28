@@ -94,6 +94,11 @@ describe('worker', () => {
     const claims = await Promise.all(Array.from({ length: CLAIMERS }, () => claimNextPendingJob()));
     const claimedIds = claims.filter((c): c is { id: string } => c !== undefined).map((c) => c.id);
 
+    // Uniqueness alone passes vacuously if nothing is claimed at all, which an
+    // implementation that skipped or blocked too eagerly (e.g. `noWait`) would
+    // do. At least the four seeded jobs must actually be handed out: a lock
+    // loser retries against the remaining rows rather than giving up.
+    expect(claimedIds.length).toBeGreaterThanOrEqual(4);
     expect(new Set(claimedIds).size).toBe(claimedIds.length);
 
     // Every claimed job must have actually landed in `tagging`.
@@ -118,6 +123,7 @@ describe('worker', () => {
 
   it('continues with the clips that tagged successfully when only some fail', async () => {
     const job = await makeJob(2);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     vi.mocked(tagClip)
       .mockResolvedValueOnce({ success: false, error: 'clip unreadable' })
       .mockResolvedValueOnce({ success: true, segmentCount: 3 });
@@ -130,6 +136,15 @@ describe('worker', () => {
 
     const updated = await statusOf(job.id);
     expect(updated.status).toBe('planned');
+
+    // The job row stays clean, so the dropped clip must at least be logged:
+    // otherwise the creator gets an edit cut from less footage with no trace why.
+    const droppedClipId = vi.mocked(tagClip).mock.calls[0][0];
+    expect(warn).toHaveBeenCalledTimes(1);
+    const warned = warn.mock.calls[0].join(' ');
+    expect(warned).toContain(droppedClipId);
+    expect(warned).toContain('clip unreadable');
+    warn.mockRestore();
   });
 
   it('marks the job failed with a reason when every clip fails tagging', async () => {

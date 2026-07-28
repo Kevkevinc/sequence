@@ -78,6 +78,10 @@ async function failJob(jobId: string, reason: string): Promise<void> {
  * nothing would ever pick it up again.
  */
 export async function processJob(jobId: string): Promise<void> {
+  // Distinguishes "the pipeline broke" from "the pipeline finished but the
+  // bookkeeping write failed", which are very different things to report.
+  let plansCommitted = false;
+
   try {
     const clips = await db.select().from(rawClips).where(eq(rawClips.jobId, jobId));
 
@@ -87,11 +91,30 @@ export async function processJob(jobId: string): Promise<void> {
     }
 
     const tagResults = await Promise.all(clips.map((clip) => tagClip(clip.id)));
+    const failedTags = clips
+      .map((clip, index) => ({ clip, result: tagResults[index] }))
+      .filter((tagged) => !tagged.result.success);
 
-    if (!tagResults.some((r) => r.success)) {
-      const reasons = tagResults.map((r) => (r.success ? '' : r.error)).filter(Boolean).join('; ');
+    if (failedTags.length === clips.length) {
+      const reasons = failedTags
+        .map((tagged) => (tagged.result.success ? '' : tagged.result.error))
+        .filter(Boolean)
+        .join('; ');
       await failJob(jobId, `All clips failed tagging: ${reasons}`);
       return;
+    }
+
+    if (failedTags.length > 0) {
+      // The job carries on, but the creator's edit is cut from less footage
+      // than they uploaded. The job row stays clean (it did succeed), so the
+      // log is the only place this is recorded — say which clips were dropped.
+      const detail = failedTags
+        .map((tagged) => `${tagged.clip.id} (${tagged.result.success ? '' : tagged.result.error})`)
+        .join('; ');
+      console.warn(
+        `Job ${jobId}: ${failedTags.length} of ${clips.length} clips failed tagging and are ` +
+          `excluded from the edit: ${detail}`
+      );
     }
 
     await db.update(jobs).set({ status: 'planning' }).where(eq(jobs.id, jobId));
@@ -103,20 +126,66 @@ export async function processJob(jobId: string): Promise<void> {
       return;
     }
 
+    plansCommitted = true;
+
     await db
       .update(jobs)
       .set({ status: 'planned', failureReason: null })
       .where(eq(jobs.id, jobId));
   } catch (error) {
-    await failJob(jobId, `Unexpected worker error: ${describeCause(error)}`);
+    // `planJob` has already written its edit_plans rows by this point, so
+    // reporting a generic pipeline failure would be actively wrong: the plans
+    // exist and only the status write is missing.
+    await failJob(
+      jobId,
+      plansCommitted
+        ? `Edit plans were generated but the job could not be marked planned: ${describeCause(error)}`
+        : `Unexpected worker error: ${describeCause(error)}`
+    );
   }
 }
 
+let shuttingDown = false;
+/** Set while the worker is idling between polls, so a signal can cut the wait short. */
+let wakeFromPoll: (() => void) | undefined;
+
+function sleepUntilNextPoll(): Promise<void> {
+  return new Promise<void>((resolve) => {
+    const finish = () => {
+      clearTimeout(timer);
+      wakeFromPoll = undefined;
+      resolve();
+    };
+    const timer = setTimeout(finish, POLL_INTERVAL_MS);
+    wakeFromPoll = finish;
+  });
+}
+
+/**
+ * Stops the worker claiming anything new, but lets the job already in flight
+ * run to completion. Without this, a deploy or a Ctrl-C mid-job abandons that
+ * job in `tagging`/`planning` with nothing to move it on. A second signal
+ * gives up waiting and exits immediately.
+ */
+function requestShutdown(signal: NodeJS.Signals) {
+  if (shuttingDown) {
+    console.warn(`Received ${signal} again, exiting without waiting for the current job.`);
+    process.exit(1);
+  }
+  shuttingDown = true;
+  console.log(`Received ${signal}, finishing the current job before exiting...`);
+  wakeFromPoll?.();
+}
+
 async function main() {
+  process.on('SIGTERM', requestShutdown);
+  process.on('SIGINT', requestShutdown);
+
   console.log(
     `Worker started, polling for pending jobs every ${POLL_INTERVAL_MS / 1000} seconds...`
   );
-  for (;;) {
+
+  while (!shuttingDown) {
     try {
       const claimed = await claimNextPendingJob();
       if (claimed) {
@@ -130,10 +199,18 @@ async function main() {
       // the worker; back off and try the next poll.
       console.error(`Worker poll failed: ${describeCause(error)}`);
     }
-    await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
+    if (shuttingDown) break;
+    await sleepUntilNextPoll();
   }
+
+  console.log('Worker stopped.');
 }
 
 if (require.main === module) {
-  main();
+  main()
+    .then(() => process.exit(0))
+    .catch((error) => {
+      console.error('Worker exited unexpectedly:', error);
+      process.exit(1);
+    });
 }
