@@ -39,6 +39,53 @@ const DIRECTOR_RETRY: TransientRetryOptions = {
  */
 const MAX_SEGMENT_REUSE = 2;
 
+/**
+ * When two cuts from the same clip count as the same footage.
+ *
+ * The reuse cap used to key on the exact `rawClipId|start|end` triple, which is
+ * both too strict and too loose now that the director is actively told to split
+ * long segments. Splitting 0-8s into 0-4s and 4-8s is genuinely two different
+ * moments and must not count as a repeat; nudging a boundary (0-8s then 0.1-8s)
+ * is the same moment wearing a disguise and must.
+ *
+ * The line is drawn at *more than half of the shorter cut*: past that point the
+ * majority of the shorter cut is footage the viewer has already seen, so it
+ * reads as a repeat. At or below it, most of the cut is new. Exactly-half
+ * overlap (0-4s and 2-6s) stays legal, which keeps evenly-staggered subdivision
+ * available to the model.
+ */
+const SAME_FOOTAGE_OVERLAP_RATIO = 0.5;
+
+/**
+ * Seconds per cut for each pacing preset, taken verbatim from the product spec:
+ * "Slow ~5-6s/clip, Medium ~3-4s/clip, Fast ~1-2s/clip". The whole product is
+ * fast-cut UGC pacing, so this is a core requirement, not a stylistic hint.
+ */
+const PACING_PRESET_SECONDS: Record<Job['pacing'], { min: number; max: number }> = {
+  slow: { min: 5, max: 6 },
+  medium: { min: 3, max: 4 },
+  fast: { min: 1, max: 2 },
+};
+
+/**
+ * How far outside its preset a single cut may sit before it stops reading as
+ * the requested pace. 25% widens medium to 2.25-5s: loose enough that the model
+ * has room to hit the total-length target without threading a needle, tight
+ * enough that the live run's 14s and 16s opening shots are rejected outright.
+ */
+const PACING_TOLERANCE = 0.25;
+
+/**
+ * The last cut of a variation may fall this far below the band's floor.
+ *
+ * Landing exactly on the total-length target sometimes leaves a remainder, and
+ * a short final beat before the video ends is ordinary editing rather than a
+ * pacing failure. The exception is deliberately one-sided: nothing is allowed
+ * to run *longer* than the band, because a long tail cut (the live run ended a
+ * variation on 13.5s) is precisely the defect being fixed.
+ */
+const FINAL_CUT_FLOOR_RATIO = 0.5;
+
 // Correction notes are fed back to the model, where a longer excerpt of the
 // validation failure is genuinely useful; the stored failure reason stays short.
 const MAX_CORRECTION_NOTE_LENGTH = 1500;
@@ -108,12 +155,17 @@ const DirectorResponseSchema = z.object({
 
 type DirectorResponse = z.infer<typeof DirectorResponseSchema>;
 
+/** The allowed length of a single cut, in seconds, for one pacing preset. */
+type PacingBand = { min: number; max: number };
+
 type ValidationContext = {
   expectedVariationCount: number;
   targetLengthSeconds: number;
   footageEndByClipId: Map<string, number>;
   sizingOverlayEnabled: boolean;
   footage: PoolCapacity;
+  pacing: Job['pacing'];
+  pacingBand: PacingBand;
 };
 
 /** What the tagged segment pool can physically produce under the reuse cap. */
@@ -128,9 +180,42 @@ type PoolCapacity = {
   isSufficient: boolean;
 };
 
-/** Identity of a cut, so the same moment chosen twice is recognised as a repeat. */
+/** Identity of a *tagged* segment, used to de-duplicate the offered pool. */
 function segmentKey(segment: { rawClipId: string; startSeconds: number; endSeconds: number }): string {
   return `${segment.rawClipId}|${segment.startSeconds}|${segment.endSeconds}`;
+}
+
+type Cut = { rawClipId: string; startSeconds: number; endSeconds: number };
+
+/** Widest allowed length for one cut under a pacing preset. */
+function bandFor(pacing: Job['pacing']): PacingBand {
+  const preset = PACING_PRESET_SECONDS[pacing];
+  return {
+    min: preset.min * (1 - PACING_TOLERANCE),
+    max: preset.max * (1 + PACING_TOLERANCE),
+  };
+}
+
+/** Trims float noise so messages read as "3.5s", never "3.4999999999999996s". */
+function round2(seconds: number): number {
+  return Math.round(seconds * 100) / 100;
+}
+
+function cutDuration(cut: Cut): number {
+  return cut.endSeconds - cut.startSeconds;
+}
+
+/**
+ * Whether two cuts show substantially the same moment. Used both for the reuse
+ * cap and for the no-repeat-back-to-back rule, so the same moment cannot appear
+ * consecutively under two slightly different boundaries either.
+ */
+function isSameFootage(a: Cut, b: Cut): boolean {
+  if (a.rawClipId !== b.rawClipId) return false;
+  const shorter = Math.min(cutDuration(a), cutDuration(b));
+  if (shorter <= 0) return false;
+  const overlap = Math.min(a.endSeconds, b.endSeconds) - Math.max(a.startSeconds, b.startSeconds);
+  return overlap > shorter * SAME_FOOTAGE_OVERLAP_RATIO + 1e-9;
 }
 
 /** Total length covered by a set of possibly-overlapping intervals. */
@@ -160,10 +245,24 @@ function unionSeconds(intervals: { start: number; end: number }[]): number {
  * padding this measurement exists to prevent. It is also the number the
  * creator-facing warning quotes, and "you gave us 10s" has to be true.
  *
- * A single unique segment cannot be repeated at all — its second use would
- * necessarily sit next to its first — so its ceiling is one use, not two.
+ * Screen time, not cut count, is what the ceiling measures, so subdivision does
+ * not raise it: splitting 0-8s into 0-4s and 4-8s still spends 8 seconds of
+ * footage. `available x MAX_SEGMENT_REUSE` therefore remains exactly "every
+ * second of footage shown at most twice" under the overlap-based reuse rule.
+ *
+ * What subdivision *does* change is whether the doubling is reachable at all.
+ * The old special case ("a single tagged segment cannot be repeated, because
+ * its second use would sit next to its first") is no longer true: one 15s
+ * segment now splits into cuts that alternate perfectly well. The real
+ * condition is whether the footage is long enough to yield two cuts that are
+ * not the same moment, which is a question about seconds, not about how many
+ * rows the tagger happened to emit.
  */
-function measurePool(pool: PoolSegment[], targetLengthSeconds: number): PoolCapacity {
+function measurePool(
+  pool: PoolSegment[],
+  targetLengthSeconds: number,
+  band: PacingBand
+): PoolCapacity {
   const uniqueSegments = new Map<string, PoolSegment>();
   for (const segment of pool) uniqueSegments.set(segmentKey(segment), segment);
 
@@ -178,12 +277,13 @@ function measurePool(pool: PoolSegment[], targetLengthSeconds: number): PoolCapa
     (sum, ranges) => sum + unionSeconds(ranges),
     0
   );
-  const uniqueSegmentCount = uniqueSegments.size;
-  const maxAchievableSeconds =
-    uniqueSegmentCount >= 2 ? availableSeconds * MAX_SEGMENT_REUSE : availableSeconds;
+  // Two band-length cuts have to fit in the footage before anything can be
+  // repeated without the repeat sitting next to its original.
+  const canRepeat = availableSeconds >= 2 * band.min - 1e-9;
+  const maxAchievableSeconds = canRepeat ? availableSeconds * MAX_SEGMENT_REUSE : availableSeconds;
 
   return {
-    uniqueSegmentCount,
+    uniqueSegmentCount: uniqueSegments.size,
     availableSeconds,
     maxAchievableSeconds,
     // Epsilon keeps a pool that lands exactly on the boundary out of the
@@ -221,6 +321,8 @@ function buildValidator(context: ValidationContext) {
     footageEndByClipId,
     sizingOverlayEnabled,
     footage,
+    pacing,
+    pacingBand,
   } = context;
 
   return DirectorResponseSchema.superRefine((value, ctx) => {
@@ -271,23 +373,30 @@ function buildValidator(context: ValidationContext) {
 
       // The rule the first live run needed and did not have: 3 segments were
       // looped 12 times, legally under the consecutive-repeat rule alone.
-      const usesByKey = new Map<string, number>();
-      for (const segment of variation.segments) {
-        const key = segmentKey(segment);
-        usesByKey.set(key, (usesByKey.get(key) ?? 0) + 1);
-      }
-      for (const [key, uses] of usesByKey) {
-        if (uses > MAX_SEGMENT_REUSE) {
-          const [rawClipId, startSeconds, endSeconds] = key.split('|');
-          ctx.addIssue({
-            code: 'custom',
-            path: [...variationPath, 'segments'],
-            message:
-              `segment ${rawClipId} ${startSeconds}-${endSeconds}s is used ${uses} times in this ` +
-              `variation; no segment may be used more than ${MAX_SEGMENT_REUSE} times`,
-          });
-        }
-      }
+      //
+      // Counted by overlap rather than exact identity, so that subdividing a
+      // long segment into distinct moments is free while re-showing one moment
+      // under nudged boundaries is not. Each cut is compared against every
+      // other cut in the variation; the issue is raised only from the earliest
+      // member of a group so one repeat does not produce three identical
+      // complaints.
+      variation.segments.forEach((segment, segmentIndex) => {
+        const showsSameMoment = (other: Cut, otherIndex: number) =>
+          otherIndex === segmentIndex || isSameFootage(segment, other);
+        const uses = variation.segments.filter(showsSameMoment).length;
+        if (uses <= MAX_SEGMENT_REUSE) return;
+        if (variation.segments.findIndex(showsSameMoment) !== segmentIndex) return;
+        ctx.addIssue({
+          code: 'custom',
+          path: [...variationPath, 'segments'],
+          message:
+            `the footage at ${segment.rawClipId} ${round2(segment.startSeconds)}-` +
+            `${round2(segment.endSeconds)}s is used ${uses} times in this variation ` +
+            `(counting cuts that overlap it by more than half); no moment may be used more than ` +
+            `${MAX_SEGMENT_REUSE} times. Cutting a different, non-overlapping part of the same ` +
+            `clip does not count as a repeat`,
+        });
+      });
 
       if (sizingOverlayEnabled && variation.sizingOverlayText) {
         if (FABRICATED_MEASUREMENT.test(variation.sizingOverlayText)) {
@@ -321,17 +430,46 @@ function buildValidator(context: ValidationContext) {
           });
         }
 
-        const previous = variation.segments[segmentIndex - 1];
-        if (
-          previous &&
-          previous.rawClipId === segment.rawClipId &&
-          previous.startSeconds === segment.startSeconds &&
-          previous.endSeconds === segment.endSeconds
-        ) {
+        // Pacing: the reason this product exists is constant clip changes, and
+        // until now it was only prose in the prompt. The live run answered a
+        // 30s medium job with a single unbroken 14s opening shot.
+        const duration = cutDuration(segment);
+        const isFinalCut = segmentIndex === variation.segments.length - 1;
+        // A clip with less usable footage than the band's floor cannot produce
+        // a cut that long, so demanding one would make the job unsatisfiable.
+        const floorApplies = footageEnd >= pacingBand.min - 1e-9;
+        const floor = isFinalCut ? pacingBand.min * FINAL_CUT_FLOOR_RATIO : pacingBand.min;
+        if (duration > pacingBand.max + 1e-9) {
           ctx.addIssue({
             code: 'custom',
             path,
-            message: 'the same segment must not appear in two consecutive positions',
+            message:
+              `this cut is ${round2(duration)}s long, but "${pacing}" pacing means every cut must ` +
+              `be between ${round2(pacingBand.min)}s and ${round2(pacingBand.max)}s. Split this ` +
+              `footage into shorter cuts and place them at different points in the video instead ` +
+              `of using it as one long take`,
+          });
+        } else if (floorApplies && duration < floor - 1e-9) {
+          ctx.addIssue({
+            code: 'custom',
+            path,
+            message:
+              `this cut is only ${round2(duration)}s long, but "${pacing}" pacing means every cut ` +
+              `must be between ${round2(pacingBand.min)}s and ${round2(pacingBand.max)}s` +
+              (isFinalCut
+                ? ` (the final cut of a variation may go as low as ${round2(floor)}s)`
+                : ''),
+          });
+        }
+
+        const previous = variation.segments[segmentIndex - 1];
+        if (previous && isSameFootage(previous, segment)) {
+          ctx.addIssue({
+            code: 'custom',
+            path,
+            message:
+              'the same segment must not appear in two consecutive positions; these two cuts ' +
+              'overlap by more than half, so they show the same moment twice in a row',
           });
         }
       });
@@ -370,6 +508,7 @@ function buildPrompt(
   job: Job,
   segmentPool: PoolSegment[],
   footage: PoolCapacity,
+  band: PacingBand,
   correctionNote?: string
 ): string {
   const placements = OVERLAY_PLACEMENTS.map((p) => `"${p}"`).join(', ');
@@ -390,6 +529,28 @@ ${job.lengthSeconds}s target within the reuse limit below. Do NOT pad the video 
 Aim instead for a total of about ${footage.maxAchievableSeconds}s per variation - a shorter video is
 much better than a repetitive one.`;
 
+  // Pacing is the product: constant clip changes are what makes this read as a
+  // UGC ad rather than a home video. It is stated as hard numbers, and the same
+  // band is enforced in code, so the instruction and the validator agree.
+  const preset = PACING_PRESET_SECONDS[job.pacing];
+  const approximateCuts = Math.max(
+    2,
+    Math.round(job.lengthSeconds / ((preset.min + preset.max) / 2))
+  );
+  const pacingInstruction = `PACING IS THE MOST IMPORTANT RULE. "${job.pacing}" pacing means every single cut
+must last between ${round2(band.min)} and ${round2(band.max)} seconds, ideally around ${preset.min}-${preset.max} seconds.
+A ${job.lengthSeconds}s video at this pacing is roughly ${approximateCuts} cuts, not a handful of long takes. A cut longer than
+${round2(band.max)}s will be rejected: one unbroken shot destroys the fast-cut feel this format depends on.
+Only the FINAL cut of a variation may be shorter than ${round2(band.min)}s (down to ${round2(
+    band.min * FINAL_CUT_FLOOR_RATIO
+  )}s) if you need it to land on the target length.
+
+A listed segment is a RANGE YOU MAY CUT INSIDE, not a fixed block: you choose any startSeconds and
+endSeconds you like within a clip's listed footage. So when a good segment is longer than ${round2(band.max)}s,
+SPLIT IT into several shorter cuts and place them at DIFFERENT POINTS in the video rather than using it
+as one long take. An 8s segment becomes, for example, a cut early in the video and a separate,
+non-overlapping cut later on. This is how you reach ${approximateCuts} cuts from a handful of long clips.`;
+
   return `You are editing a short-form UGC ad video for the product "${job.productName}".
 Target length: ${job.lengthSeconds} seconds. Pacing: ${job.pacing}.
 Produce exactly ${job.variationCount} distinct variations.
@@ -397,10 +558,15 @@ Produce exactly ${job.variationCount} distinct variations.
 Available segments (choose from these only, by rawClipId):
 ${JSON.stringify(segmentPool)}
 
+${pacingInstruction}
+
 ${durationInstruction}
-If there are not enough distinct good segments to reach the target length, you may reuse a segment,
+If there are not enough distinct good segments to reach the target length, you may reuse a moment,
 but never in two consecutive positions in the sequence and never more than ${MAX_SEGMENT_REUSE} times in
-the same variation. Prefer a shorter video over a repetitive one.
+the same variation. Two cuts count as the SAME moment when they come from the same clip and overlap by
+more than half of the shorter one - so nudging a boundary (0-8 then 0.1-8) is still a repeat, while two
+non-overlapping cuts from one clip are different footage and are exactly what you should be doing.
+Prefer a shorter video over a repetitive one.
 Never reference a rawClipId that is not listed above, and never let endSeconds run past
 the end of that clip's listed footage.
 
@@ -469,9 +635,13 @@ export async function planJob(
       );
     }
 
+    // The per-cut length the job's pacing preset asks for, used to build the
+    // prompt, to validate the response, and to judge what the pool can reach.
+    const band = bandFor(job.pacing);
+
     // Established before the model is asked for anything: whether the creator's
     // upload can honestly fill the length they asked for.
-    const footage = measurePool(segmentPool, job.lengthSeconds);
+    const footage = measurePool(segmentPool, job.lengthSeconds, band);
 
     const validator = buildValidator({
       expectedVariationCount: job.variationCount,
@@ -479,6 +649,8 @@ export async function planJob(
       footageEndByClipId,
       sizingOverlayEnabled: job.sizingOverlayEnabled,
       footage,
+      pacing: job.pacing,
+      pacingBand: band,
     });
     const client = getGeminiClient();
 
@@ -496,7 +668,10 @@ export async function planJob(
           client.models.generateContent({
             model: DIRECTOR_MODEL,
             contents: [
-              { role: 'user', parts: [{ text: buildPrompt(job, segmentPool, footage, correctionNote) }] },
+              {
+                role: 'user',
+                parts: [{ text: buildPrompt(job, segmentPool, footage, band, correctionNote) }],
+              },
             ],
             config: { responseMimeType: 'application/json' },
           }),

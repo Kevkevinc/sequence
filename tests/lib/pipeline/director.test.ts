@@ -62,12 +62,18 @@ describe('planJob', () => {
 
   const HOOK_ONE = 'POV: you just found the Cozy Hoodie everyone is talking about';
   const HOOK_TWO = 'Things I wish I knew before buying this Cozy Hoodie';
-  // 16s and 15s, both within 15% of the job's 15s target.
-  const validVariationOne = () => variation([segA(0, 8), segB(2, 6), segB(6, 10)], HOOK_ONE);
-  const validVariationTwo = () => variation([segB(0, 10), segA(0, 5)], HOOK_TWO);
+  // 16s and 15s, both within 15% of the job's 15s target, and every cut inside
+  // the 2.25-5s band that "medium" pacing means.
+  const validVariationOne = () =>
+    variation([segA(0, 4), segB(0, 4), segA(4, 8), segB(4, 8)], HOOK_ONE);
+  const validVariationTwo = () =>
+    variation([segB(0, 3.5), segA(0, 3.5), segB(6, 10), segA(4, 8)], HOOK_TWO);
   const validResponse = () => geminiResponse([validVariationOne(), validVariationTwo()]);
 
-  /** Creates a single-clip, single-variation job with the sizing overlay enabled. */
+  /**
+   * Creates a single-clip, single-variation job with the sizing overlay enabled.
+   * Slow pacing (3.75-7.5s per cut) so its 15s of footage is three clean cuts.
+   */
   async function createOverlayJob(options: { sizeWorn?: string; creatorId?: string }) {
     const overlayJob = await createJob({
       creatorId: options.creatorId ?? creatorId,
@@ -75,7 +81,7 @@ describe('planJob', () => {
       sizeWorn: options.sizeWorn,
       sizingOverlayEnabled: true,
       lengthSeconds: 15,
-      pacing: 'fast',
+      pacing: 'slow',
       variationCount: 1,
       clips: [{ storageKey: 'clips/c.mp4', originalFilename: 'c.mp4' }],
     });
@@ -90,7 +96,11 @@ describe('planJob', () => {
   function overlayResponse(clipId: string, sizingOverlayText: string | null, placement = 'bottom-center') {
     return geminiResponse([
       {
-        segments: [{ rawClipId: clipId, startSeconds: 0, endSeconds: 15 }],
+        segments: [
+          { rawClipId: clipId, startSeconds: 0, endSeconds: 5 },
+          { rawClipId: clipId, startSeconds: 5, endSeconds: 10 },
+          { rawClipId: clipId, startSeconds: 10, endSeconds: 15 },
+        ],
         hookText: 'Wait until you see how this Cozy Hoodie fits',
         sizingOverlayText,
         sizingOverlayPlacement: placement,
@@ -232,10 +242,13 @@ describe('planJob', () => {
     const foreign: SegmentSelection = {
       rawClipId: '00000000-0000-0000-0000-000000000000',
       startSeconds: 0,
-      endSeconds: 8,
+      endSeconds: 4,
     };
     mockGenerateContent.mockResolvedValue(
-      geminiResponse([variation([foreign, segB(2, 6), segB(6, 10)], HOOK_ONE), validVariationTwo()])
+      geminiResponse([
+        variation([foreign, segB(0, 4), segA(0, 4), segB(4, 8)], HOOK_ONE),
+        validVariationTwo(),
+      ])
     );
 
     const result = await planJob(jobId);
@@ -248,9 +261,10 @@ describe('planJob', () => {
   });
 
   it('rejects a variation reaching past the end of its clip footage', async () => {
-    // Totals 17s, inside the duration tolerance, so only the overrun is at fault.
+    // Totals 13s with every cut inside the pacing band, so only the overrun is
+    // at fault.
     mockGenerateContent.mockResolvedValue(
-      geminiResponse([variation([segA(0, 8), segB(2, 6), segB(6, 11)], HOOK_ONE), validVariationTwo()])
+      geminiResponse([variation([segA(0, 4), segB(2, 6), segB(6, 11)], HOOK_ONE), validVariationTwo()])
     );
 
     const result = await planJob(jobId);
@@ -264,7 +278,8 @@ describe('planJob', () => {
   it('rejects a variation that repeats the same segment back to back', async () => {
     mockGenerateContent.mockResolvedValue(
       geminiResponse([
-        variation([segA(0, 8), segA(0, 8)], HOOK_ONE), // 16s: duration is fine, order is not
+        // 16s with every cut in the pacing band: duration is fine, order is not.
+        variation([segA(0, 4), segA(0, 4), segB(0, 4), segB(4, 8)], HOOK_ONE),
         validVariationTwo(),
       ])
     );
@@ -278,9 +293,10 @@ describe('planJob', () => {
   });
 
   it('rejects a variation whose cuts do not sum to within 15% of the target length', async () => {
-    // 8s against a 15s target: outside the 12.75s - 17.25s window.
+    // 8s against a 15s target: outside the 12.75s - 17.25s window. Both cuts sit
+    // inside the pacing band, so the total is the only thing wrong.
     mockGenerateContent.mockResolvedValue(
-      geminiResponse([variation([segA(0, 8)], HOOK_ONE), validVariationTwo()])
+      geminiResponse([variation([segA(0, 4), segB(0, 4)], HOOK_ONE), validVariationTwo()])
     );
 
     const result = await planJob(jobId);
@@ -298,8 +314,8 @@ describe('planJob', () => {
     // 12.75s and 17.25s are the extremes of the allowed window for a 15s target.
     mockGenerateContent.mockResolvedValue(
       geminiResponse([
-        variation([segA(0, 8), segB(2, 6), segB(6, 6.75)], HOOK_ONE),
-        variation([segB(0, 10), segA(0, 7.25)], HOOK_TWO),
+        variation([segA(0, 4), segB(0, 4), segB(4, 8.75)], HOOK_ONE),
+        variation([segA(0, 4), segB(0, 4.625), segA(4, 8), segB(4.625, 9.25)], HOOK_TWO),
       ])
     );
 
@@ -491,10 +507,10 @@ describe('planJob', () => {
     // target while still repeating one of them several times. That isolates the
     // reuse rule: every other rule in the validator is satisfied.
     const shortCut = () => segB(2, 6); // 4s
-    const spacer = () => segA(0, 1); // 1s
+    const spacer = () => segA(0, 2.5); // 2.5s
 
     it('rejects a variation that uses the same segment three times', async () => {
-      // 14s total and no back-to-back repeat: legal under every rule the first
+      // 17s total and no back-to-back repeat: legal under every rule the first
       // live run had, which is exactly how it looped 3 segments 12 times.
       const overused = variation(
         [shortCut(), spacer(), shortCut(), spacer(), shortCut()],
@@ -516,8 +532,11 @@ describe('planJob', () => {
     });
 
     it('still allows a segment to be used twice', async () => {
-      // 15s exactly: the cap is a cap, not a ban on reuse.
-      const reusedTwice = variation([shortCut(), segA(0, 7), shortCut()], HOOK_ONE);
+      // 15.5s: the cap is a cap, not a ban on reuse.
+      const reusedTwice = variation(
+        [shortCut(), segA(0, 4), shortCut(), segA(4, 7.5)],
+        HOOK_ONE
+      );
       mockGenerateContent.mockResolvedValue(geminiResponse([reusedTwice, validVariationTwo()]));
 
       const result = await planJob(jobId);
@@ -532,6 +551,78 @@ describe('planJob', () => {
       await planJob(jobId);
 
       expect(promptTextOfCall(0)).toContain('never more than 2 times');
+    });
+
+    it('catches a repeat disguised by nudged cut boundaries', async () => {
+      // Three cuts of the same moment under three slightly different
+      // boundaries: five distinct rawClipId|start|end keys, so exact-match
+      // counting let this through. 15s total, every cut in the pacing band and
+      // no back-to-back repeat, so the reuse rule is the only thing at fault.
+      const disguised = variation(
+        [segA(0, 3), segB(0, 3), segA(0.2, 3.2), segB(4, 7), segA(0.4, 3.4)],
+        HOOK_ONE
+      );
+      mockGenerateContent.mockResolvedValue(geminiResponse([disguised, validVariationTwo()]));
+
+      const result = await planJob(jobId);
+
+      expect(result.success).toBe(false);
+      if (!result.success) expect(result.error).toContain('more than 2 times');
+      expect(promptTextOfCall(1)).toContain('more than 2 times');
+      const saved = await db.select().from(editPlans).where(eq(editPlans.jobId, jobId));
+      expect(saved).toHaveLength(0);
+    });
+
+    it('catches the same moment repeated back to back under nudged boundaries', async () => {
+      // 16s, both cuts in the band, only 0.1s apart: distinct keys, same shot.
+      mockGenerateContent.mockResolvedValue(
+        geminiResponse([
+          variation([segA(0, 4), segA(0.1, 4.1), segB(0, 4), segB(4, 8)], HOOK_ONE),
+          validVariationTwo(),
+        ])
+      );
+
+      const result = await planJob(jobId);
+
+      expect(result.success).toBe(false);
+      if (!result.success) expect(result.error).toContain('consecutive');
+    });
+
+    it('treats non-overlapping cuts from one clip as distinct footage', async () => {
+      // Clip A subdivided into three neighbouring cuts and clip B into two:
+      // eight seconds of clip A, but never the same moment twice. This is the
+      // behaviour the pacing rule depends on, so it must not read as reuse.
+      const subdivided = variation(
+        [segA(0, 2.5), segA(2.5, 5), segA(5, 8), segB(0, 3), segB(3, 6)],
+        HOOK_ONE
+      );
+      mockGenerateContent.mockResolvedValue(geminiResponse([subdivided, validVariationTwo()]));
+
+      const result = await planJob(jobId);
+
+      expect(result).toEqual({ success: true, variationCount: 2, warning: null });
+      expect(mockGenerateContent).toHaveBeenCalledTimes(1);
+    });
+
+    it('allows cuts that overlap by exactly half, so staggered subdivision stays open', async () => {
+      // 0-4 / 2-6 / 4-8 each share half of their length with their neighbour:
+      // the majority of every cut is still footage the viewer has not seen.
+      const staggered = variation([segA(0, 4), segA(2, 6), segA(4, 8), segB(0, 4)], HOOK_ONE);
+      mockGenerateContent.mockResolvedValue(geminiResponse([staggered, validVariationTwo()]));
+
+      const result = await planJob(jobId);
+
+      expect(result).toEqual({ success: true, variationCount: 2, warning: null });
+    });
+
+    it('tells the model that overlapping cuts count as the same moment', async () => {
+      mockGenerateContent.mockResolvedValue(validResponse());
+
+      await planJob(jobId);
+
+      const prompt = promptTextOfCall(0);
+      expect(prompt).toContain('overlap by');
+      expect(prompt).toContain('0-8 then 0.1-8');
     });
   });
 
@@ -619,10 +710,15 @@ describe('planJob', () => {
       await db.insert(segments).values([
         { rawClipId: extraClip.id, startSeconds: '0', endSeconds: '30', contentTag: 'whole-clip', qualityTag: 'high' },
       ]);
+      // 30s of footage cut into eight 3.75s pieces, as medium pacing demands.
       mockGenerateContent.mockResolvedValue(
         geminiResponse([
           {
-            segments: [{ rawClipId: extraClip.id, startSeconds: 0, endSeconds: 30 }],
+            segments: Array.from({ length: 8 }, (_, i) => ({
+              rawClipId: extraClip.id,
+              startSeconds: i * 3.75,
+              endSeconds: (i + 1) * 3.75,
+            })),
             hookText: HOOK_ONE,
             sizingOverlayText: null,
             sizingOverlayPlacement: null,
@@ -696,14 +792,16 @@ describe('planJob', () => {
         { rawClipId: clip.id, startSeconds: '0', endSeconds: '10', contentTag: 'whole-clip', qualityTag: 'high' },
         { rawClipId: clip.id, startSeconds: '2', endSeconds: '6', contentTag: 'try-on', qualityTag: 'high' },
       ]);
+      // 10s of footage cut three ways and shown twice: 20s, the honest ceiling.
+      const cuts = [
+        { startSeconds: 0, endSeconds: 3.5 },
+        { startSeconds: 3.5, endSeconds: 7 },
+        { startSeconds: 7, endSeconds: 10 },
+      ];
       mockGenerateContent.mockResolvedValue(
         geminiResponse([
           {
-            segments: [
-              { rawClipId: clip.id, startSeconds: 0, endSeconds: 10 },
-              { rawClipId: clip.id, startSeconds: 2, endSeconds: 6 },
-              { rawClipId: clip.id, startSeconds: 0, endSeconds: 10 },
-            ],
+            segments: [...cuts, ...cuts].map((cut) => ({ rawClipId: clip.id, ...cut })),
             hookText: HOOK_ONE,
             sizingOverlayText: null,
             sizingOverlayPlacement: null,
@@ -721,7 +819,7 @@ describe('planJob', () => {
     it('leaves the +-15% rule in force when the footage is sufficient', async () => {
       // The normal job's pool is ample, so the fallback must not apply to it.
       mockGenerateContent.mockResolvedValue(
-        geminiResponse([variation([segA(0, 8)], HOOK_ONE), validVariationTwo()])
+        geminiResponse([variation([segA(0, 4), segB(0, 4)], HOOK_ONE), validVariationTwo()])
       );
 
       const result = await planJob(jobId);
@@ -730,6 +828,227 @@ describe('planJob', () => {
       if (!result.success) expect(result.error).toContain('total duration');
       expect(promptTextOfCall(0)).toContain('must sum to within 15%');
       expect(await warningOf(jobId)).toBeNull();
+    });
+  });
+
+  describe('pacing', () => {
+    // The job under test is 15s at "medium" pacing: every cut must last between
+    // 2.25s and 5s, and a 15s video is roughly four of them.
+
+    it('rejects a variation that opens on one long unbroken shot', async () => {
+      // The live run's failure: 16s total, inside the duration tolerance and
+      // legal under every other rule, but the first cut runs 8s.
+      mockGenerateContent.mockResolvedValue(
+        geminiResponse([
+          variation([segA(0, 8), segB(0, 4), segB(4, 8)], HOOK_ONE),
+          validVariationTwo(),
+        ])
+      );
+
+      const result = await planJob(jobId);
+
+      expect(result.success).toBe(false);
+      expect(mockGenerateContent).toHaveBeenCalledTimes(3);
+      if (!result.success) expect(result.error).toContain('pacing');
+      // The rule has to reach the model, not just fail the job.
+      const retryPrompt = promptTextOfCall(1);
+      expect(retryPrompt).toContain('previous response was invalid');
+      expect(retryPrompt).toContain('this cut is 8s long');
+      expect(retryPrompt).toContain('between 2.25s and 5s');
+      expect(retryPrompt).toContain('Split this footage into shorter cuts');
+
+      const saved = await db.select().from(editPlans).where(eq(editPlans.jobId, jobId));
+      expect(saved).toHaveLength(0);
+    });
+
+    it('rejects a cut that is too short for the pacing preset', async () => {
+      // 13.5s total, but the second cut is a 1.5s flash mid-video.
+      mockGenerateContent.mockResolvedValue(
+        geminiResponse([
+          variation([segA(0, 4), segB(0, 1.5), segA(4, 8), segB(4, 8)], HOOK_ONE),
+          validVariationTwo(),
+        ])
+      );
+
+      const result = await planJob(jobId);
+
+      expect(result.success).toBe(false);
+      expect(promptTextOfCall(1)).toContain('this cut is only 1.5s long');
+    });
+
+    it('allows a short final cut so a variation can land on the target length', async () => {
+      // 13.5s: the tail cut is 1.5s, above the 1.125s floor the last cut gets.
+      mockGenerateContent.mockResolvedValue(
+        geminiResponse([
+          variation([segA(0, 4), segB(0, 4), segA(4, 8), segB(4, 5.5)], HOOK_ONE),
+          validVariationTwo(),
+        ])
+      );
+
+      const result = await planJob(jobId);
+
+      expect(result).toEqual({ success: true, variationCount: 2, warning: null });
+      expect(mockGenerateContent).toHaveBeenCalledTimes(1);
+    });
+
+    it('never lets the final cut run long, only short', async () => {
+      // 13.25s total and the overrun is only 0.25s past the band, but a long
+      // tail cut is exactly the defect this rule exists to catch.
+      mockGenerateContent.mockResolvedValue(
+        geminiResponse([
+          variation([segA(0, 4), segB(0, 4), segB(4, 9.25)], HOOK_ONE),
+          validVariationTwo(),
+        ])
+      );
+
+      const result = await planJob(jobId);
+
+      expect(result.success).toBe(false);
+      expect(promptTextOfCall(1)).toContain('this cut is 5.25s long');
+    });
+
+    it('does not demand cuts longer than the entire usable footage of a clip', async () => {
+      // A 3s clip in a slow job (3.75-7.5s per cut) can never produce a
+      // band-length cut. Enforcing the floor here would make the job impossible.
+      const tinyJob = await createJob({
+        creatorId,
+        productName: 'Cozy Hoodie',
+        sizingOverlayEnabled: false,
+        lengthSeconds: 15,
+        pacing: 'slow',
+        variationCount: 1,
+        clips: [{ storageKey: 'clips/tiny.mp4', originalFilename: 'tiny.mp4' }],
+      });
+      const [clip] = await db.select().from(rawClips).where(eq(rawClips.jobId, tinyJob.id));
+      await db.insert(segments).values([
+        { rawClipId: clip.id, startSeconds: '0', endSeconds: '3', contentTag: 'whole-clip', qualityTag: 'high' },
+      ]);
+      mockGenerateContent.mockResolvedValue(
+        geminiResponse([
+          {
+            segments: [{ rawClipId: clip.id, startSeconds: 0, endSeconds: 3 }],
+            hookText: HOOK_ONE,
+            sizingOverlayText: null,
+            sizingOverlayPlacement: null,
+          },
+        ])
+      );
+
+      const result = await planJob(tinyJob.id);
+
+      expect(result.success).toBe(true);
+      expect(mockGenerateContent).toHaveBeenCalledTimes(1);
+    });
+
+    it('states the per-cut band, the cut count, and how to subdivide', async () => {
+      mockGenerateContent.mockResolvedValue(validResponse());
+
+      await planJob(jobId);
+
+      const prompt = promptTextOfCall(0);
+      expect(prompt).toContain('between 2.25 and 5 seconds');
+      expect(prompt).toContain('roughly 4 cuts');
+      expect(prompt).toContain('RANGE YOU MAY CUT INSIDE');
+      expect(prompt).toContain('SPLIT IT');
+      expect(prompt).toContain('DIFFERENT POINTS');
+    });
+
+    it('states the band belonging to the job\'s own pacing preset', async () => {
+      const slowJob = await createOverlayJob({ sizeWorn: 'M' });
+      mockGenerateContent.mockResolvedValue(overlayResponse(slowJob.clipId, 'For reference'));
+
+      await planJob(slowJob.id);
+
+      // "slow" is 5-6s per cut, widened by the 25% tolerance.
+      expect(promptTextOfCall(0)).toContain('between 3.75 and 7.5 seconds');
+    });
+  });
+
+  describe('subdividing one long segment', () => {
+    // A single 20s tagged segment against a 30s medium job. Before subdivision
+    // was asked for, the pool measured one unrepeatable segment worth 20s and
+    // the short-footage fallback fired; split into cuts it comfortably covers
+    // the target twice over.
+    let longJobId: string;
+    let longClipId: string;
+
+    beforeEach(async () => {
+      const longJob = await createJob({
+        creatorId,
+        productName: 'Cozy Hoodie',
+        sizingOverlayEnabled: false,
+        lengthSeconds: 30,
+        pacing: 'medium',
+        variationCount: 1,
+        clips: [{ storageKey: 'clips/long.mp4', originalFilename: 'long.mp4' }],
+      });
+      longJobId = longJob.id;
+      const [clip] = await db.select().from(rawClips).where(eq(rawClips.jobId, longJobId));
+      longClipId = clip.id;
+      await db.insert(segments).values([
+        { rawClipId: longClipId, startSeconds: '0', endSeconds: '20', contentTag: 'whole-clip', qualityTag: 'high' },
+      ]);
+    });
+
+    it('accepts one long segment split into many short cuts', async () => {
+      // Five 4s cuts covering the clip, then two of them again later: 28s from
+      // a single tagged segment, with no moment shown more than twice.
+      const cuts = [
+        [0, 4],
+        [4, 8],
+        [8, 12],
+        [12, 16],
+        [16, 20],
+        [0, 4],
+        [4, 8],
+      ];
+      mockGenerateContent.mockResolvedValue(
+        geminiResponse([
+          {
+            segments: cuts.map(([startSeconds, endSeconds]) => ({
+              rawClipId: longClipId,
+              startSeconds,
+              endSeconds,
+            })),
+            hookText: HOOK_ONE,
+            sizingOverlayText: null,
+            sizingOverlayPlacement: null,
+          },
+        ])
+      );
+
+      const result = await planJob(longJobId);
+
+      // No short-footage warning: subdivision makes the target genuinely
+      // reachable, so the fallback must not fire.
+      expect(result).toEqual({ success: true, variationCount: 1, warning: null });
+      expect(mockGenerateContent).toHaveBeenCalledTimes(1);
+      const [row] = await db.select().from(jobs).where(eq(jobs.id, longJobId));
+      expect(row.warning).toBeNull();
+      expect(promptTextOfCall(0)).toContain('must sum to within 15%');
+    });
+
+    it('still rejects using that segment as one long take', async () => {
+      mockGenerateContent.mockResolvedValue(
+        geminiResponse([
+          {
+            segments: [
+              { rawClipId: longClipId, startSeconds: 0, endSeconds: 20 },
+              { rawClipId: longClipId, startSeconds: 0, endSeconds: 12 },
+            ],
+            hookText: HOOK_ONE,
+            sizingOverlayText: null,
+            sizingOverlayPlacement: null,
+          },
+        ])
+      );
+
+      const result = await planJob(longJobId);
+
+      expect(result.success).toBe(false);
+      if (!result.success) expect(result.error).toContain('pacing');
+      const saved = await db.select().from(editPlans).where(eq(editPlans.jobId, longJobId));
+      expect(saved).toHaveLength(0);
     });
   });
 
