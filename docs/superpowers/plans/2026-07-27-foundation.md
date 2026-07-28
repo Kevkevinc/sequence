@@ -29,7 +29,7 @@ This task has no code — it's you creating three free accounts and handing me t
 - [ ] **Step 1: Create a Supabase project (free tier)**
   1. Go to supabase.com and sign up / log in.
   2. Click "New project." Name it `ugc-ai-editor`, choose any region close to you, set a database password (save it somewhere).
-  3. Once it's created, go to **Project Settings → Database**, and copy the **Connection string** (URI, "Transaction" mode is fine). It looks like `postgresql://postgres:[password]@...supabase.co:5432/postgres`.
+  3. Once it's created, click **Connect** (top of the project dashboard) and copy the **Transaction pooler** connection string — not the "Direct connection" one (its host is IPv6-only and unreachable from most home networks). It looks like `postgresql://postgres.<project-ref>:[password]@aws-0-<region>.pooler.supabase.com:6543/postgres`.
   4. Send me that string — it becomes `DATABASE_URL`.
 
 - [ ] **Step 2: Create a Clerk application (free tier)**
@@ -44,7 +44,8 @@ This task has no code — it's you creating three free accounts and handing me t
   2. Create a bucket named `ugc-ai-editor-clips`.
   3. Go to **R2 → Manage API Tokens → Create API Token**, give it read/write access to that bucket. Copy the **Access Key ID** and **Secret Access Key** it shows you (only shown once).
   4. On the R2 overview page, note your **Account ID** (shown in the right sidebar).
-  5. Send me the account ID, access key ID, and secret access key — they become `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`. The bucket name (`ugc-ai-editor-clips`) becomes `R2_BUCKET_NAME`.
+  5. **Required for uploads to work:** open the bucket → **Settings → CORS Policy** → add a policy allowing `AllowedOrigins: ["http://localhost:3000"]` (add your production URL here too once deployed), `AllowedMethods: ["PUT"]`, `AllowedHeaders: ["Content-Type"]`. Without this, every upload from the browser fails with an opaque CORS error, since the app uploads directly from the browser to R2.
+  6. Send me the account ID, access key ID, and secret access key — they become `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`. The bucket name (`ugc-ai-editor-clips`) becomes `R2_BUCKET_NAME`.
 
 - [ ] **Step 4: I assemble `.env.local`**
   Once you send me the values from Steps 1-3, I'll create a `.env.local` file in the project with all of them, plus placeholders for the Clerk publishable/secret keys formatted correctly. This file is git-ignored — it never gets committed.
