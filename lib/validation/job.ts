@@ -15,7 +15,9 @@ export function validateJobInput(input: {
 }): JobValidationError[] {
   const errors: JobValidationError[] = [];
 
-  if (!input.productName.trim()) {
+  // A non-string productName (e.g. a JSON body with `"productName": 123`) is
+  // treated as missing rather than allowed to throw on `.trim()`.
+  if (typeof input.productName !== 'string' || !input.productName.trim()) {
     errors.push({ field: 'productName', message: 'Product name is required.' });
   }
   if (!ALLOWED_LENGTHS.includes(input.lengthSeconds as (typeof ALLOWED_LENGTHS)[number])) {
@@ -35,7 +37,11 @@ export function validateJobInput(input: {
       message: `Variation count must be between 1 and ${MAX_VARIATION_COUNT}.`,
     });
   }
-  if (input.sizingOverlayEnabled && !input.sizeWorn?.trim()) {
+  // Same here: a non-string sizeWorn counts as missing, not as a crash.
+  if (
+    input.sizingOverlayEnabled &&
+    (typeof input.sizeWorn !== 'string' || !input.sizeWorn.trim())
+  ) {
     errors.push({ field: 'sizeWorn', message: 'Size worn is required when sizing info is enabled.' });
   }
   if (input.clipCount < 1) {

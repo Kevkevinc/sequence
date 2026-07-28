@@ -71,6 +71,26 @@ describe('validateJobInput', () => {
     });
   });
 
+  it('treats a non-string product name as missing instead of throwing', () => {
+    const errors = validateJobInput({
+      ...validInput,
+      productName: 123 as unknown as string,
+    });
+    expect(errors).toContainEqual({ field: 'productName', message: 'Product name is required.' });
+  });
+
+  it('treats a non-string sizeWorn as missing instead of throwing', () => {
+    const errors = validateJobInput({
+      ...validInput,
+      sizingOverlayEnabled: true,
+      sizeWorn: 42 as unknown as string,
+    });
+    expect(errors).toContainEqual({
+      field: 'sizeWorn',
+      message: 'Size worn is required when sizing info is enabled.',
+    });
+  });
+
   it('rejects a missing/undefined variation count instead of silently passing', () => {
     const errors = validateJobInput({
       ...validInput,
