@@ -12,11 +12,17 @@ vi.mock('@/lib/gemini/client', () => ({
   }),
 }));
 
+const mockCleanUp = vi.fn(async () => {});
+
 vi.mock('@/lib/storage', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/lib/storage')>();
   return {
     ...actual,
-    getClipBuffer: vi.fn(async () => ({ buffer: Buffer.from('fake'), contentType: 'video/mp4' })),
+    downloadClipToTempFile: vi.fn(async () => ({
+      path: '/tmp/ugc-clip-fake',
+      contentType: 'video/mp4',
+      cleanUp: mockCleanUp,
+    })),
   };
 });
 
@@ -68,7 +74,7 @@ describe('tagClip', () => {
     expect(saved.map((s) => s.contentTag)).toEqual(expect.arrayContaining(['whole-clip', 'try-on']));
   });
 
-  it('uploads the clip bytes as a Blob carrying the storage content type', async () => {
+  it('uploads the clip from a temp file path rather than buffering it in memory', async () => {
     mockUpload.mockResolvedValue({ name: 'files/abc', uri: 'https://files/abc', mimeType: 'video/mp4', state: 'ACTIVE' });
     mockGetFile.mockResolvedValue({ state: 'ACTIVE' });
     mockGenerateContent.mockResolvedValue({
@@ -81,11 +87,37 @@ describe('tagClip', () => {
 
     expect(mockUpload).toHaveBeenCalledTimes(1);
     const uploadArg = mockUpload.mock.calls[0][0];
-    // The SDK rejects a raw Buffer, so the clip bytes must arrive as a Blob.
-    expect(uploadArg.file).toBeInstanceOf(Blob);
-    expect((uploadArg.file as Blob).type).toBe('video/mp4');
-    expect(await (uploadArg.file as Blob).text()).toBe('fake');
+    // A path, not a Blob: raw phone clips run to hundreds of megabytes and the
+    // Blob form held each one three times over in the heap.
+    expect(uploadArg.file).toBe('/tmp/ugc-clip-fake');
     expect(uploadArg.config).toEqual({ mimeType: 'video/mp4' });
+  });
+
+  it('removes the downloaded temp file once the clip is tagged', async () => {
+    mockUpload.mockResolvedValue({ name: 'files/abc', uri: 'https://files/abc', mimeType: 'video/mp4', state: 'ACTIVE' });
+    mockGetFile.mockResolvedValue({ state: 'ACTIVE' });
+    mockGenerateContent.mockResolvedValue({
+      text: JSON.stringify({
+        segments: [{ startSeconds: 0, endSeconds: 8, contentTag: 'whole-clip', qualityTag: 'medium' }],
+      }),
+    });
+
+    await tagClip(rawClipId);
+
+    expect(mockCleanUp).toHaveBeenCalledTimes(1);
+  });
+
+  it('removes the downloaded temp file even when the model returns junk', async () => {
+    // The early `return` inside the try block is exactly the path a naive
+    // cleanup call at the end would miss, filling the worker's disk over time.
+    mockUpload.mockResolvedValue({ name: 'files/abc', uri: 'https://files/abc', mimeType: 'video/mp4', state: 'ACTIVE' });
+    mockGetFile.mockResolvedValue({ state: 'ACTIVE' });
+    mockGenerateContent.mockResolvedValue({ text: 'not valid json' });
+
+    const result = await tagClip(rawClipId);
+
+    expect(result.success).toBe(false);
+    expect(mockCleanUp).toHaveBeenCalledTimes(1);
   });
 
   it('asks the configured model for JSON, referencing the uploaded file', async () => {

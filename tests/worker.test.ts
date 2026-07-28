@@ -215,6 +215,65 @@ describe('worker', () => {
     warn.mockRestore();
   });
 
+  it('tags clips with a bounded concurrency instead of fanning out over all of them', async () => {
+    // Unbounded `Promise.all(clips.map(...))` put every clip's video through
+    // the machine at once. At 100-200MB of raw phone footage per clip that is
+    // enough to be OOM-killed, which strands the job in `tagging` forever
+    // because nothing reaps it — and it fires N simultaneous Gemini uploads,
+    // manufacturing the 429s the retry layer then absorbs.
+    const CLIP_COUNT = 6;
+    const job = await makeJob(CLIP_COUNT);
+    let inFlight = 0;
+    let peakInFlight = 0;
+    vi.mocked(tagClip).mockImplementation(async () => {
+      inFlight += 1;
+      peakInFlight = Math.max(peakInFlight, inFlight);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      inFlight -= 1;
+      return { success: true, segmentCount: 1 };
+    });
+    vi.mocked(planJob).mockResolvedValue({ success: true, variationCount: 1, warning: null });
+
+    await processJob(job.id);
+
+    // Every clip is still tagged...
+    expect(tagClip).toHaveBeenCalledTimes(CLIP_COUNT);
+    // ...but never more than a couple at a time, and still with real overlap
+    // (a serial implementation would peak at 1 and lose the pipelining).
+    expect(peakInFlight).toBeLessThanOrEqual(3);
+    expect(peakInFlight).toBeGreaterThan(1);
+    expect((await statusOf(job.id)).status).toBe('planned');
+  });
+
+  it('keeps tag results lined up with their clips despite the concurrency limit', async () => {
+    // The failure report indexes `tagResults[i]` against `clips[i]`, so an
+    // out-of-order result would blame the wrong clip in the failure reason.
+    const job = await makeJob(4);
+    const clips = await db
+      .select({ id: rawClips.id })
+      .from(rawClips)
+      .where(eq(rawClips.jobId, job.id));
+    // Fail only the clip that is processed third, with a distinctive reason.
+    vi.mocked(tagClip).mockImplementation(async (clipId: string) =>
+      clipId === clips[2].id
+        ? { success: false, error: 'third clip unreadable' }
+        : { success: true, segmentCount: 1 }
+    );
+    vi.mocked(planJob).mockResolvedValue({ success: true, variationCount: 1, warning: null });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    await processJob(job.id);
+
+    const warned = warn.mock.calls.flat().join(' ');
+    expect(warned).toContain(clips[2].id);
+    expect(warned).toContain('third clip unreadable');
+    // No other clip may be named as failed.
+    for (const other of [clips[0], clips[1], clips[3]]) {
+      expect(warned).not.toContain(other.id);
+    }
+    warn.mockRestore();
+  });
+
   it('marks the job failed with a reason when every clip fails tagging', async () => {
     const job = await makeJob();
     vi.mocked(tagClip).mockResolvedValue({ success: false, error: 'clip unreadable' });

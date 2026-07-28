@@ -8,6 +8,47 @@ import { describeCause } from '@/lib/pipeline/errors';
 const POLL_INTERVAL_MS = 5000;
 
 /**
+ * How many clips may be tagged at once.
+ *
+ * Was unbounded (`Promise.all(clips.map(...))`). Each `tagClip` streams a whole
+ * video through the machine and hands it to Gemini, so a six-clip job of raw
+ * phone footage fanned out six simultaneous multi-hundred-megabyte uploads —
+ * enough to be OOM-killed, which strands the job in `tagging` with nothing to
+ * reap it. It also fired N requests at Gemini at once, manufacturing the very
+ * 429s the retry layer then had to absorb.
+ *
+ * Two is small enough to bound both, and still overlaps one clip's upload with
+ * the previous clip's analysis, which is where nearly all the wall-clock saving
+ * of parallelism came from in the first place.
+ */
+const TAG_CONCURRENCY = 2;
+
+/**
+ * `Promise.all(items.map(fn))` with a ceiling on how many run at once.
+ *
+ * Results stay in input order, so callers can still line them up against the
+ * input array. Rejections propagate exactly as `Promise.all`'s would; `tagClip`
+ * never throws, so in practice they do not arise.
+ */
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  limit: number,
+  operation: (item: T) => Promise<R>
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let nextIndex = 0;
+
+  const runners = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    for (let index = nextIndex++; index < items.length; index = nextIndex++) {
+      results[index] = await operation(items[index]);
+    }
+  });
+
+  await Promise.all(runners);
+  return results;
+}
+
+/**
  * Takes ownership of the oldest `pending` job, flipping it to `tagging`, and
  * returns it. Returns `undefined` when the queue is empty.
  *
@@ -105,7 +146,9 @@ export async function processJob(jobId: string): Promise<void> {
       return;
     }
 
-    const tagResults = await Promise.all(clips.map((clip) => tagClip(clip.id)));
+    const tagResults = await mapWithConcurrency(clips, TAG_CONCURRENCY, (clip) =>
+      tagClip(clip.id)
+    );
     const failedTags = clips
       .map((clip, index) => ({ clip, result: tagResults[index] }))
       .filter((tagged) => !tagged.result.success);

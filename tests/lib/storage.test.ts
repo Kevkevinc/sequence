@@ -1,4 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { existsSync, readFileSync } from 'fs';
+import { tmpdir } from 'os';
 import { Readable } from 'stream';
 
 vi.mock('@aws-sdk/s3-request-presigner', () => ({
@@ -68,5 +70,48 @@ describe('getClipBuffer', () => {
     const result = await getClipBuffer('clips/some-key.mp4');
     expect(result.buffer.toString()).toBe('fake-video-bytes');
     expect(result.contentType).toBe('video/mp4');
+  });
+});
+
+describe('downloadClipToTempFile', () => {
+  it('streams the clip to a temp file and reports its path and content type', async () => {
+    const { downloadClipToTempFile } = await import('@/lib/storage');
+    const clip = await downloadClipToTempFile('clips/some-key.mp4');
+
+    try {
+      // The point of this function: the SDK can upload straight from the path,
+      // so a 200MB clip never lands in the process's heap.
+      expect(clip.path).toContain(tmpdir());
+      expect(readFileSync(clip.path).toString()).toBe('fake-video-bytes');
+      expect(clip.contentType).toBe('video/mp4');
+    } finally {
+      await clip.cleanUp();
+    }
+  });
+
+  it('removes the temp file on cleanUp, and tolerates being cleaned up twice', async () => {
+    const { downloadClipToTempFile } = await import('@/lib/storage');
+    const clip = await downloadClipToTempFile('clips/some-key.mp4');
+
+    await clip.cleanUp();
+    expect(existsSync(clip.path)).toBe(false);
+    // A second cleanUp must not throw: it runs from a `finally` that may
+    // already have run on an earlier error path.
+    await expect(clip.cleanUp()).resolves.toBeUndefined();
+  });
+
+  it('gives every download its own path, so concurrent clips cannot collide', async () => {
+    const { downloadClipToTempFile } = await import('@/lib/storage');
+    const [first, second] = await Promise.all([
+      downloadClipToTempFile('clips/a.mp4'),
+      downloadClipToTempFile('clips/b.mp4'),
+    ]);
+
+    try {
+      expect(first.path).not.toBe(second.path);
+    } finally {
+      await first.cleanUp();
+      await second.cleanUp();
+    }
   });
 });

@@ -3,7 +3,7 @@ import { eq } from 'drizzle-orm';
 import { FileState, type GoogleGenAI } from '@google/genai';
 import { db } from '@/db/client';
 import { rawClips, segments } from '@/db/schema';
-import { getClipBuffer } from '@/lib/storage';
+import { downloadClipToTempFile } from '@/lib/storage';
 import { getEnvWithDefault } from '@/lib/env';
 import { getGeminiClient } from '@/lib/gemini/client';
 import { describeCause } from '@/lib/pipeline/errors';
@@ -90,72 +90,83 @@ export async function tagClip(
     const [clip] = await db.select().from(rawClips).where(eq(rawClips.id, rawClipId));
     if (!clip) return { success: false, error: `Raw clip ${rawClipId} not found` };
 
-    const { buffer, contentType } = await getClipBuffer(clip.storageKey);
+    // Streamed to disk rather than buffered: a raw phone clip is routinely
+    // 100-200MB and the old path held it three times over in memory, which is
+    // how a multi-clip job could OOM the worker and strand itself.
+    const localClip = await downloadClipToTempFile(clip.storageKey);
+    const contentType = localClip.contentType;
     const client = getGeminiClient();
 
-    // The whole Gemini exchange retries as one unit, not just generateContent:
-    // a demand spike can land on the upload or the file poll just as easily, and
-    // an uploaded file reference is only useful to the call that follows it.
-    // Parsing and validation deliberately sit outside, so model drift is never
-    // retried — a re-roll of the same prompt is not a fix for a bad schema.
-    const response = await withTransientRetry(async () => {
-      // The SDK's files.upload only accepts a file path or a Blob, so wrap the
-      // in-memory clip bytes rather than passing the Buffer directly.
-      const uploaded = await client.files.upload({
-        file: new Blob([new Uint8Array(buffer)], { type: contentType }),
-        config: { mimeType: contentType },
-      });
-
-      if (!uploaded.name || !uploaded.uri) {
-        throw new Error('Gemini upload did not return a usable file reference');
-      }
-      if (uploaded.state !== FileState.ACTIVE) {
-        await waitUntilActive(client, uploaded.name);
-      }
-
-      return client.models.generateContent({
-        model: TAGGING_MODEL,
-        contents: [
-          {
-            role: 'user',
-            parts: [
-              { fileData: { fileUri: uploaded.uri, mimeType: uploaded.mimeType ?? contentType } },
-              { text: TAGGING_PROMPT },
-            ],
-          },
-        ],
-        config: { responseMimeType: 'application/json' },
-      });
-    }, TAGGING_RETRY);
-
-    let parsed: z.infer<typeof TaggingResponseSchema>;
     try {
-      parsed = TaggingResponseSchema.parse(JSON.parse(response.text ?? ''));
-    } catch (validationError) {
-      // Keep the underlying cause: this string is the only diagnostic later
-      // stages have when the model drifts off the requested shape.
-      return {
-        success: false,
-        error: `Gemini returned invalid or unparseable JSON for tagging: ${describeCause(validationError)}`,
-      };
+      // The whole Gemini exchange retries as one unit, not just generateContent:
+      // a demand spike can land on the upload or the file poll just as easily, and
+      // an uploaded file reference is only useful to the call that follows it.
+      // Parsing and validation deliberately sit outside, so model drift is never
+      // retried — a re-roll of the same prompt is not a fix for a bad schema.
+      const response = await withTransientRetry(async () => {
+        // The SDK's files.upload takes a path or a Blob; the path form is what
+        // keeps the clip out of memory. The temp file outlives every retry, so
+        // a re-upload costs nothing extra.
+        const uploaded = await client.files.upload({
+          file: localClip.path,
+          config: { mimeType: contentType },
+        });
+
+        if (!uploaded.name || !uploaded.uri) {
+          throw new Error('Gemini upload did not return a usable file reference');
+        }
+        if (uploaded.state !== FileState.ACTIVE) {
+          await waitUntilActive(client, uploaded.name);
+        }
+
+        return client.models.generateContent({
+          model: TAGGING_MODEL,
+          contents: [
+            {
+              role: 'user',
+              parts: [
+                { fileData: { fileUri: uploaded.uri, mimeType: uploaded.mimeType ?? contentType } },
+                { text: TAGGING_PROMPT },
+              ],
+            },
+          ],
+          config: { responseMimeType: 'application/json' },
+        });
+      }, TAGGING_RETRY);
+
+      let parsed: z.infer<typeof TaggingResponseSchema>;
+      try {
+        parsed = TaggingResponseSchema.parse(JSON.parse(response.text ?? ''));
+      } catch (validationError) {
+        // Keep the underlying cause: this string is the only diagnostic later
+        // stages have when the model drifts off the requested shape.
+        return {
+          success: false,
+          error: `Gemini returned invalid or unparseable JSON for tagging: ${describeCause(validationError)}`,
+        };
+      }
+
+      // Re-tagging a clip replaces its segments rather than appending, so a retry
+      // after a partial failure cannot leave duplicate rows behind.
+      await db.transaction(async (tx) => {
+        await tx.delete(segments).where(eq(segments.rawClipId, rawClipId));
+        await tx.insert(segments).values(
+          parsed.segments.map((s) => ({
+            rawClipId,
+            startSeconds: s.startSeconds.toString(),
+            endSeconds: s.endSeconds.toString(),
+            contentTag: s.contentTag,
+            qualityTag: s.qualityTag,
+          }))
+        );
+      });
+
+      return { success: true, segmentCount: parsed.segments.length };
+    } finally {
+      // Runs on every exit path, including the early returns above, so a job
+      // cannot fill the worker's temp directory with abandoned videos.
+      await localClip.cleanUp();
     }
-
-    // Re-tagging a clip replaces its segments rather than appending, so a retry
-    // after a partial failure cannot leave duplicate rows behind.
-    await db.transaction(async (tx) => {
-      await tx.delete(segments).where(eq(segments.rawClipId, rawClipId));
-      await tx.insert(segments).values(
-        parsed.segments.map((s) => ({
-          rawClipId,
-          startSeconds: s.startSeconds.toString(),
-          endSeconds: s.endSeconds.toString(),
-          contentTag: s.contentTag,
-          qualityTag: s.qualityTag,
-        }))
-      );
-    });
-
-    return { success: true, segmentCount: parsed.segments.length };
   } catch (error) {
     return { success: false, error: error instanceof Error ? error.message : String(error) };
   }
