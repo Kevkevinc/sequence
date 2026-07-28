@@ -16,12 +16,18 @@ const FILE_POLL_INTERVAL_MS = 2000;
 const TaggingResponseSchema = z.object({
   segments: z
     .array(
-      z.object({
-        startSeconds: z.number().min(0),
-        endSeconds: z.number().min(0),
-        contentTag: z.string(),
-        qualityTag: z.string(),
-      })
+      z
+        .object({
+          startSeconds: z.number().min(0),
+          endSeconds: z.number().min(0),
+          contentTag: z.string(),
+          qualityTag: z.string(),
+        })
+        // A zero- or negative-duration segment is not a usable cut, so treat it
+        // as model drift rather than persisting an unrenderable row.
+        .refine((s) => s.endSeconds > s.startSeconds, {
+          message: 'endSeconds must be greater than startSeconds',
+        })
     )
     .min(1),
 });
@@ -35,6 +41,19 @@ times in seconds. Tag each segment's contentTag as one of: "whole-clip", "b-roll
 engaging/usable the moment is (steady footage, clear subject, good lighting).
 Respond with JSON only, matching this shape:
 {"segments": [{"startSeconds": number, "endSeconds": number, "contentTag": string, "qualityTag": string}]}`;
+
+// Longest cause detail we fold into a returned error string. Zod reports every
+// failing field, which for a large malformed response would otherwise flood the
+// job's failure_reason column.
+const MAX_CAUSE_LENGTH = 300;
+
+function describeCause(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  const collapsed = message.replace(/\s+/g, ' ').trim();
+  return collapsed.length > MAX_CAUSE_LENGTH
+    ? `${collapsed.slice(0, MAX_CAUSE_LENGTH)}...`
+    : collapsed;
+}
 
 async function waitUntilActive(client: GoogleGenAI, fileName: string): Promise<void> {
   for (let attempt = 0; attempt < FILE_POLL_ATTEMPTS; attempt++) {
@@ -87,19 +106,29 @@ export async function tagClip(
     let parsed: z.infer<typeof TaggingResponseSchema>;
     try {
       parsed = TaggingResponseSchema.parse(JSON.parse(response.text ?? ''));
-    } catch {
-      return { success: false, error: 'Gemini returned invalid or unparseable JSON for tagging' };
+    } catch (validationError) {
+      // Keep the underlying cause: this string is the only diagnostic later
+      // stages have when the model drifts off the requested shape.
+      return {
+        success: false,
+        error: `Gemini returned invalid or unparseable JSON for tagging: ${describeCause(validationError)}`,
+      };
     }
 
-    await db.insert(segments).values(
-      parsed.segments.map((s) => ({
-        rawClipId,
-        startSeconds: s.startSeconds.toString(),
-        endSeconds: s.endSeconds.toString(),
-        contentTag: s.contentTag,
-        qualityTag: s.qualityTag,
-      }))
-    );
+    // Re-tagging a clip replaces its segments rather than appending, so a retry
+    // after a partial failure cannot leave duplicate rows behind.
+    await db.transaction(async (tx) => {
+      await tx.delete(segments).where(eq(segments.rawClipId, rawClipId));
+      await tx.insert(segments).values(
+        parsed.segments.map((s) => ({
+          rawClipId,
+          startSeconds: s.startSeconds.toString(),
+          endSeconds: s.endSeconds.toString(),
+          contentTag: s.contentTag,
+          qualityTag: s.qualityTag,
+        }))
+      );
+    });
 
     return { success: true, segmentCount: parsed.segments.length };
   } catch (error) {

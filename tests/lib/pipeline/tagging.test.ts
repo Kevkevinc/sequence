@@ -68,6 +68,98 @@ describe('tagClip', () => {
     expect(saved.map((s) => s.contentTag)).toEqual(expect.arrayContaining(['whole-clip', 'try-on']));
   });
 
+  it('uploads the clip bytes as a Blob carrying the storage content type', async () => {
+    mockUpload.mockResolvedValue({ name: 'files/abc', uri: 'https://files/abc', mimeType: 'video/mp4', state: 'ACTIVE' });
+    mockGetFile.mockResolvedValue({ state: 'ACTIVE' });
+    mockGenerateContent.mockResolvedValue({
+      text: JSON.stringify({
+        segments: [{ startSeconds: 0, endSeconds: 8, contentTag: 'whole-clip', qualityTag: 'medium' }],
+      }),
+    });
+
+    await tagClip(rawClipId);
+
+    expect(mockUpload).toHaveBeenCalledTimes(1);
+    const uploadArg = mockUpload.mock.calls[0][0];
+    // The SDK rejects a raw Buffer, so the clip bytes must arrive as a Blob.
+    expect(uploadArg.file).toBeInstanceOf(Blob);
+    expect((uploadArg.file as Blob).type).toBe('video/mp4');
+    expect(await (uploadArg.file as Blob).text()).toBe('fake');
+    expect(uploadArg.config).toEqual({ mimeType: 'video/mp4' });
+  });
+
+  it('asks the configured model for JSON, referencing the uploaded file', async () => {
+    mockUpload.mockResolvedValue({ name: 'files/abc', uri: 'https://files/abc', mimeType: 'video/mp4', state: 'ACTIVE' });
+    mockGetFile.mockResolvedValue({ state: 'ACTIVE' });
+    mockGenerateContent.mockResolvedValue({
+      text: JSON.stringify({
+        segments: [{ startSeconds: 0, endSeconds: 8, contentTag: 'whole-clip', qualityTag: 'medium' }],
+      }),
+    });
+
+    await tagClip(rawClipId);
+
+    expect(mockGenerateContent).toHaveBeenCalledTimes(1);
+    expect(mockGenerateContent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        model: 'gemini-2.5-flash',
+        config: expect.objectContaining({ responseMimeType: 'application/json' }),
+        contents: expect.arrayContaining([
+          expect.objectContaining({
+            role: 'user',
+            parts: expect.arrayContaining([
+              expect.objectContaining({
+                fileData: { fileUri: 'https://files/abc', mimeType: 'video/mp4' },
+              }),
+            ]),
+          }),
+        ]),
+      })
+    );
+  });
+
+  it('replaces existing segments instead of duplicating them when re-run', async () => {
+    mockUpload.mockResolvedValue({ name: 'files/abc', uri: 'https://files/abc', mimeType: 'video/mp4', state: 'ACTIVE' });
+    mockGetFile.mockResolvedValue({ state: 'ACTIVE' });
+    mockGenerateContent.mockResolvedValue({
+      text: JSON.stringify({
+        segments: [
+          { startSeconds: 0, endSeconds: 8, contentTag: 'whole-clip', qualityTag: 'medium' },
+          { startSeconds: 2, endSeconds: 5, contentTag: 'try-on', qualityTag: 'high' },
+        ],
+      }),
+    });
+
+    await tagClip(rawClipId);
+    const second = await tagClip(rawClipId);
+
+    expect(second).toEqual({ success: true, segmentCount: 2 });
+    const saved = await db.select().from(segments).where(eq(segments.rawClipId, rawClipId));
+    expect(saved).toHaveLength(2);
+  });
+
+  it('rejects segments whose end time is not after their start time', async () => {
+    mockUpload.mockResolvedValue({ name: 'files/abc', uri: 'https://files/abc', mimeType: 'video/mp4', state: 'ACTIVE' });
+    mockGetFile.mockResolvedValue({ state: 'ACTIVE' });
+    mockGenerateContent.mockResolvedValue({
+      text: JSON.stringify({
+        segments: [{ startSeconds: 5, endSeconds: 5, contentTag: 'whole-clip', qualityTag: 'medium' }],
+      }),
+    });
+
+    const result = await tagClip(rawClipId);
+
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      // The specific validation cause must survive into the error string, so
+      // later tasks can diagnose real model drift.
+      expect(result.error).toContain('endSeconds must be greater than startSeconds');
+    }
+
+    const saved = await db.select().from(segments).where(eq(segments.rawClipId, rawClipId));
+    expect(saved).toHaveLength(0);
+  });
+
   it('returns a failure result instead of throwing when Gemini returns invalid JSON', async () => {
     mockUpload.mockResolvedValue({ name: 'files/abc', uri: 'https://files/abc', mimeType: 'video/mp4', state: 'ACTIVE' });
     mockGetFile.mockResolvedValue({ state: 'ACTIVE' });
@@ -78,6 +170,8 @@ describe('tagClip', () => {
     expect(result.success).toBe(false);
     if (!result.success) {
       expect(result.error).toContain('Gemini');
+      // Detail from the underlying parse error must be appended, not swallowed.
+      expect(result.error).toMatch(/Gemini returned invalid or unparseable JSON for tagging: .+/);
     }
   });
 
