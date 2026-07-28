@@ -6,6 +6,7 @@ import { rawClips, segments } from '@/db/schema';
 import { getClipBuffer } from '@/lib/storage';
 import { getGeminiClient } from '@/lib/gemini/client';
 import { describeCause } from '@/lib/pipeline/errors';
+import { withTransientRetry, type TransientRetryOptions } from '@/lib/pipeline/retry';
 
 // gemini-2.5-flash was retired for new API accounts ("no longer available to
 // new users") and the 2.5/3.x Pro models return 429 quota-exceeded on the free
@@ -17,6 +18,18 @@ const TAGGING_MODEL = 'gemini-3.6-flash';
 // giving up: 30 polls x 2s = up to ~60s.
 const FILE_POLL_ATTEMPTS = 30;
 const FILE_POLL_INTERVAL_MS = 2000;
+
+/**
+ * Gemini's "this model is currently experiencing high demand" 503 dropped three
+ * of six clips on the first live run. Three tries with ~0.5-1s then ~1-2s of
+ * backoff rides out a demand spike while costing at most ~3s per clip, so a
+ * genuine outage still fails the job in seconds rather than minutes.
+ */
+const TAGGING_RETRY: TransientRetryOptions = {
+  attempts: 3,
+  baseDelayMs: 1000,
+  label: 'Gemini tagging call',
+};
 
 const TaggingResponseSchema = z.object({
   segments: z
@@ -67,33 +80,40 @@ export async function tagClip(
     const { buffer, contentType } = await getClipBuffer(clip.storageKey);
     const client = getGeminiClient();
 
-    // The SDK's files.upload only accepts a file path or a Blob, so wrap the
-    // in-memory clip bytes rather than passing the Buffer directly.
-    const uploaded = await client.files.upload({
-      file: new Blob([new Uint8Array(buffer)], { type: contentType }),
-      config: { mimeType: contentType },
-    });
+    // The whole Gemini exchange retries as one unit, not just generateContent:
+    // a demand spike can land on the upload or the file poll just as easily, and
+    // an uploaded file reference is only useful to the call that follows it.
+    // Parsing and validation deliberately sit outside, so model drift is never
+    // retried — a re-roll of the same prompt is not a fix for a bad schema.
+    const response = await withTransientRetry(async () => {
+      // The SDK's files.upload only accepts a file path or a Blob, so wrap the
+      // in-memory clip bytes rather than passing the Buffer directly.
+      const uploaded = await client.files.upload({
+        file: new Blob([new Uint8Array(buffer)], { type: contentType }),
+        config: { mimeType: contentType },
+      });
 
-    if (!uploaded.name || !uploaded.uri) {
-      throw new Error('Gemini upload did not return a usable file reference');
-    }
-    if (uploaded.state !== FileState.ACTIVE) {
-      await waitUntilActive(client, uploaded.name);
-    }
+      if (!uploaded.name || !uploaded.uri) {
+        throw new Error('Gemini upload did not return a usable file reference');
+      }
+      if (uploaded.state !== FileState.ACTIVE) {
+        await waitUntilActive(client, uploaded.name);
+      }
 
-    const response = await client.models.generateContent({
-      model: TAGGING_MODEL,
-      contents: [
-        {
-          role: 'user',
-          parts: [
-            { fileData: { fileUri: uploaded.uri, mimeType: uploaded.mimeType ?? contentType } },
-            { text: TAGGING_PROMPT },
-          ],
-        },
-      ],
-      config: { responseMimeType: 'application/json' },
-    });
+      return client.models.generateContent({
+        model: TAGGING_MODEL,
+        contents: [
+          {
+            role: 'user',
+            parts: [
+              { fileData: { fileUri: uploaded.uri, mimeType: uploaded.mimeType ?? contentType } },
+              { text: TAGGING_PROMPT },
+            ],
+          },
+        ],
+        config: { responseMimeType: 'application/json' },
+      });
+    }, TAGGING_RETRY);
 
     let parsed: z.infer<typeof TaggingResponseSchema>;
     try {

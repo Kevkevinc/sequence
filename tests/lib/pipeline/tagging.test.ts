@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { eq } from 'drizzle-orm';
 
 const mockUpload = vi.fn();
@@ -210,5 +210,115 @@ describe('tagClip', () => {
     if (!result.success) {
       expect(result.error).toContain('Gemini');
     }
+  });
+
+  describe('transient Gemini failures', () => {
+    /** The exact error that dropped three of six clips on the first live run. */
+    function highDemand503() {
+      return Object.assign(
+        new Error(
+          '{"error":{"code":503,"message":"This model is currently experiencing high demand. Spikes in demand are usually temporary. Please try again later.","status":"UNAVAILABLE"}}'
+        ),
+        { status: 503 }
+      );
+    }
+
+    function goodResponse() {
+      return {
+        text: JSON.stringify({
+          segments: [{ startSeconds: 0, endSeconds: 8, contentTag: 'whole-clip', qualityTag: 'medium' }],
+        }),
+      };
+    }
+
+    beforeEach(() => {
+      // The retry path logs every backoff; silence it so the suite output stays
+      // readable, and so the assertions below are about behaviour, not noise.
+      vi.spyOn(console, 'warn').mockImplementation(() => {});
+      mockUpload.mockResolvedValue({ name: 'files/abc', uri: 'https://files/abc', mimeType: 'video/mp4', state: 'ACTIVE' });
+      mockGetFile.mockResolvedValue({ state: 'ACTIVE' });
+    });
+
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
+
+    it('retries a 503 high-demand failure and saves the segments from the retry', async () => {
+      mockGenerateContent.mockRejectedValueOnce(highDemand503()).mockResolvedValue(goodResponse());
+
+      const result = await tagClip(rawClipId);
+
+      expect(result).toEqual({ success: true, segmentCount: 1 });
+      expect(mockGenerateContent).toHaveBeenCalledTimes(2);
+      const saved = await db.select().from(segments).where(eq(segments.rawClipId, rawClipId));
+      expect(saved).toHaveLength(1);
+    });
+
+    it('retries a transient failure raised by the upload, not just the generate call', async () => {
+      // A demand spike can land anywhere in the exchange, and a retry that
+      // reused the failed upload would have nothing to reference.
+      mockUpload
+        .mockRejectedValueOnce(highDemand503())
+        .mockResolvedValue({ name: 'files/abc', uri: 'https://files/abc', mimeType: 'video/mp4', state: 'ACTIVE' });
+      mockGenerateContent.mockResolvedValue(goodResponse());
+
+      const result = await tagClip(rawClipId);
+
+      expect(result).toEqual({ success: true, segmentCount: 1 });
+      expect(mockUpload).toHaveBeenCalledTimes(2);
+    });
+
+    it('retries a network-level failure', async () => {
+      mockGenerateContent
+        .mockRejectedValueOnce(
+          new Error('fetch failed', {
+            cause: Object.assign(new Error('connect ECONNRESET'), { code: 'ECONNRESET' }),
+          })
+        )
+        .mockResolvedValue(goodResponse());
+
+      const result = await tagClip(rawClipId);
+
+      expect(result).toEqual({ success: true, segmentCount: 1 });
+      expect(mockGenerateContent).toHaveBeenCalledTimes(2);
+    });
+
+    it('does not retry a terminal 404 model-not-found failure', async () => {
+      mockGenerateContent.mockRejectedValue(
+        Object.assign(new Error('models/gemini-nope is not found for API version v1beta'), { status: 404 })
+      );
+
+      const result = await tagClip(rawClipId);
+
+      expect(result.success).toBe(false);
+      // Retrying a bad model name only delays the same failure.
+      expect(mockGenerateContent).toHaveBeenCalledTimes(1);
+      if (!result.success) expect(result.error).toContain('is not found');
+    });
+
+    it('does not retry a schema failure, which a re-roll would not fix', async () => {
+      mockGenerateContent.mockResolvedValue({ text: 'not valid json' });
+
+      const result = await tagClip(rawClipId);
+
+      expect(result.success).toBe(false);
+      expect(mockGenerateContent).toHaveBeenCalledTimes(1);
+    });
+
+    it('gives up after the retry budget with an error saying it was retried', async () => {
+      mockGenerateContent.mockRejectedValue(highDemand503());
+
+      const result = await tagClip(rawClipId);
+
+      expect(result.success).toBe(false);
+      expect(mockGenerateContent).toHaveBeenCalledTimes(3);
+      if (!result.success) {
+        expect(result.error).toContain('still failed after 3 attempts');
+        // The original cause has to survive for the failure to be diagnosable.
+        expect(result.error).toContain('high demand');
+      }
+      const saved = await db.select().from(segments).where(eq(segments.rawClipId, rawClipId));
+      expect(saved).toHaveLength(0);
+    });
   });
 });
