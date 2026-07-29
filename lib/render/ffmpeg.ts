@@ -62,6 +62,9 @@ export async function runFfmpeg(
     await execFileAsync(ffmpegBinary(), ['-hide_banner', '-loglevel', 'error', '-y', ...args], {
       timeout: FFMPEG_TIMEOUT_MS,
       maxBuffer: OUTPUT_BUFFER_BYTES,
+      // Console applications spawned on Windows can flash a window; a worker
+      // rendering twenty cuts should not strobe the desktop.
+      windowsHide: true,
     });
     return { success: true };
   } catch (error) {
@@ -105,7 +108,7 @@ async function probe(filePath: string): Promise<ProbeResult> {
         '-of', 'json',
         filePath,
       ],
-      { timeout: FFPROBE_TIMEOUT_MS, maxBuffer: OUTPUT_BUFFER_BYTES }
+      { timeout: FFPROBE_TIMEOUT_MS, maxBuffer: OUTPUT_BUFFER_BYTES, windowsHide: true }
     );
     stdout = result.stdout;
   } catch (error) {

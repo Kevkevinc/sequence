@@ -152,6 +152,45 @@ describe('normaliseCut', () => {
     expect(await probeRotation(out)).toBe(0);
   }, 90_000);
 
+  it('clamps a cut that runs past the end of the source', async () => {
+    // The source is 10s. A plan asking for 8s-20s must yield a 2s cut whose
+    // audio stops with the picture: padding audio out to the requested 12s
+    // would leave a silent tail that shoves every later cut out of sync.
+    const out = path.join(dir, 'overrun.mp4');
+    const result = await normaliseCut({
+      sourcePath: source, startSeconds: 8, endSeconds: 20, outputPath: out,
+    });
+
+    expect(result.success).toBe(true);
+    expect(await probeDuration(out)).toBeCloseTo(2, 1);
+  }, 60_000);
+
+  it('rejects a cut starting past the end of the source', async () => {
+    const out = path.join(dir, 'past-end.mp4');
+    const result = await normaliseCut({
+      sourcePath: source, startSeconds: 30, endSeconds: 33, outputPath: out,
+    });
+
+    expect(result.success).toBe(false);
+    expect(existsSync(out)).toBe(false);
+  }, 60_000);
+
+  it('rejects a cut that clamps down to less than a frame', async () => {
+    // Starting 10ms before the last frame leaves nothing to render; a part with
+    // an empty video stream cannot be stream-copied into the concatenation.
+    const out = path.join(dir, 'sub-frame.mp4');
+    const result = await normaliseCut({
+      sourcePath: source,
+      startSeconds: (await probeDuration(source)) - 0.01,
+      endSeconds: 999,
+      outputPath: out,
+    });
+
+    expect(result.success).toBe(false);
+    if (!result.success) expect(result.error).toContain('frame');
+    expect(existsSync(out)).toBe(false);
+  }, 60_000);
+
   it('rejects a cut with non-positive duration instead of running ffmpeg', async () => {
     const out = path.join(dir, 'never-written.mp4');
     const result = await normaliseCut({

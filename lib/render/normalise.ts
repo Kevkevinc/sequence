@@ -1,4 +1,4 @@
-import { probeHasAudio, runFfmpeg } from '@/lib/render/ffmpeg';
+import { probeDuration, probeHasAudio, runFfmpeg } from '@/lib/render/ffmpeg';
 
 const WIDTH = 1080;
 const HEIGHT = 1920;
@@ -50,24 +50,47 @@ export async function normaliseCut(input: {
   endSeconds: number;
   outputPath: string;
 }): Promise<{ success: true } | { success: false; error: string }> {
-  const duration = input.endSeconds - input.startSeconds;
-  if (!Number.isFinite(duration) || duration <= 0) {
-    return { success: false, error: `Cut has non-positive duration (${duration}s)` };
+  const requested = input.endSeconds - input.startSeconds;
+  if (!Number.isFinite(requested) || requested <= 0) {
+    return { success: false, error: `Cut has non-positive duration (${requested}s)` };
   }
   if (!Number.isFinite(input.startSeconds) || input.startSeconds < 0) {
     return { success: false, error: `Cut has an invalid start (${input.startSeconds}s)` };
   }
 
-  // A source with no audio still has to yield an audio track, or concatenation
-  // drops the cut's slot in the audio timeline and everything after it desyncs.
-  // Probing first and picking one of two plain command shapes beats mixing the
-  // real track with silence: `amix` needs both inputs to exist, and ffmpeg
-  // rejects the whole filtergraph ("matches no streams") when they do not.
+  // Two things have to be known before the command can be built. A source with
+  // no audio still has to yield an audio track, or concatenation drops the
+  // cut's slot in the audio timeline and everything after it desyncs — and
+  // probing for the stream, then picking one of two plain command shapes, beats
+  // mixing the real track with silence: `amix` needs both inputs to exist, and
+  // ffmpeg rejects the whole filtergraph ("matches no streams") when they do
+  // not. The source's own length is needed to clamp the cut, below.
   let hasAudio: boolean;
+  let sourceDuration: number;
   try {
-    hasAudio = await probeHasAudio(input.sourcePath);
+    [hasAudio, sourceDuration] = await Promise.all([
+      probeHasAudio(input.sourcePath),
+      probeDuration(input.sourcePath),
+    ]);
   } catch (error) {
     return { success: false, error: error instanceof Error ? error.message : String(error) };
+  }
+
+  // The audio chain below pads to a fixed length, so a cut running past the end
+  // of the source would get a silent tail no picture ever covers — and every
+  // later cut in the concatenation would sit that far out of sync. Clamping is
+  // kinder than failing: a plan overshooting the last frame still renders.
+  if (input.startSeconds >= sourceDuration) {
+    return {
+      success: false,
+      error: `Cut starts at ${input.startSeconds}s, past the end of a ${sourceDuration}s source`,
+    };
+  }
+  const duration = Math.min(input.endSeconds, sourceDuration) - input.startSeconds;
+  // Below one frame the video stream would come out empty, which concatenation
+  // cannot copy — better to reject the cut than to emit a part with no picture.
+  if (duration < 1 / FPS) {
+    return { success: false, error: `Cut is shorter than one frame (${duration}s)` };
   }
 
   const seconds = formatSeconds(duration);
