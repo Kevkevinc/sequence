@@ -1,4 +1,4 @@
-import { desc, eq } from 'drizzle-orm';
+import { and, desc, eq } from 'drizzle-orm';
 import { db } from '@/db/client';
 import { jobs, rawClips } from '@/db/schema';
 
@@ -46,5 +46,17 @@ export async function listJobsForCreator(creatorId: string) {
   return db.query.jobs.findMany({
     where: eq(jobs.creatorId, creatorId),
     orderBy: desc(jobs.createdAt),
+  });
+}
+
+/**
+ * A single job, scoped to its owner. Returns `undefined` for a job that
+ * either does not exist or belongs to someone else — deliberately the same
+ * outcome for both, so a detail route can return one plain 404 rather than
+ * distinguishing "not found" from "not yours" and leaking which jobs exist.
+ */
+export async function getJobForCreator(jobId: string, creatorId: string) {
+  return db.query.jobs.findFirst({
+    where: and(eq(jobs.id, jobId), eq(jobs.creatorId, creatorId)),
   });
 }

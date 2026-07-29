@@ -64,8 +64,10 @@ export default function JobsPage() {
         <ul>
           {jobs.map((job) => (
             <li key={job.id}>
-              {job.productName} — {job.lengthSeconds}s, {job.pacing} pacing, {job.variationCount}{' '}
-              variations — {job.status}
+              <Link href={`/jobs/${job.id}`}>
+                {job.productName} — {job.lengthSeconds}s, {job.pacing} pacing, {job.variationCount}{' '}
+                variations — {job.status}
+              </Link>
               {/* The job succeeded, so this is advice rather than an error. */}
               {job.warning && <p style={{ color: '#a15c00' }}>{job.warning}</p>}
             </li>

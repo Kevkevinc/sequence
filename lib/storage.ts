@@ -29,6 +29,22 @@ export async function createUploadUrl(originalFilename: string, contentType: str
   return { url, storageKey };
 }
 
+/**
+ * A short-lived, signed link a browser can play or download a rendered video
+ * from directly. The bucket itself stays private; nothing is ever public.
+ *
+ * Defaults to an hour — long enough for a video-detail page to sit open and
+ * scrub through several variations without the link expiring mid-session,
+ * short enough that a leaked or logged URL is worthless soon after.
+ */
+export async function createDownloadUrl(storageKey: string, expiresIn = 3600): Promise<string> {
+  const command = new GetObjectCommand({
+    Bucket: getRequiredEnv('R2_BUCKET_NAME'),
+    Key: storageKey,
+  });
+  return getSignedUrl(client, command, { expiresIn });
+}
+
 /** A clip on local disk, with the caller responsible for removing it. */
 export type LocalClip = {
   /** Absolute path the Gemini SDK can upload straight from. */
