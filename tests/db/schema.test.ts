@@ -3,12 +3,12 @@ import { sql } from 'drizzle-orm';
 import { db } from '@/db/client';
 
 describe('database schema', () => {
-  it('creates the creators, jobs, raw_clips, segments, and edit_plans tables with expected columns', async () => {
+  it('creates the creators, jobs, raw_clips, segments, edit_plans, and renders tables with expected columns', async () => {
     const rows = await db.execute<{ table_name: string; column_name: string }>(sql`
       select table_name, column_name
       from information_schema.columns
       where table_schema = 'public'
-        and table_name in ('creators', 'jobs', 'raw_clips', 'segments', 'edit_plans')
+        and table_name in ('creators', 'jobs', 'raw_clips', 'segments', 'edit_plans', 'renders')
     `);
 
     const columns = rows.map((r) => `${r.table_name}.${r.column_name}`);
@@ -41,6 +41,12 @@ describe('database schema', () => {
         'edit_plans.hook_text',
         'edit_plans.sizing_overlay_text',
         'edit_plans.sizing_overlay_placement',
+        'renders.edit_plan_id',
+        'renders.job_id',
+        'renders.storage_key',
+        'renders.duration_seconds',
+        'renders.status',
+        'renders.failure_reason',
       ])
     );
   });
@@ -53,7 +59,7 @@ describe('database schema', () => {
     `);
     const values = rows.map((r) => r.enumlabel);
     expect(values).toEqual(
-      expect.arrayContaining(['pending', 'tagging', 'planning', 'planned', 'failed'])
+      expect.arrayContaining(['pending', 'tagging', 'planning', 'planned', 'rendering', 'done', 'failed'])
     );
   });
 });

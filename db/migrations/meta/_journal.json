@@ -22,6 +22,13 @@
       "when": 1785270655334,
       "tag": "0002_orange_dakota_north",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1785310308448,
+      "tag": "0003_awesome_inertia",
+      "breakpoints": true
     }
   ]
 }

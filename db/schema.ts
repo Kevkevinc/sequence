@@ -1,7 +1,10 @@
 import { pgTable, uuid, text, integer, boolean, timestamp, pgEnum, numeric, jsonb } from 'drizzle-orm/pg-core';
 
 export const pacingEnum = pgEnum('pacing', ['slow', 'medium', 'fast']);
-export const jobStatusEnum = pgEnum('job_status', ['pending', 'tagging', 'planning', 'planned', 'failed']);
+export const jobStatusEnum = pgEnum('job_status', [
+  'pending', 'tagging', 'planning', 'planned', 'rendering', 'done', 'failed',
+]);
+export const renderStatusEnum = pgEnum('render_status', ['rendering', 'done', 'failed']);
 
 export const creators = pgTable('creators', {
   id: uuid('id').primaryKey().defaultRandom(),
@@ -55,5 +58,16 @@ export const editPlans = pgTable('edit_plans', {
   hookText: text('hook_text').notNull(),
   sizingOverlayText: text('sizing_overlay_text'),
   sizingOverlayPlacement: text('sizing_overlay_placement'),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
+export const renders = pgTable('renders', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  editPlanId: uuid('edit_plan_id').notNull().references(() => editPlans.id),
+  jobId: uuid('job_id').notNull().references(() => jobs.id),
+  storageKey: text('storage_key'),
+  durationSeconds: numeric('duration_seconds'),
+  status: renderStatusEnum('status').notNull().default('rendering'),
+  failureReason: text('failure_reason'),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 });
