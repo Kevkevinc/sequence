@@ -16,6 +16,8 @@
     "@clerk/nextjs": "^7.6.2",
     "@google/genai": "^2.13.0",
     "drizzle-orm": "^0.45.2",
+    "ffmpeg-static": "^5.3.0",
+    "ffprobe-static": "^3.1.0",
     "next": "16.2.12",
     "postgres": "^3.4.9",
     "react": "19.2.4",
@@ -24,6 +26,7 @@
     "zod": "^4.4.3"
   },
   "devDependencies": {
+    "@types/ffprobe-static": "^2.0.3",
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",
