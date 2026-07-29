@@ -34,7 +34,7 @@ ffmpeg is free, and what an EditPlan describes (trim ranges, concatenate, overla
 
 **Sizing overlay** — smaller than the hook, same legibility treatment, placed at the corner the director chose (`sizing_overlay_placement`, one of six positions), shown for 3 seconds starting around a third of the way into the video, so it lands while the try-on footage is on screen rather than competing with the hook.
 
-Text is rendered by ffmpeg's `drawtext` filter against a font file committed to the repo (a permissively-licensed bold sans), rather than relying on system fonts — system font availability differs across machines and would make rendering environment-dependent.
+Text is **not** rendered by ffmpeg. Its `drawtext` filter was tested against the bundled ffmpeg 6.1.1 and silently corrupts exactly the text this product generates — truncating at the first colon, dropping apostrophes, offering no word wrap, and falling back to a serif font on Windows. Instead each text block is drawn to a transparent PNG with a real 2D text renderer (`@napi-rs/canvas`), which loads a repo-committed font explicitly and wraps by measuring the actual glyphs, and is then composited onto the video with ffmpeg's `overlay` filter. ffmpeg never sees the text, so there is no escaping surface at all.
 
 ## Pipeline
 
@@ -85,6 +85,6 @@ Not by tests passing — by watching the videos. Success is: the creator's real 
 
 ## Known risks
 
-- **`drawtext` on Windows** is notoriously awkward about paths (drive-letter colons must be escaped) and about special characters in the text itself. Hook text is model-authored and may contain apostrophes, colons, or quotes; escaping must be handled deliberately rather than discovered in production.
+- ~~`drawtext` escaping~~ — **retired as a risk by switching away from `drawtext` entirely** (see On-screen text). It was tested first rather than assumed: the failure was silent corruption of real hooks, not an error, which is the worst shape a bug can take.
 - **Rotation metadata** on phone footage can produce sideways output if the normalise step ignores it.
 - **Render time** on CPU is meaningful — several seconds to minutes per video depending on length and machine. Acceptable for validation; a factor for scale.

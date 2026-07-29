@@ -13,7 +13,12 @@
 - All server-side env vars go through `getRequiredEnv()` / `getEnvWithDefault()` — never `process.env.X` directly.
 - Output format is fixed: **1080×1920, H.264 + AAC, 30fps, MP4**.
 - **Never build ffmpeg commands as shell strings.** Use `execFile` with an argument array, so filenames and text never need shell quoting. This is the single biggest source of cross-platform breakage.
-- **Never inline model-authored text into a filter string.** Hook text comes from an LLM and will eventually contain apostrophes, colons, commas and quotes — all of which are `drawtext` metacharacters. Use `drawtext=textfile=...` pointing at a temp file instead.
+- **Do not use ffmpeg's `drawtext` filter for on-screen text.** This was empirically tested against the bundled ffmpeg 6.1.1 before this plan was finalised, and it fails on exactly the text this product generates:
+  - `textfile=` is broken in this build — it reports *"Both text and text file provided"* even when only `textfile` is given, with no `text` anywhere.
+  - Inline `text=` silently **truncates at the first colon** unless triple-backslash-escaped, and drops apostrophes even then. Our hook library literally contains `"POV:"`, `"it's"` and `"I'm obsessed"`, so this corrupts real hooks rather than hypothetical ones — and it fails *silently*, producing a video with wrong text rather than an error.
+  - `drawtext` has **no word wrap at all**, and a 73-character hook at 68px overflows a 1080px frame.
+  - Font loading falls back to a serif via fontconfig on Windows regardless of `fontfile=`.
+- **Render text with `@napi-rs/canvas` into a transparent PNG, then composite it with ffmpeg's `overlay` filter.** This was verified end-to-end and renders the real hook correctly, wrapped, in the right font, with `5'6", 140 lb, size L` intact. It eliminates filter-string escaping entirely (ffmpeg never sees the text), gives real word wrapping via `measureText`, and loads the font explicitly via `GlobalFonts.registerFromPath` with no fontconfig dependency. Timing is handled by the overlay filter's `enable='between(t,a,b)'`, which contains no user text and needs no escaping.
 - Every temp file created must be removed on both success and failure paths.
 - `renderPlan` and its callers follow the established `{ success: true, ... } | { success: false, error: string }` contract and never throw — the worker depends on this.
 - Per-variation failure is isolated: one variation failing must not fail the others, matching tagging's partial-failure behaviour.
@@ -315,16 +320,62 @@ Use the concat *demuxer* (a list file), not the concat *filter* — the inputs a
 
 The list file contains one `file '<absolute path>'` line per cut. Single quotes inside a path must be escaped as `'\''`. Paths should use forward slashes even on Windows.
 
-- [ ] **Step 3: Implement text overlay**
+- [ ] **Step 3: Implement text overlay via canvas + composite**
 
-Two `drawtext` filters chained. Requirements:
+Run `npm install @napi-rs/canvas` (prebuilt binaries, no compilation).
 
-- **Text comes from a file, never inline.** Write each string to a temp `.txt` (UTF-8, no trailing newline) and pass `textfile=`. Hook text is model-authored and will contain apostrophes and colons, which are `drawtext` metacharacters — inlining it is a guaranteed future bug.
-- **The font path needs escaping inside the filter string** even though the rest of the command uses an args array: within a filter graph, `C:\...` must become `C\:/...` (forward slashes, escaped colon). This bites on Windows specifically.
-- **Hook:** large (≈72px), white, heavy black border (`borderw`), horizontally centred (`x=(w-text_w)/2`), upper third (`y=h*0.18`), wrapped so long hooks do not run off-frame, visible `between(t,0,3)`.
-- **Sizing overlay:** smaller (≈44px), same white-on-black-border treatment, positioned from the six `sizing_overlay_placement` values, visible for 3s starting at a third of the video's duration.
+`lib/render/text.ts` produces a transparent 1080×1920 PNG containing both text blocks, then `overlayText` composites it. Do **not** use `drawtext` — see Global Constraints for the empirical evidence.
 
-Test both against a rendered fixture: assert the command succeeds, output dimensions are unchanged, and — critically — that a hook containing `POV: it's the "best" one, isn't it?` renders without error. That string contains every metacharacter that breaks naive escaping.
+This exact approach was verified working before this plan was written; reproduce its shape:
+
+```typescript
+import { createCanvas, GlobalFonts } from '@napi-rs/canvas';
+
+GlobalFonts.registerFromPath(FONT_PATH, 'HookFont'); // explicit, no fontconfig
+
+// Wrap by measuring with the real font — drawtext cannot do this at all.
+function wrap(ctx, text, maxWidth) {
+  const words = text.split(/\s+/);
+  const lines = [];
+  let line = '';
+  for (const word of words) {
+    const candidate = line ? line + ' ' + word : word;
+    if (ctx.measureText(candidate).width > maxWidth && line) { lines.push(line); line = word; }
+    else { line = candidate; }
+  }
+  if (line) lines.push(line);
+  return lines;
+}
+
+// Stroke then fill gives the heavy dark outline that keeps white text legible
+// over any footage. lineJoin 'round' stops spikes on sharp glyph corners.
+ctx.font = `${fontSize}px HookFont`;
+ctx.textBaseline = 'top';
+ctx.lineJoin = 'round';
+ctx.strokeStyle = 'rgba(0,0,0,0.92)';
+ctx.lineWidth = Math.round(fontSize * 0.22);
+ctx.fillStyle = '#ffffff';
+ctx.strokeText(line, x, y);
+ctx.fillText(line, x, y);
+```
+
+Verified-good styling to start from (tune later once real videos are watched):
+- **Hook:** 68px, centred, `maxWidth = 1080 - 120`, top at ~14% of height, line height 1.18×.
+- **Sizing:** 40px, positioned per the six `sizing_overlay_placement` values with a ~60px margin.
+
+Composite with two overlay filters so each block has its own visibility window — the hook for the first 3s, the sizing block for 3s starting a third of the way in:
+
+```
+[0:v][1:v]overlay=0:0:enable='between(t,0,3)'[a];
+[a][2:v]overlay=0:0:enable='between(t,S,S+3)'
+```
+
+Render the two blocks as **separate PNGs** so they can have independent timing.
+
+**Tests.** Generate the PNG and assert on it directly rather than only checking that ffmpeg exits zero — the drawtext failure mode was a silently *wrong* video, not an error. Cover:
+- A hook containing `POV: it's the "best" one, isn't it?` produces a PNG whose non-transparent pixel count is substantially greater than the same call with an empty string (i.e. the text really drew, and the colon did not truncate it).
+- A hook long enough to need wrapping produces more than one line (assert the rendered block's height exceeds one line height).
+- Compositing leaves output dimensions at 1080×1920.
 
 - [ ] **Step 4: Verify tests pass, then commit**
 
