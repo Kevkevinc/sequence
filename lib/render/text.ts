@@ -1,6 +1,7 @@
 import { rm, writeFile } from 'fs/promises';
 import path from 'path';
 import { createCanvas, GlobalFonts, type SKRSContext2D } from '@napi-rs/canvas';
+import { OVERLAY_PLACEMENTS, type OverlayPlacement } from '@/lib/editPlan';
 import { getEnvWithDefault } from '@/lib/env';
 import { probeMedia, runFfmpeg } from '@/lib/render/ffmpeg';
 
@@ -10,21 +11,14 @@ const HEIGHT = 1920;
 /**
  * The placements the director may choose, and the only ones renderable here.
  *
- * Must stay in step with `OVERLAY_PLACEMENTS` in `lib/pipeline/director.ts`,
- * which both prompts for and validates the model's choice. `renderSizingLayer`
- * falls back rather than throwing if an unknown one ever reaches it, since the
- * column is plain text in the database.
+ * Re-exported from the shared EditPlan contract rather than restated, so the
+ * planner and the renderer cannot drift. `renderSizingLayer` still falls back
+ * rather than throwing if an unknown value reaches it, since the database column
+ * is plain text and could hold a row written before this list changed.
  */
-export const SIZING_PLACEMENTS = [
-  'top-left',
-  'top-center',
-  'top-right',
-  'bottom-left',
-  'bottom-center',
-  'bottom-right',
-] as const;
+export const SIZING_PLACEMENTS = OVERLAY_PLACEMENTS;
 
-export type SizingPlacement = (typeof SIZING_PLACEMENTS)[number];
+export type SizingPlacement = OverlayPlacement;
 
 /** Bold sans, committed to the repo. See the note on {@link registerFont}. */
 const FONT_FAMILY = 'UgcHookFont';

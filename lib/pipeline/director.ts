@@ -3,6 +3,7 @@ import { FinishReason } from '@google/genai';
 import { eq, inArray } from 'drizzle-orm';
 import { db } from '@/db/client';
 import { jobs, rawClips, segments, editPlans, creators } from '@/db/schema';
+import { OVERLAY_PLACEMENTS } from '@/lib/editPlan';
 import { getEnvWithDefault } from '@/lib/env';
 import { getGeminiClient } from '@/lib/gemini/client';
 import { HOOK_STYLE_LIBRARY } from '@/lib/pipeline/hookLibrary';
@@ -218,16 +219,10 @@ const FALLBACK_FLOOR_TOLERANCE = 0.25;
  */
 const CAPACITY_SAFETY_MARGIN = 0.15;
 
-// The only placements Stage 3 can render. This single constant both builds the
-// prompt and validates the response, so the two cannot drift apart.
-const OVERLAY_PLACEMENTS = [
-  'top-left',
-  'top-center',
-  'top-right',
-  'bottom-left',
-  'bottom-center',
-  'bottom-right',
-] as const;
+// Placements live in the shared EditPlan contract (see lib/editPlan.ts) because
+// the renderer needs the same list. This single constant both builds the prompt
+// and validates the response, so prompt and validator cannot drift apart, and
+// sharing it means planning and rendering cannot drift apart either.
 
 // Separator between the measurement fields we assemble ourselves.
 const MEASUREMENT_SEPARATOR = ' · ';
