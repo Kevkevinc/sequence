@@ -1,0 +1,313 @@
+import { rm, writeFile } from 'fs/promises';
+import path from 'path';
+import { createCanvas, GlobalFonts, type SKRSContext2D } from '@napi-rs/canvas';
+import { getEnvWithDefault } from '@/lib/env';
+import { probeMedia, runFfmpeg } from '@/lib/render/ffmpeg';
+
+const WIDTH = 1080;
+const HEIGHT = 1920;
+
+/**
+ * The placements the director may choose, and the only ones renderable here.
+ *
+ * Must stay in step with `OVERLAY_PLACEMENTS` in `lib/pipeline/director.ts`,
+ * which both prompts for and validates the model's choice. `renderSizingLayer`
+ * falls back rather than throwing if an unknown one ever reaches it, since the
+ * column is plain text in the database.
+ */
+export const SIZING_PLACEMENTS = [
+  'top-left',
+  'top-center',
+  'top-right',
+  'bottom-left',
+  'bottom-center',
+  'bottom-right',
+] as const;
+
+export type SizingPlacement = (typeof SIZING_PLACEMENTS)[number];
+
+/** Bold sans, committed to the repo. See the note on {@link registerFont}. */
+const FONT_FAMILY = 'UgcHookFont';
+const DEFAULT_FONT_FILE = path.join(process.cwd(), 'assets', 'fonts', 'Roboto-Bold.ttf');
+
+const HOOK = {
+  fontSize: 68,
+  lineHeightRatio: 1.18,
+  /** Leaves 60px of breathing room each side for the outline and the frame. */
+  maxWidth: WIDTH - 120,
+  /** Upper third, clear of a phone's status bar and any platform chrome. */
+  top: Math.round(HEIGHT * 0.14),
+  /** Seconds the hook stays up, from the start. */
+  seconds: 3,
+};
+
+const SIZING = {
+  fontSize: 40,
+  lineHeightRatio: 1.2,
+  margin: 60,
+  maxWidth: WIDTH - 120,
+  /** Seconds the block stays up, starting a third of the way in. */
+  seconds: 3,
+};
+
+/** A drawn PNG layer and the height of the text block inside it. */
+export type TextLayer = { png: Buffer; blockHeight: number };
+
+/** The font file already loaded, so repeat renders do not re-read it. */
+let registeredFrom: string | null = null;
+
+/**
+ * Loads the committed font by path, under our own family name.
+ *
+ * Explicitly, never via fontconfig: `C:/Windows/Fonts` does not exist in
+ * production, font availability differs per machine, and a missing family falls
+ * back silently to whatever the platform considers a default — which on Windows
+ * meant a serif. Registering by path makes the rendering identical everywhere,
+ * and a missing file is a loud failure rather than a wrong-looking video.
+ */
+function registerFont(): void {
+  const fontPath = getEnvWithDefault('RENDER_FONT_PATH', DEFAULT_FONT_FILE);
+  if (registeredFrom === fontPath) return;
+  if (GlobalFonts.registerFromPath(fontPath, FONT_FAMILY) === null) {
+    throw new Error(`Could not load the overlay font from ${fontPath}`);
+  }
+  registeredFrom = fontPath;
+}
+
+/**
+ * Breaks text into lines that fit `maxWidth`, measuring the real glyphs.
+ *
+ * ffmpeg's drawtext cannot wrap at all, which is one of several reasons it is
+ * not used here: a 73-character hook would run off both edges of the frame.
+ */
+function wrap(ctx: SKRSContext2D, text: string, maxWidth: number): string[] {
+  const lines: string[] = [];
+  let line = '';
+
+  for (const word of text.split(/\s+/).filter(Boolean)) {
+    const candidate = line ? `${line} ${word}` : word;
+    if (ctx.measureText(candidate).width <= maxWidth) {
+      line = candidate;
+      continue;
+    }
+    if (line) lines.push(line);
+    // A single word wider than the frame (a URL, or a wall of one character)
+    // has no space to break on, so break it mid-word rather than let it run off
+    // the edge.
+    line = word;
+    while (ctx.measureText(line).width > maxWidth && line.length > 1) {
+      let fitted = line.length - 1;
+      while (fitted > 1 && ctx.measureText(line.slice(0, fitted)).width > maxWidth) fitted -= 1;
+      lines.push(line.slice(0, fitted));
+      line = line.slice(fitted);
+    }
+  }
+
+  if (line) lines.push(line);
+  return lines;
+}
+
+type LayerOptions = {
+  text: string;
+  fontSize: number;
+  lineHeightRatio: number;
+  maxWidth: number;
+  align: 'left' | 'center' | 'right';
+  /** Horizontal anchor, interpreted according to `align`. */
+  x: number;
+  /** Top of the block, or a function of its height for bottom-anchored blocks. */
+  y: number | ((blockHeight: number) => number);
+};
+
+/**
+ * Draws one text block onto a transparent 1080x1920 canvas.
+ *
+ * White fill over a heavy dark stroke: the footage underneath is arbitrary, and
+ * white-on-white is the failure mode that makes a hook unreadable. `lineJoin:
+ * round` keeps the stroke from growing spikes at sharp glyph corners.
+ */
+function renderLayer(options: LayerOptions): TextLayer {
+  registerFont();
+
+  const canvas = createCanvas(WIDTH, HEIGHT);
+  const ctx = canvas.getContext('2d');
+  ctx.font = `${options.fontSize}px "${FONT_FAMILY}"`;
+  ctx.textAlign = options.align;
+  ctx.textBaseline = 'top';
+  ctx.lineJoin = 'round';
+  ctx.miterLimit = 2;
+  ctx.strokeStyle = 'rgba(0,0,0,0.92)';
+  ctx.lineWidth = Math.round(options.fontSize * 0.22);
+  ctx.fillStyle = '#ffffff';
+
+  const lines = wrap(ctx, options.text, options.maxWidth);
+  const lineHeight = Math.round(options.fontSize * options.lineHeightRatio);
+  const blockHeight = lines.length * lineHeight;
+  const top = typeof options.y === 'number' ? options.y : options.y(blockHeight);
+
+  for (const [index, line] of lines.entries()) {
+    const y = top + index * lineHeight;
+    ctx.strokeText(line, options.x, y);
+    ctx.fillText(line, options.x, y);
+  }
+
+  return { png: canvas.toBuffer('image/png'), blockHeight };
+}
+
+/** The hook: large, centred, in the upper third. */
+export function renderHookLayer(text: string): TextLayer {
+  return renderLayer({
+    text,
+    fontSize: HOOK.fontSize,
+    lineHeightRatio: HOOK.lineHeightRatio,
+    maxWidth: HOOK.maxWidth,
+    align: 'center',
+    x: WIDTH / 2,
+    y: HOOK.top,
+  });
+}
+
+/** The sizing block: smaller, in whichever corner the director chose. */
+export function renderSizingLayer(text: string, placement: SizingPlacement): TextLayer {
+  const known = SIZING_PLACEMENTS.includes(placement) ? placement : 'bottom-left';
+  const [vertical, horizontal] = known.split('-');
+
+  const align = horizontal === 'center' ? 'center' : (horizontal as 'left' | 'right');
+  const x =
+    horizontal === 'left' ? SIZING.margin
+      : horizontal === 'right' ? WIDTH - SIZING.margin
+      : WIDTH / 2;
+
+  return renderLayer({
+    text,
+    fontSize: SIZING.fontSize,
+    lineHeightRatio: SIZING.lineHeightRatio,
+    maxWidth: SIZING.maxWidth,
+    align,
+    x,
+    // A bottom-anchored block cannot know its top until it knows how many lines
+    // it wrapped onto, so the caller supplies the top as a function of that.
+    y: vertical === 'top'
+      ? SIZING.margin
+      : (blockHeight: number) => HEIGHT - SIZING.margin - blockHeight,
+  });
+}
+
+/** Fixed-point seconds: ffmpeg cannot parse the exponent form of a small float. */
+function formatSeconds(value: number): string {
+  return value.toFixed(3);
+}
+
+async function discardOutput(outputPath: string): Promise<void> {
+  await rm(outputPath, { force: true }).catch(() => {});
+}
+
+type PreparedLayer = { file: string; from: number; to: number };
+
+/**
+ * Burns the hook and the sizing overlay into a video.
+ *
+ * Each block is drawn to its own transparent PNG and composited with an
+ * `overlay` filter, so each gets its own visibility window: the hook for the
+ * first three seconds, the sizing block for three seconds starting a third of
+ * the way in — late enough to land on try-on footage rather than compete with
+ * the hook.
+ *
+ * ffmpeg never sees the text, only a picture of it. That is deliberate: the
+ * bundled ffmpeg 6.1.1's `drawtext` silently truncates at the first colon,
+ * drops apostrophes, cannot wrap, and falls back to a serif on Windows — it
+ * rendered the hook "POV: you just found the streetwear zip-up hoodie everyone
+ * is talking about" as the three characters "POV". A wrong video that looks
+ * fine is worse than an error, so there is no escaping surface here at all.
+ *
+ * Never throws; a failure is an outcome the caller records against the job.
+ */
+export async function overlayText(input: {
+  sourcePath: string;
+  outputPath: string;
+  hookText: string;
+  sizing?: { text: string; placement: SizingPlacement } | null;
+  tempDir: string;
+}): Promise<{ success: true } | { success: false; error: string }> {
+  const layers: PreparedLayer[] = [];
+  const unique = `${path.basename(input.outputPath, path.extname(input.outputPath))}-${process.pid}`;
+
+  try {
+    // Each layer is recorded *before* it is written, so the cleanup below also
+    // removes a PNG whose write failed halfway through.
+    if (input.hookText.trim()) {
+      const png = renderHookLayer(input.hookText).png;
+      const file = path.join(input.tempDir, `hook-${unique}.png`);
+      layers.push({ file, from: 0, to: HOOK.seconds });
+      await writeFile(file, png);
+    }
+
+    if (input.sizing?.text.trim()) {
+      const png = renderSizingLayer(input.sizing.text, input.sizing.placement).png;
+      // The window is placed relative to the finished video's length, so the
+      // block lands a third of the way in whatever the edit turned out to be.
+      const duration =
+        (await probeMedia(input.sourcePath)).containerDuration ?? SIZING.seconds * 3;
+      const from = duration / 3;
+      const file = path.join(input.tempDir, `sizing-${unique}.png`);
+      layers.push({ file, from, to: from + SIZING.seconds });
+      await writeFile(file, png);
+    }
+
+    // Nothing to draw: copy the streams rather than spend a re-encode, and a
+    // lossless one at that.
+    if (layers.length === 0) {
+      const copied = await runFfmpeg([
+        '-i', input.sourcePath,
+        '-c', 'copy',
+        '-movflags', '+faststart',
+        input.outputPath,
+      ]);
+      if (!copied.success) await discardOutput(input.outputPath);
+      return copied;
+    }
+
+    // [0:v] is the footage; each PNG is an input after it. `enable` gates the
+    // overlay to its window; outside it the filter passes the frame straight
+    // through. A PNG input is a single frame, and overlay's default
+    // `eof_action=repeat` holds it for the whole video.
+    const inputs = layers.flatMap((layer) => ['-i', layer.file]);
+    const chain = layers
+      .map((layer, index) => {
+        const base = index === 0 ? '[0:v]' : `[t${index}]`;
+        const label = index === layers.length - 1 ? '[v]' : `[t${index + 1}]`;
+        const window = `between(t,${formatSeconds(layer.from)},${formatSeconds(layer.to)})`;
+        return `${base}[${index + 1}:v]overlay=0:0:enable='${window}'${label}`;
+      })
+      .join(';');
+
+    const result = await runFfmpeg([
+      '-i', input.sourcePath,
+      ...inputs,
+      '-filter_complex', chain,
+      '-map', '[v]',
+      // Optional: a source with no audio must not fail the whole overlay pass.
+      // The audio is untouched here, so copying keeps it bit-identical to the
+      // normalised parts rather than putting it through a second AAC encode.
+      '-map', '0:a?',
+      '-c:v', 'libx264', '-preset', 'veryfast', '-pix_fmt', 'yuv420p',
+      '-c:a', 'copy',
+      // This is the file the creator downloads and the browser streams, so the
+      // index belongs at the front.
+      '-movflags', '+faststart',
+      input.outputPath,
+    ]);
+
+    if (!result.success) await discardOutput(input.outputPath);
+    return result;
+  } catch (error) {
+    // A missing font, an unwritable temp directory, or a source ffprobe cannot
+    // read. The contract is a result, never an exception.
+    await discardOutput(input.outputPath);
+    return { success: false, error: error instanceof Error ? error.message : String(error) };
+  } finally {
+    for (const layer of layers) {
+      await rm(layer.file, { force: true }).catch(() => {});
+    }
+  }
+}

@@ -1,0 +1,15 @@
+Roboto-Bold.ttf
+---------------
+Family:   Roboto Bold (Christian Robertson / Google)
+License:  Apache License 2.0 — full text in LICENSE-Roboto.txt
+Source:   https://raw.githubusercontent.com/googlefonts/roboto-2/main/src/hinted/Roboto-Bold.ttf
+Fetched:  2026-07-29
+SHA-256:  61f89f8db49261c2f6106e8dccc35df7b2f7ed909020db40a3fc905e95f99334
+
+Committed rather than taken from the operating system on purpose. Rendered text
+must look identical on every machine, and the production host has no font
+directory at all: `lib/render/text.ts` loads this file by path with
+`GlobalFonts.registerFromPath` and fails loudly if it is missing, so there is no
+route to a silent fallback to whatever serif the platform happens to default to.
+
+Set RENDER_FONT_PATH to point the renderer at a different TTF.
