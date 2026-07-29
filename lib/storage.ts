@@ -1,6 +1,6 @@
 import { randomUUID } from 'crypto';
-import { createWriteStream } from 'fs';
-import { unlink } from 'fs/promises';
+import { createReadStream, createWriteStream } from 'fs';
+import { stat, unlink } from 'fs/promises';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import type { Readable } from 'stream';
@@ -85,6 +85,36 @@ export async function downloadClipToTempFile(storageKey: string): Promise<LocalC
       }
     },
   };
+}
+
+/**
+ * Streams a finished render onto R2 under `renders/`, alongside the source
+ * clips under `clips/`.
+ *
+ * Streamed from disk with an explicit Content-Length rather than buffered into
+ * memory: a rendered video is smaller than raw phone footage but still tens of
+ * megabytes, and {@link downloadClipToTempFile}'s doc comment already explains
+ * why this codebase treats "buffer a whole video in RAM" as a real risk.
+ */
+export async function uploadRenderedVideo(
+  localPath: string,
+  storageKey: string
+): Promise<{ success: true } | { success: false; error: string }> {
+  try {
+    const { size } = await stat(localPath);
+    await client.send(
+      new PutObjectCommand({
+        Bucket: getRequiredEnv('R2_BUCKET_NAME'),
+        Key: storageKey,
+        Body: createReadStream(localPath),
+        ContentLength: size,
+        ContentType: 'video/mp4',
+      })
+    );
+    return { success: true };
+  } catch (error) {
+    return { success: false, error: error instanceof Error ? error.message : String(error) };
+  }
 }
 
 export async function getClipBuffer(storageKey: string): Promise<{ buffer: Buffer; contentType: string }> {
