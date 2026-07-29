@@ -1,9 +1,10 @@
 import { and, eq } from 'drizzle-orm';
 import { db } from '@/db/client';
-import { jobs, rawClips } from '@/db/schema';
+import { jobs, rawClips, editPlans, renders, jobStatusEnum } from '@/db/schema';
 import { tagClip } from '@/lib/pipeline/tagging';
 import { planJob } from '@/lib/pipeline/director';
 import { describeCause } from '@/lib/pipeline/errors';
+import { renderPlan } from '@/lib/render/renderPlan';
 
 const POLL_INTERVAL_MS = 5000;
 
@@ -48,9 +49,11 @@ async function mapWithConcurrency<T, R>(
   return results;
 }
 
+type JobStatus = (typeof jobStatusEnum.enumValues)[number];
+
 /**
- * Takes ownership of the oldest `pending` job, flipping it to `tagging`, and
- * returns it. Returns `undefined` when the queue is empty.
+ * Takes ownership of the oldest job in `fromStatus`, flipping it to `toStatus`,
+ * and returns it. Returns `undefined` when there is nothing to claim.
  *
  * This is deliberately a single `UPDATE ... WHERE id = (SELECT ... FOR UPDATE
  * SKIP LOCKED LIMIT 1)` statement, which is the standard Postgres queue claim:
@@ -61,32 +64,39 @@ async function mapWithConcurrency<T, R>(
  *    is not guaranteed to stay on one backend connection.
  *  - `FOR UPDATE SKIP LOCKED` is what makes the claim exclusive. Without it, two
  *    workers running concurrently under READ COMMITTED both see the same row as
- *    `pending` in the sub-select and both claim it (verified: 6 concurrent
+ *    claimable in the sub-select and both claim it (verified: 6 concurrent
  *    claims handed out only 3 distinct jobs). With it, the second worker's
  *    sub-select skips the row the first has locked and picks the next one.
- *  - The redundant outer `status = 'pending'` is belt and braces: if a
+ *  - The redundant outer `status = fromStatus` is belt and braces: if a
  *    concurrent update ever does slip through, Postgres re-checks the WHERE
- *    clause against the updated row, sees `tagging`, and claims nothing.
+ *    clause against the updated row, sees the new status, and claims nothing.
  *
  * `restrictToCreatorId` narrows the queue to one creator's jobs. Production
  * never passes it — the queue is global and oldest-first, which is correct.
  * It exists because the test suite runs against the shared dev database, where
- * an unscoped claim once grabbed a real creator's job and stranded it in
- * `tagging`. Tests pass their own throwaway creator's id so a test run can only
- * ever claim jobs that same test seeded. It narrows the row set only; the
- * ordering and the `FOR UPDATE SKIP LOCKED` claim are untouched, so the
- * concurrency behaviour under test is exactly production's.
+ * an unscoped claim once grabbed a real creator's job and stranded it. Tests
+ * pass their own throwaway creator's id so a test run can only ever claim jobs
+ * that same test seeded. It narrows the row set only; the ordering and the
+ * `FOR UPDATE SKIP LOCKED` claim are untouched, so the concurrency behaviour
+ * under test is exactly production's.
+ *
+ * Shared by both stages of the pipeline this worker drives — `pending` into
+ * tagging and `planned` into rendering — rather than writing the same
+ * statement twice, which is exactly how a future third stage would drift out
+ * of sync with the atomicity guarantee above.
  */
-export async function claimNextPendingJob(
+async function claimJob(
+  fromStatus: JobStatus,
+  toStatus: JobStatus,
   options: { restrictToCreatorId?: string } = {}
 ): Promise<{ id: string } | undefined> {
   const claimable = options.restrictToCreatorId
-    ? and(eq(jobs.status, 'pending'), eq(jobs.creatorId, options.restrictToCreatorId))
-    : eq(jobs.status, 'pending');
+    ? and(eq(jobs.status, fromStatus), eq(jobs.creatorId, options.restrictToCreatorId))
+    : eq(jobs.status, fromStatus);
 
   const [claimed] = await db
     .update(jobs)
-    .set({ status: 'tagging' })
+    .set({ status: toStatus })
     .where(
       and(
         claimable,
@@ -106,6 +116,18 @@ export async function claimNextPendingJob(
     .returning({ id: jobs.id });
 
   return claimed;
+}
+
+export async function claimNextPendingJob(
+  options: { restrictToCreatorId?: string } = {}
+): Promise<{ id: string } | undefined> {
+  return claimJob('pending', 'tagging', options);
+}
+
+export async function claimNextPlannedJob(
+  options: { restrictToCreatorId?: string } = {}
+): Promise<{ id: string } | undefined> {
+  return claimJob('planned', 'rendering', options);
 }
 
 /** Records a terminal failure. Never throws: the caller is already failing. */
@@ -209,6 +231,130 @@ export async function processJob(jobId: string): Promise<void> {
   }
 }
 
+type RenderOutcome = { variationNumber: number; success: boolean; error?: string };
+
+/**
+ * Renders one variation and returns how it went — never throws.
+ *
+ * `renderPlan` is itself documented as never throwing, but trusting that as a
+ * hard guarantee here would be exactly the assumption that leaves a job stuck
+ * forever if it is ever wrong, whether from a bug in `renderPlan` or from the
+ * row-update write below failing on its own. Catching per-variation means one
+ * throw marks only *this* row failed and lets the loop move on to the next
+ * variation, rather than aborting every variation still to come — which is
+ * the isolation this function exists to provide in the first place.
+ */
+async function renderVariation(jobId: string, plan: typeof editPlans.$inferSelect): Promise<RenderOutcome> {
+  let renderRowId: string | undefined;
+  try {
+    const [renderRow] = await db
+      .insert(renders)
+      .values({ editPlanId: plan.id, jobId, status: 'rendering' })
+      .returning({ id: renders.id });
+    renderRowId = renderRow.id;
+
+    const result = await renderPlan(plan.id);
+
+    if (result.success) {
+      await db
+        .update(renders)
+        .set({
+          status: 'done',
+          storageKey: result.storageKey,
+          durationSeconds: result.durationSeconds.toString(),
+        })
+        .where(eq(renders.id, renderRowId));
+      return { variationNumber: plan.variationNumber, success: true };
+    }
+
+    await db
+      .update(renders)
+      .set({ status: 'failed', failureReason: result.error })
+      .where(eq(renders.id, renderRowId));
+    return { variationNumber: plan.variationNumber, success: false, error: result.error };
+  } catch (error) {
+    const message = describeCause(error);
+    if (renderRowId) {
+      await db
+        .update(renders)
+        .set({ status: 'failed', failureReason: message })
+        .where(eq(renders.id, renderRowId))
+        .catch(() => {});
+    }
+    return { variationNumber: plan.variationNumber, success: false, error: message };
+  }
+}
+
+/** Renders the detail list ("variation 2 (reason); variation 4 (reason)") shared by both failure messages below. */
+function describeFailedVariations(outcomes: RenderOutcome[]): string {
+  return outcomes
+    .filter((o) => !o.success)
+    .map((o) => `variation ${o.variationNumber} (${o.error})`)
+    .join('; ');
+}
+
+/**
+ * Runs one claimed job through rendering, leaving it in `done` or `failed`.
+ *
+ * Rendering is best effort per variation, the same policy `processJob` uses
+ * for clips: as long as one variation renders there is a usable video to hand
+ * back, the job carries on, and every variation is still attempted regardless
+ * of how an earlier one went. Only a total wipeout fails the job. Each
+ * variation gets its own `renders` row, updated as it resolves, so a creator
+ * can see which of their videos are ready even before the whole job finishes.
+ *
+ * Cannot leave the job stuck in `rendering`: the per-variation isolation in
+ * {@link renderVariation} means nothing inside the loop can throw past it, so
+ * the only way to reach here without a final status write is the initial
+ * `editPlans` lookup failing — a real but narrow case, handled below.
+ */
+export async function renderJob(jobId: string): Promise<void> {
+  try {
+    const plans = await db.select().from(editPlans).where(eq(editPlans.jobId, jobId));
+
+    if (plans.length === 0) {
+      await failJob(jobId, 'Job has no edit plans to render');
+      return;
+    }
+
+    const outcomes: RenderOutcome[] = [];
+    for (const plan of plans) {
+      outcomes.push(await renderVariation(jobId, plan));
+    }
+
+    const succeeded = outcomes.filter((o) => o.success).length;
+
+    if (succeeded === 0) {
+      await failJob(jobId, `All variations failed to render: ${describeFailedVariations(outcomes)}`);
+      return;
+    }
+
+    if (succeeded < outcomes.length) {
+      // The row carries its own reason; the job row stays clean (it did
+      // succeed), so the log is the only place a partial drop is recorded.
+      console.warn(
+        `Job ${jobId}: ${outcomes.length - succeeded} of ${outcomes.length} variations failed to ` +
+          `render: ${describeFailedVariations(outcomes)}`
+      );
+    }
+
+    try {
+      await db.update(jobs).set({ status: 'done', failureReason: null }).where(eq(jobs.id, jobId));
+    } catch (error) {
+      // Every render row is already correctly `done`/`failed` by this point —
+      // only this last write failed. Falling through to the outer catch's
+      // `failJob` here would report a failed job when watchable video already
+      // exists, the exact misreport `processJob`'s `plansCommitted` flag
+      // exists to prevent for tagging; this is the same guard for rendering.
+      console.error(
+        `Job ${jobId}: rendered successfully but could not be marked done: ${describeCause(error)}`
+      );
+    }
+  } catch (error) {
+    await failJob(jobId, `Unexpected worker error while rendering: ${describeCause(error)}`);
+  }
+}
+
 let shuttingDown = false;
 /** Set while the worker is idling between polls, so a signal can cut the wait short. */
 let wakeFromPoll: (() => void) | undefined;
@@ -251,11 +397,22 @@ async function main() {
 
   while (!shuttingDown) {
     try {
-      const claimed = await claimNextPendingJob();
-      if (claimed) {
-        console.log(`Processing job ${claimed.id}...`);
-        await processJob(claimed.id);
-        console.log(`Finished job ${claimed.id}.`);
+      // Rendering is checked first: it finishes work a creator is already
+      // waiting on, where tagging only starts new work. Preferring it keeps
+      // the `planned` queue from growing behind a steady stream of new jobs.
+      const readyToRender = await claimNextPlannedJob();
+      if (readyToRender) {
+        console.log(`Rendering job ${readyToRender.id}...`);
+        await renderJob(readyToRender.id);
+        console.log(`Finished rendering job ${readyToRender.id}.`);
+        continue;
+      }
+
+      const readyToTag = await claimNextPendingJob();
+      if (readyToTag) {
+        console.log(`Processing job ${readyToTag.id}...`);
+        await processJob(readyToTag.id);
+        console.log(`Finished job ${readyToTag.id}.`);
         continue;
       }
     } catch (error) {

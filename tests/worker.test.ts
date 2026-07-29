@@ -3,14 +3,16 @@ import { eq, inArray } from 'drizzle-orm';
 
 vi.mock('@/lib/pipeline/tagging', () => ({ tagClip: vi.fn() }));
 vi.mock('@/lib/pipeline/director', () => ({ planJob: vi.fn() }));
+vi.mock('@/lib/render/renderPlan', () => ({ renderPlan: vi.fn() }));
 
 import { db } from '@/db/client';
-import { creators, jobs, rawClips, segments, editPlans } from '@/db/schema';
+import { creators, jobs, rawClips, segments, editPlans, renders } from '@/db/schema';
 import { createCreatorIfNotExists } from '@/db/repositories/creators';
 import { createJob } from '@/db/repositories/jobs';
 import { tagClip } from '@/lib/pipeline/tagging';
 import { planJob } from '@/lib/pipeline/director';
-import { claimNextPendingJob, processJob } from '@/worker';
+import { renderPlan } from '@/lib/render/renderPlan';
+import { claimNextPendingJob, claimNextPlannedJob, processJob, renderJob } from '@/worker';
 
 describe('worker', () => {
   const CLERK_ID = 'test_clerk_user_worker';
@@ -32,6 +34,7 @@ describe('worker', () => {
     if (clips.length > 0) {
       await db.delete(segments).where(inArray(segments.rawClipId, clips.map((c) => c.id)));
     }
+    await db.delete(renders).where(inArray(renders.jobId, jobIds));
     await db.delete(editPlans).where(inArray(editPlans.jobId, jobIds));
     await db.delete(rawClips).where(inArray(rawClips.jobId, jobIds));
     await db.delete(jobs).where(inArray(jobs.id, jobIds));
@@ -55,6 +58,32 @@ describe('worker', () => {
   async function statusOf(jobId: string) {
     const [row] = await db.select().from(jobs).where(eq(jobs.id, jobId));
     return row;
+  }
+
+  /** A job already past tagging/planning, with `variationCount` edit plans ready to render. */
+  async function makePlannedJob(variationCount = 1) {
+    const job = await makeJob();
+    await db.update(jobs).set({ status: 'planned' }).where(eq(jobs.id, job.id));
+    const plans = await db
+      .insert(editPlans)
+      .values(
+        Array.from({ length: variationCount }, (_, i) => ({
+          jobId: job.id,
+          variationNumber: i + 1,
+          // renderPlan is mocked in this file's tests, so the content never
+          // has to be renderable — only present, since the column is NOT NULL.
+          segments: [{ rawClipId: '00000000-0000-0000-0000-000000000000', startSeconds: 0, endSeconds: 1 }],
+          hookText: `Hook ${i + 1}`,
+          sizingOverlayText: null,
+          sizingOverlayPlacement: null,
+        }))
+      )
+      .returning();
+    return { job, plans };
+  }
+
+  async function rendersFor(jobId: string) {
+    return db.select().from(renders).where(eq(renders.jobId, jobId));
   }
 
   /** Deletes a throwaway creator and everything it owns, if it still exists. */
@@ -335,5 +364,193 @@ describe('worker', () => {
     const updated = await statusOf(job.id);
     expect(updated.status).toBe('failed');
     expect(updated.failureReason).toContain('gemini client blew up');
+  });
+
+  describe('rendering', () => {
+    function claimOwnPlannedJob() {
+      return claimNextPlannedJob({ restrictToCreatorId: creatorId });
+    }
+
+    it('claims a planned job and moves it to rendering', async () => {
+      const { job } = await makePlannedJob();
+
+      const claimed = await claimOwnPlannedJob();
+
+      expect(claimed?.id).toBe(job.id);
+      expect((await statusOf(job.id)).status).toBe('rendering');
+    });
+
+    it('does not claim a planned job through the tagging claim, or vice versa', async () => {
+      const { job: planned } = await makePlannedJob();
+      const pending = await makeJob();
+
+      // The tagging claim must not pick up work waiting on the renderer...
+      const taggingClaim = await claimNextPendingJob({ restrictToCreatorId: creatorId });
+      expect(taggingClaim?.id).toBe(pending.id);
+      // ...and the render claim must not pick up work still waiting to be tagged.
+      const renderClaim = await claimOwnPlannedJob();
+      expect(renderClaim?.id).toBe(planned.id);
+    });
+
+    it('renders every variation, fills in each render row, and marks the job done', async () => {
+      const { job, plans } = await makePlannedJob(2);
+      vi.mocked(renderPlan).mockImplementation(async (editPlanId: string) => ({
+        success: true,
+        storageKey: `renders/${editPlanId}.mp4`,
+        durationSeconds: 12.5,
+      }));
+
+      await renderJob(job.id);
+
+      expect(renderPlan).toHaveBeenCalledTimes(2);
+      expect(renderPlan).toHaveBeenCalledWith(plans[0].id);
+      expect(renderPlan).toHaveBeenCalledWith(plans[1].id);
+
+      const updated = await statusOf(job.id);
+      expect(updated.status).toBe('done');
+      expect(updated.failureReason).toBeNull();
+
+      const rows = await rendersFor(job.id);
+      expect(rows).toHaveLength(2);
+      for (const row of rows) {
+        expect(row.status).toBe('done');
+        expect(row.storageKey).toBe(`renders/${row.editPlanId}.mp4`);
+        expect(Number(row.durationSeconds)).toBeCloseTo(12.5);
+      }
+    });
+
+    it('marks the job done with one failed render row when only some variations fail', async () => {
+      const { job, plans } = await makePlannedJob(2);
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      vi.mocked(renderPlan).mockImplementation(async (editPlanId: string) =>
+        editPlanId === plans[0].id
+          ? { success: true, storageKey: 'renders/ok.mp4', durationSeconds: 10 }
+          : { success: false, error: 'ffmpeg blew up on this one' }
+      );
+
+      await renderJob(job.id);
+
+      // One usable video is still a usable job — this must not become a failure.
+      const updated = await statusOf(job.id);
+      expect(updated.status).toBe('done');
+
+      const rows = await rendersFor(job.id);
+      const ok = rows.find((r) => r.editPlanId === plans[0].id)!;
+      const failed = rows.find((r) => r.editPlanId === plans[1].id)!;
+      expect(ok.status).toBe('done');
+      expect(failed.status).toBe('failed');
+      expect(failed.failureReason).toBe('ffmpeg blew up on this one');
+
+      // The row carries its own reason; the job row stays clean, so the drop
+      // must at least be logged, matching tagging's partial-failure pattern.
+      const warned = warn.mock.calls.flat().join(' ');
+      expect(warned).toContain('ffmpeg blew up on this one');
+      warn.mockRestore();
+    });
+
+    it('marks the job failed with a combined reason when every variation fails to render', async () => {
+      const { job, plans } = await makePlannedJob(2);
+      vi.mocked(renderPlan)
+        .mockResolvedValueOnce({ success: false, error: 'first variation failed' })
+        .mockResolvedValueOnce({ success: false, error: 'second variation failed' });
+
+      await renderJob(job.id);
+
+      const updated = await statusOf(job.id);
+      expect(updated.status).toBe('failed');
+      expect(updated.failureReason).toContain('first variation failed');
+      expect(updated.failureReason).toContain('second variation failed');
+
+      const rows = await rendersFor(job.id);
+      expect(rows.every((r) => r.status === 'failed')).toBe(true);
+      expect(plans.every((p) => rows.some((r) => r.editPlanId === p.id))).toBe(true);
+    });
+
+    it('marks the job failed with a reason when it has no edit plans to render', async () => {
+      const job = await makeJob();
+      await db.update(jobs).set({ status: 'planned' }).where(eq(jobs.id, job.id));
+
+      await renderJob(job.id);
+
+      expect(renderPlan).not.toHaveBeenCalled();
+      const updated = await statusOf(job.id);
+      expect(updated.status).toBe('failed');
+      expect(updated.failureReason).toBeTruthy();
+    });
+
+    it('renders every remaining variation and records a proper failure row when one throws unexpectedly, instead of aborting the rest or leaving its row stuck', async () => {
+      const { job, plans } = await makePlannedJob(3);
+      vi.mocked(renderPlan).mockImplementation(async (editPlanId: string) => {
+        if (editPlanId === plans[1].id) throw new Error('database connection dropped');
+        return { success: true, storageKey: 'renders/ok.mp4', durationSeconds: 9 };
+      });
+
+      await expect(renderJob(job.id)).resolves.toBeUndefined();
+
+      // Variations 1 and 3 genuinely rendered; that must not be reported as a
+      // failed job just because variation 2 hit something unrelated to any
+      // render at all.
+      const updated = await statusOf(job.id);
+      expect(updated.status).toBe('done');
+
+      const rows = await rendersFor(job.id);
+      expect(rows.find((r) => r.editPlanId === plans[0].id)?.status).toBe('done');
+      // The thrown variation's row must land on `failed` with the real cause,
+      // not stay stuck on `rendering` forever with nothing left to reap it.
+      const thrown = rows.find((r) => r.editPlanId === plans[1].id)!;
+      expect(thrown.status).toBe('failed');
+      expect(thrown.failureReason).toContain('database connection dropped');
+      // The throw on variation 2 must not have stopped variation 3 from
+      // being attempted at all — this is the isolation the whole per-variation
+      // design exists to provide.
+      expect(renderPlan).toHaveBeenCalledWith(plans[2].id);
+      expect(rows.find((r) => r.editPlanId === plans[2].id)?.status).toBe('done');
+    });
+
+    it('marks the job failed instead of leaving it stuck when every variation throws unexpectedly', async () => {
+      const { job } = await makePlannedJob(1);
+      vi.mocked(renderPlan).mockRejectedValue(new Error('database connection dropped'));
+
+      await expect(renderJob(job.id)).resolves.toBeUndefined();
+
+      const updated = await statusOf(job.id);
+      expect(updated.status).toBe('failed');
+      expect(updated.failureReason).toContain('database connection dropped');
+    });
+
+    it('does not report a failed job when every variation rendered but the final status write itself fails', async () => {
+      const { job } = await makePlannedJob(1);
+      vi.mocked(renderPlan).mockResolvedValue({
+        success: true,
+        storageKey: 'renders/ok.mp4',
+        durationSeconds: 9,
+      });
+      const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+      // Captured before spyOn replaces db.update, so the first queued call
+      // genuinely runs the real write (the renders row, inside
+      // renderVariation) rather than recursing into the spy.
+      const originalUpdate = db.update.bind(db);
+      const updateSpy = vi
+        .spyOn(db, 'update')
+        .mockImplementationOnce(originalUpdate)
+        // The second call is renderJob's own `jobs.status -> 'done'` write;
+        // failing only that one must not be reported as a failed job when the
+        // render itself, and its row, already succeeded.
+        .mockImplementationOnce(() => {
+          throw new Error('connection pool exhausted');
+        });
+
+      await expect(renderJob(job.id)).resolves.toBeUndefined();
+      updateSpy.mockRestore();
+      error.mockRestore();
+
+      const updated = await statusOf(job.id);
+      // Not 'failed': the job's own status write is the only thing that
+      // broke, and the render itself is real and already recorded.
+      expect(updated.status).not.toBe('failed');
+      const rows = await rendersFor(job.id);
+      expect(rows[0]?.status).toBe('done');
+    });
   });
 });
