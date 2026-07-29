@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { mkdtemp, rm, readFile } from 'fs/promises';
+import { mkdtemp, rm, readFile, writeFile } from 'fs/promises';
 import { existsSync } from 'fs';
 import { tmpdir } from 'os';
 import path from 'path';
@@ -9,6 +9,7 @@ import {
   probeDimensions,
   probeDuration,
   probeHasAudio,
+  probeMedia,
   probeRotation,
 } from '@/lib/render/ffmpeg';
 import { normaliseCut } from '@/lib/render/normalise';
@@ -42,6 +43,21 @@ async function samplePixel(
 
 const isRed = ([r, g, b]: [number, number, number]) => r > 150 && g < 90 && b < 90;
 const isBlue = ([r, g, b]: [number, number, number]) => b > 150 && r < 90 && g < 90;
+
+const FRAME_SECONDS = 1 / 30;
+
+/**
+ * Per-stream durations, which is the only view that can see A/V drift.
+ * `probeDuration` reports the container's, i.e. the longer of the two, so a
+ * picture that outlasts its sound looks perfectly fine through it.
+ */
+async function streamDurations(file: string): Promise<{ video: number; audio: number }> {
+  const info = await probeMedia(file);
+  if (!info.video?.duration || !info.audio?.duration) {
+    throw new Error(`Expected a video and an audio duration in ${file}`);
+  }
+  return { video: info.video.duration, audio: info.audio.duration };
+}
 
 describe('normaliseCut', () => {
   let dir: string;
@@ -151,6 +167,112 @@ describe('normaliseCut', () => {
     // tag — a player would rotate it a second time.
     expect(await probeRotation(out)).toBe(0);
   }, 90_000);
+
+  it('keeps video and audio the same length on cuts that are not frame-aligned', async () => {
+    // Every other test here uses whole seconds, which land on 1/30s boundaries
+    // and hide the problem entirely. Real plans do not: lib/pipeline/director.ts
+    // takes `z.number().min(0)` straight from the model, and its prompt invites
+    // in/out points like 16s-18.5s. Unsnapped, the picture rounds up to the next
+    // frame while the audio is trimmed to the exact request, and the concat
+    // demuxer turns each mismatch into an audible gap at the splice.
+    const cuts = [
+      { startSeconds: 0.5, endSeconds: 2.25 },
+      { startSeconds: 1.234, endSeconds: 3.777 },
+      { startSeconds: 2.18, endSeconds: 5.59 },
+    ];
+
+    for (const cut of cuts) {
+      const out = path.join(dir, `fractional-${cut.startSeconds}.mp4`);
+      const result = await normaliseCut({ ...cut, sourcePath: source, outputPath: out });
+      expect(result.success).toBe(true);
+
+      const { video, audio } = await streamDurations(out);
+      expect(Math.abs(video - audio)).toBeLessThan(FRAME_SECONDS);
+      // And the cut is still the length that was asked for, within a frame.
+      expect(video).toBeCloseTo(cut.endSeconds - cut.startSeconds, 1);
+    }
+  }, 120_000);
+
+  it('clamps against the picture when the source audio outlasts the video', async () => {
+    // Routine in real phone footage. Clamping against the container duration
+    // instead would pad audio out past the last frame — the same defect as a
+    // cut running off the end, reached through a different door, and invisible
+    // to a container-level duration check because the output is exactly as long
+    // as was requested.
+    const lopsided = path.join(dir, 'audio-outlasts-video.mp4');
+    expect((await runFfmpeg([
+      '-f', 'lavfi', '-i', 'testsrc=size=640x480:rate=30:duration=5',
+      '-f', 'lavfi', '-i', 'sine=frequency=440:duration=8',
+      '-c:v', 'libx264', '-c:a', 'aac', lopsided,
+    ])).success).toBe(true);
+
+    const before = await streamDurations(lopsided);
+    expect(before.video).toBeCloseTo(5, 1);
+    expect(before.audio).toBeCloseTo(8, 1);
+
+    const out = path.join(dir, 'lopsided-cut.mp4');
+    const result = await normaliseCut({
+      sourcePath: lopsided, startSeconds: 0, endSeconds: 8, outputPath: out,
+    });
+
+    expect(result.success).toBe(true);
+    const { video, audio } = await streamDurations(out);
+    expect(video).toBeCloseTo(5, 1);
+    expect(Math.abs(video - audio)).toBeLessThan(FRAME_SECONDS);
+  }, 90_000);
+
+  it('leaves no output file behind when ffmpeg itself fails', async () => {
+    // A source whose headers are intact but whose payload is not: it probes
+    // cleanly, then every frame fails to decode. ffmpeg opens the output before
+    // initialising the graph, so without cleanup this leaves a 0-byte file —
+    // and Task 3 iterates a directory of parts.
+    const intact = path.join(dir, 'headers-ok.mp4');
+    expect((await runFfmpeg([
+      '-f', 'lavfi', '-i', 'testsrc=size=320x240:rate=30:duration=4',
+      '-f', 'lavfi', '-i', 'sine=frequency=440:duration=4',
+      '-c:v', 'libx264', '-c:a', 'aac', '-shortest', '-movflags', '+faststart', intact,
+    ])).success).toBe(true);
+
+    const corrupt = path.join(dir, 'corrupt.mp4');
+    const bytes = await readFile(intact);
+    // Keep ftyp+moov (written first thanks to faststart), destroy the payload.
+    await writeFile(corrupt, Buffer.concat([bytes.subarray(0, 8192), Buffer.alloc(bytes.length - 8192)]));
+    expect(await probeDuration(corrupt)).toBeCloseTo(4, 1);
+
+    const out = path.join(dir, 'from-corrupt.mp4');
+    const result = await normaliseCut({
+      sourcePath: corrupt, startSeconds: 0, endSeconds: 3, outputPath: out,
+    });
+
+    expect(result.success).toBe(false);
+    expect(existsSync(out)).toBe(false);
+    if (!result.success) {
+      // ffmpeg's diagnosis is the last thing it prints, after any amount of
+      // decoder noise. This stderr runs to tens of kilobytes, so the stored
+      // string must be its *end* — the leading ellipsis is the marker that the
+      // front was dropped — and must carry the reason rather than Node's
+      // "Command failed: <the whole command line>".
+      expect(result.error.startsWith('...')).toBe(true);
+      expect(result.error).toContain('Invalid data found');
+      expect(result.error).not.toContain('Command failed');
+    }
+  }, 90_000);
+
+  it('rejects a source with no video stream before running ffmpeg', async () => {
+    const audioOnly = path.join(dir, 'audio-only.m4a');
+    expect((await runFfmpeg([
+      '-f', 'lavfi', '-i', 'sine=frequency=440:duration=3', '-c:a', 'aac', audioOnly,
+    ])).success).toBe(true);
+
+    const out = path.join(dir, 'from-audio-only.mp4');
+    const result = await normaliseCut({
+      sourcePath: audioOnly, startSeconds: 0, endSeconds: 2, outputPath: out,
+    });
+
+    expect(result.success).toBe(false);
+    if (!result.success) expect(result.error).toContain('no video stream');
+    expect(existsSync(out)).toBe(false);
+  }, 60_000);
 
   it('clamps a cut that runs past the end of the source', async () => {
     // The source is 10s. A plan asking for 8s-20s must yield a 2s cut whose

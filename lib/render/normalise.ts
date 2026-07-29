@@ -1,4 +1,5 @@
-import { probeDuration, probeHasAudio, runFfmpeg } from '@/lib/render/ffmpeg';
+import { rm } from 'fs/promises';
+import { probeMedia, type MediaInfo, runFfmpeg } from '@/lib/render/ffmpeg';
 
 const WIDTH = 1080;
 const HEIGHT = 1920;
@@ -20,15 +21,42 @@ const REFRAME =
   `crop=${WIDTH}:${HEIGHT},setsar=1,fps=${FPS}`;
 
 /**
+ * Rounds a time to the nearest frame boundary.
+ *
+ * Video length can only ever be a whole number of frames: ask for 2.543s at
+ * 30fps and ffmpeg emits 78 frames — 2.600s — while the audio chain below trims
+ * to precisely 2.543s. That 57ms of surplus picture is silent, and the concat
+ * demuxer turns each one into an audible dropout at the splice ("gap 0.0458s
+ * before pts 2.6000"), so a 9-cut variation collects 8 of them. Snapping both
+ * the start and the duration to frames first means the length the audio is
+ * trimmed to is one the video can actually land on.
+ */
+function snapToFrame(seconds: number): number {
+  return Math.round(seconds * FPS) / FPS;
+}
+
+/**
  * Pins the audio to exactly `seconds`, whatever it started as.
  *
- * `apad` covers a track that runs short of the video (common when a cut lands
- * past the last audio frame) and `atrim` cuts one that runs long; together they
- * guarantee audio and video are the same length. Without that the parts drift
- * against each other and every concatenated cut pushes the desync further.
+ * `apad` covers a track that runs short of the video and `atrim` cuts one that
+ * runs long; together they guarantee audio and video are the same length.
+ * Without that the parts drift against each other and every concatenated cut
+ * pushes the desync further.
  */
 function audioChain(label: string, seconds: string): string {
   return `[${label}]aresample=async=1:first_pts=0,apad,atrim=duration=${seconds},asetpts=N/SR/TB[a]`;
+}
+
+/**
+ * Pins the video to exactly `seconds` too.
+ *
+ * `-t` alone only bounds the *input*, and the frames arriving within that bound
+ * still round up to the next frame boundary. `trim` cuts the surplus and
+ * `setpts=N/FRAME_RATE/TB` renumbers what is left as consecutive frames from
+ * zero, so the stream is the snapped length with no timestamp gaps.
+ */
+function videoChain(seconds: string): string {
+  return `[0:v:0]${REFRAME},trim=duration=${seconds},setpts=N/FRAME_RATE/TB[v]`;
 }
 
 /** Fixed-point seconds: ffmpeg cannot parse the exponent form of a small float. */
@@ -37,12 +65,35 @@ function formatSeconds(value: number): string {
 }
 
 /**
+ * Removes a half-written output.
+ *
+ * ffmpeg opens the output file before it initialises the filter graph, so a
+ * graph or decode failure leaves a 0-byte file behind. Every guard below
+ * promises "failed means nothing was written", and Task 3 iterates a directory
+ * of parts, so the ffmpeg path has to keep that promise too. A cleanup failure
+ * is swallowed: the render error is the one worth reporting.
+ */
+async function discardOutput(outputPath: string): Promise<void> {
+  await rm(outputPath, { force: true }).catch(() => {});
+}
+
+/** Shortest of the durations that are actually known, or null when none are. */
+function usablePicture(media: MediaInfo): number | null {
+  const known = [media.video?.duration ?? null, media.containerDuration].filter(
+    (value): value is number => value !== null
+  );
+  return known.length > 0 ? Math.min(...known) : null;
+}
+
+/**
  * Trims one cut out of a source clip and re-encodes it to the single format
- * every other cut shares: 1080x1920, 30fps, stereo 44.1kHz AAC.
+ * every other cut shares: 1080x1920, 30fps, stereo 44.1kHz AAC, with video and
+ * audio the same length to within a frame.
  *
  * Uniformity is the whole point — Task 3 joins the cuts with the concat
  * demuxer, which stream-copies and therefore only works when every part agrees
- * on codec, resolution, frame rate and audio parameters.
+ * on codec, resolution, frame rate and audio parameters, and only sounds right
+ * when no part's audio stops before its picture does.
  */
 export async function normaliseCut(input: {
   sourcePath: string;
@@ -58,35 +109,42 @@ export async function normaliseCut(input: {
     return { success: false, error: `Cut has an invalid start (${input.startSeconds}s)` };
   }
 
-  // Two things have to be known before the command can be built. A source with
-  // no audio still has to yield an audio track, or concatenation drops the
-  // cut's slot in the audio timeline and everything after it desyncs — and
-  // probing for the stream, then picking one of two plain command shapes, beats
-  // mixing the real track with silence: `amix` needs both inputs to exist, and
-  // ffmpeg rejects the whole filtergraph ("matches no streams") when they do
-  // not. The source's own length is needed to clamp the cut, below.
-  let hasAudio: boolean;
-  let sourceDuration: number;
+  // One probe answers everything the command needs. A source with no audio
+  // still has to yield an audio track, or concatenation drops the cut's slot in
+  // the audio timeline and everything after it desyncs — and probing for the
+  // stream, then picking one of two plain command shapes, beats mixing the real
+  // track with silence: `amix` needs both inputs to exist, and ffmpeg rejects
+  // the whole filtergraph ("matches no streams") when they do not.
+  let media: MediaInfo;
   try {
-    [hasAudio, sourceDuration] = await Promise.all([
-      probeHasAudio(input.sourcePath),
-      probeDuration(input.sourcePath),
-    ]);
+    media = await probeMedia(input.sourcePath);
   } catch (error) {
     return { success: false, error: error instanceof Error ? error.message : String(error) };
   }
 
-  // The audio chain below pads to a fixed length, so a cut running past the end
-  // of the source would get a silent tail no picture ever covers — and every
-  // later cut in the concatenation would sit that far out of sync. Clamping is
-  // kinder than failing: a plan overshooting the last frame still renders.
-  if (input.startSeconds >= sourceDuration) {
+  if (!media.video) {
+    return { success: false, error: `Source has no video stream: ${input.sourcePath}` };
+  }
+
+  // Clamp against the *picture*, not the container. Container duration is the
+  // longest stream, so on a clip whose audio outlasts its video — routine in
+  // real phone footage — trusting it would pad audio out past the last frame
+  // and reintroduce exactly the desync this function exists to prevent.
+  const usableDuration = usablePicture(media);
+  if (usableDuration === null) {
+    return { success: false, error: `Could not read a duration from ${input.sourcePath}` };
+  }
+  if (input.startSeconds >= usableDuration) {
     return {
       success: false,
-      error: `Cut starts at ${input.startSeconds}s, past the end of a ${sourceDuration}s source`,
+      error: `Cut starts at ${input.startSeconds}s, past the end of ${usableDuration}s of picture`,
     };
   }
-  const duration = Math.min(input.endSeconds, sourceDuration) - input.startSeconds;
+
+  // Snap both ends to frame boundaries so the audio is trimmed to a length the
+  // video can land on exactly.
+  const start = snapToFrame(input.startSeconds);
+  const duration = snapToFrame(Math.min(input.endSeconds, usableDuration) - start);
   // Below one frame the video stream would come out empty, which concatenation
   // cannot copy — better to reject the cut than to emit a part with no picture.
   if (duration < 1 / FPS) {
@@ -96,24 +154,28 @@ export async function normaliseCut(input: {
   const seconds = formatSeconds(duration);
   // -ss before -i seeks fast; putting it after -i would decode from zero every
   // time, which is slow on a 36s source cut near its end.
-  const trimmedSource = [
-    '-ss', formatSeconds(input.startSeconds),
-    '-t', seconds,
-    '-i', input.sourcePath,
-  ];
+  const trimmedSource = ['-ss', formatSeconds(start), '-t', seconds, '-i', input.sourcePath];
+  const hasAudio = media.audio !== null;
   const silenceInput = hasAudio
     ? []
-    : ['-f', 'lavfi', '-t', seconds, '-i', `anullsrc=channel_layout=stereo:sample_rate=${SAMPLE_RATE}`];
+    : [
+        '-f', 'lavfi',
+        '-t', seconds,
+        '-i', `anullsrc=channel_layout=stereo:sample_rate=${SAMPLE_RATE}`,
+      ];
 
-  return runFfmpeg([
+  const result = await runFfmpeg([
     ...trimmedSource,
     ...silenceInput,
     '-filter_complex',
-    `[0:v:0]${REFRAME}[v];${audioChain(hasAudio ? '0:a:0' : '1:a:0', seconds)}`,
+    `${videoChain(seconds)};${audioChain(hasAudio ? '0:a:0' : '1:a:0', seconds)}`,
     '-map', '[v]',
     '-map', '[a]',
     '-c:v', 'libx264', '-preset', 'veryfast', '-pix_fmt', 'yuv420p',
     '-c:a', 'aac', '-ar', String(SAMPLE_RATE), '-ac', String(CHANNELS),
     input.outputPath,
   ]);
+
+  if (!result.success) await discardOutput(input.outputPath);
+  return result;
 }

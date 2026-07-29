@@ -9,6 +9,7 @@ import {
   probeDimensions,
   probeDuration,
   probeHasAudio,
+  probeMedia,
   probeRotation,
 } from '@/lib/render/ffmpeg';
 
@@ -61,6 +62,23 @@ describe('render/ffmpeg', () => {
       if (!result.success) expect(result.error.length).toBeGreaterThan(0);
     }, 60_000);
 
+    it('says a render was timed out rather than echoing the command line', async () => {
+      // A killed process writes nothing to stderr, so the fallback is Node's
+      // "Command failed: <the whole command>" — useless in exactly the case
+      // where somebody needs to know a long render was cut off, not rejected.
+      const out = path.join(dir, 'never-finishes.mp4');
+      const result = await runFfmpeg(
+        [
+          '-f', 'lavfi', '-i', 'testsrc=size=1920x1080:rate=30:duration=600',
+          '-c:v', 'libx264', '-preset', 'veryslow', out,
+        ],
+        { timeoutMs: 50 }
+      );
+
+      expect(result.success).toBe(false);
+      if (!result.success) expect(result.error).toContain('ffmpeg timed out after');
+    }, 60_000);
+
     it('handles paths containing spaces and a drive letter', async () => {
       const spaced = path.join(dir, 'a file with spaces.mp4');
       const result = await runFfmpeg(['-i', video, '-c', 'copy', spaced]);
@@ -81,6 +99,34 @@ describe('render/ffmpeg', () => {
         sampleRate: 44100,
         channels: 2,
       });
+    }, 60_000);
+
+    it('returns every fact about a file from a single probe', async () => {
+      // One spawn per file rather than one per question, and per-stream
+      // durations that a container-level duration cannot express.
+      const info = await probeMedia(video);
+
+      expect(info.containerDuration).toBeCloseTo(2, 1);
+      expect(info.video).toMatchObject({ width: 320, height: 240, rotation: 0 });
+      expect(info.video?.duration).toBeCloseTo(2, 1);
+      expect(info.audio).toMatchObject({ codec: 'aac', sampleRate: 44100, channels: 2 });
+      expect(info.audio?.duration).toBeCloseTo(2, 1);
+    }, 60_000);
+
+    it('reports the container duration as the longer stream, and both separately', async () => {
+      const lopsided = path.join(dir, 'lopsided.mp4');
+      const made = await runFfmpeg([
+        '-f', 'lavfi', '-i', 'testsrc=size=320x240:rate=30:duration=2',
+        '-f', 'lavfi', '-i', 'sine=frequency=440:duration=4',
+        '-c:v', 'libx264', '-c:a', 'aac', lopsided,
+      ]);
+      expect(made.success).toBe(true);
+
+      const info = await probeMedia(lopsided);
+      expect(info.video?.duration).toBeCloseTo(2, 1);
+      expect(info.audio?.duration).toBeCloseTo(4, 1);
+      // probeDuration cannot see the mismatch at all — hence probeMedia.
+      expect(await probeDuration(lopsided)).toBeCloseTo(4, 1);
     }, 60_000);
 
     it('reports dimensions as displayed for footage with a rotation tag', async () => {
