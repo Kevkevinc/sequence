@@ -278,7 +278,17 @@ export async function overlayText(input: {
     }
 
     if (input.inspirationImagePath) {
-      imageLayers.push({ file: input.inspirationImagePath, from: 0, to: INSPIRATION_IMAGE.seconds });
+      // Starts right as the hook's own window ends, not underneath it: both
+      // sit in the upper-left/upper-third region, and a centred multi-line
+      // hook routinely spans wide enough to pass under the photo's box,
+      // which then paints over it (composited after the hook layer). Staggering
+      // in time keeps both fully legible instead of overlapping in space.
+      const imageFrom = input.hookText.trim() ? HOOK.seconds : 0;
+      imageLayers.push({
+        file: input.inspirationImagePath,
+        from: imageFrom,
+        to: imageFrom + INSPIRATION_IMAGE.seconds,
+      });
     }
 
     // Nothing to draw: copy the streams rather than spend a re-encode, and a

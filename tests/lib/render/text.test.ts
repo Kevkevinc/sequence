@@ -454,4 +454,53 @@ describe('overlayText', () => {
     // t=9s: long past the 4s window — a pop-up, not a watermark.
     expect((await frameInk(out, 9, dir)).count).toBeLessThan(200);
   }, 180_000);
+
+  it('starts the inspiration photo after the hook window instead of underneath it', async () => {
+    // A real render (jacob-hoodie style, product name folded into the hook)
+    // showed the two colliding: both sit in the upper-left/upper-third, and a
+    // wide centred hook line passes right under the photo's box, which paints
+    // over it since it composites after the hook layer. Staggering them in
+    // time — photo starts exactly when the hook's 3s window ends — keeps both
+    // fully legible instead of overlapping in space.
+    const imgCanvas = createCanvas(200, 300);
+    const imgCtx = imgCanvas.getContext('2d');
+    imgCtx.fillStyle = '#00ff00';
+    imgCtx.fillRect(0, 0, 200, 300);
+    const imagePath = path.join(dir, 'inspiration-staggered.jpg');
+    await writeFile(imagePath, imgCanvas.toBuffer('image/jpeg'));
+
+    const out = path.join(dir, 'inspiration-staggered.mp4');
+    const result = await overlayText({
+      sourcePath: source,
+      outputPath: out,
+      hookText: 'Fit check',
+      tempDir: dir,
+      inspirationImagePath: imagePath,
+    });
+
+    expect(result.success).toBe(true);
+
+    // t=1s: inside the hook's window. The photo's box (upper-left) must not
+    // show green yet — if it did, the two would still be racing for the same
+    // pixels the moment the hook renders.
+    const duringHook = await extractFrame(out, 1, dir);
+    const boxCenter = await pixelAt(
+      duringHook,
+      INSPIRATION_IMAGE.margin + Math.round(INSPIRATION_IMAGE.width / 2),
+      INSPIRATION_IMAGE.margin + Math.round(INSPIRATION_IMAGE.height / 2)
+    );
+    expect(boxCenter.g).toBeLessThan(150);
+    // The hook itself is genuinely on screen at this point.
+    expect((await frameInk(out, 1, dir)).count).toBeGreaterThan(500);
+
+    // t=4s: past the hook's 3s window, inside the photo's new 3-7s window.
+    const duringPhoto = await extractFrame(out, 4, dir);
+    const boxCenterLater = await pixelAt(
+      duringPhoto,
+      INSPIRATION_IMAGE.margin + Math.round(INSPIRATION_IMAGE.width / 2),
+      INSPIRATION_IMAGE.margin + Math.round(INSPIRATION_IMAGE.height / 2)
+    );
+    expect(boxCenterLater.g).toBeGreaterThan(150);
+    expect(boxCenterLater.r).toBeLessThan(80);
+  }, 180_000);
 });
