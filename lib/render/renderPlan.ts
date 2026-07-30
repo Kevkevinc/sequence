@@ -5,13 +5,14 @@ import path from 'path';
 import { z } from 'zod';
 import { inArray, eq } from 'drizzle-orm';
 import { db } from '@/db/client';
-import { editPlans, rawClips } from '@/db/schema';
+import { editPlans, rawClips, jobs, styles } from '@/db/schema';
 import { downloadClipToTempFile, uploadRenderedVideo, type LocalClip } from '@/lib/storage';
 import { normaliseCut } from '@/lib/render/normalise';
 import { concatCuts } from '@/lib/render/concat';
 import { overlayText } from '@/lib/render/text';
 import { probeDuration } from '@/lib/render/ffmpeg';
 import type { OverlayPlacement } from '@/lib/editPlan';
+import { StyleConfigSchema } from '@/lib/styles';
 
 /**
  * The shape `editPlans.segments` was written in by the director step. The
@@ -52,6 +53,20 @@ export async function renderPlan(editPlanId: string): Promise<RenderPlanResult> 
     const [plan] = await db.select().from(editPlans).where(eq(editPlans.id, editPlanId));
     if (!plan) {
       return { success: false, error: `Edit plan ${editPlanId} not found` };
+    }
+
+    const [job] = await db.select().from(jobs).where(eq(jobs.id, plan.jobId));
+    if (!job) {
+      return { success: false, error: `Job ${plan.jobId} for edit plan ${editPlanId} was not found` };
+    }
+
+    let textColor: string | undefined;
+    if (job.styleId) {
+      const [styleRow] = await db.select().from(styles).where(eq(styles.id, job.styleId));
+      if (styleRow) {
+        const parsed = StyleConfigSchema.safeParse(styleRow.config);
+        if (parsed.success) textColor = parsed.data.textColor;
+      }
     }
 
     const parsedSegments = StoredSegmentsSchema.safeParse(plan.segments);
@@ -126,6 +141,7 @@ export async function renderPlan(editPlanId: string): Promise<RenderPlanResult> 
           }
         : null,
       tempDir,
+      textColor,
     });
     if (!textResult.success) {
       return { success: false, error: `Failed to add on-screen text: ${textResult.error}` };

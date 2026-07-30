@@ -3,6 +3,7 @@ import { mkdtemp, rm, readdir } from 'fs/promises';
 import { tmpdir } from 'os';
 import path from 'path';
 import { eq } from 'drizzle-orm';
+import { loadImage, createCanvas } from '@napi-rs/canvas';
 import { runFfmpeg } from '@/lib/render/ffmpeg';
 
 /**
@@ -31,7 +32,7 @@ vi.mock('@/lib/storage', async (importOriginal) => {
 });
 
 import { db } from '@/db/client';
-import { rawClips, editPlans } from '@/db/schema';
+import { rawClips, editPlans, styles } from '@/db/schema';
 import { createCreatorIfNotExists } from '@/db/repositories/creators';
 import { createJob } from '@/db/repositories/jobs';
 import { renderPlan } from '@/lib/render/renderPlan';
@@ -52,7 +53,12 @@ describe('renderPlan', () => {
    * So the file itself cannot be inspected after `renderPlan` resolves; the
    * mock measures it while it still exists, on the way past.
    */
-  let uploadedVideoProperties: { width: number; height: number; durationSeconds: number }[];
+  let uploadedVideoProperties: {
+    width: number;
+    height: number;
+    durationSeconds: number;
+    hookPixel: { r: number; g: number; b: number };
+  }[];
 
   beforeAll(async () => {
     fixturesDir = await mkdtemp(path.join(tmpdir(), 'ugc-renderplan-fixtures-'));
@@ -86,12 +92,31 @@ describe('renderPlan', () => {
       const path_ = storageKey === 'clips/a.mp4' ? clipAPath : clipBPath;
       return { path: path_, contentType: 'video/mp4', cleanUp: vi.fn(async () => {}) };
     });
+    let uploadFrameCount = 0;
     mockUpload.mockImplementation(async (localPath: string) => {
       const media = await probeMedia(localPath);
+      const framePath = path.join(fixturesDir, `upload-frame-${uploadFrameCount++}.png`);
+      await runFfmpeg(['-ss', '1', '-i', localPath, '-frames:v', '1', framePath]);
+      const image = await loadImage(framePath);
+      const canvas = createCanvas(image.width, image.height);
+      const ctx = canvas.getContext('2d');
+      ctx.drawImage(image, 0, 0);
+      const y = Math.round(image.height * 0.15);
+      let best = { r: 0, g: 0, b: 0 };
+      let bestDominance = -Infinity;
+      for (let x = Math.round(image.width * 0.2); x < Math.round(image.width * 0.8); x += 2) {
+        const { data } = ctx.getImageData(x, y, 1, 1);
+        const dominance = data[1] - Math.max(data[0], data[2]);
+        if (dominance > bestDominance) {
+          bestDominance = dominance;
+          best = { r: data[0], g: data[1], b: data[2] };
+        }
+      }
       uploadedVideoProperties.push({
         width: media.video?.width ?? 0,
         height: media.video?.height ?? 0,
         durationSeconds: await probeDuration(localPath),
+        hookPixel: best,
       });
       return { success: true };
     });
@@ -153,7 +178,12 @@ describe('renderPlan', () => {
     // while it still existed, since renderPlan cleans it up right after.
     expect(mockUpload).toHaveBeenCalledTimes(1);
     const rendered = uploadedVideoProperties[0];
-    expect(rendered).toEqual({ width: 1080, height: 1920, durationSeconds: expect.any(Number) });
+    expect(rendered).toEqual({
+      width: 1080,
+      height: 1920,
+      durationSeconds: expect.any(Number),
+      hookPixel: expect.anything(),
+    });
 
     const planned = 4 + 4 + 4; // three 4s cuts
     expect(rendered.durationSeconds).toBeGreaterThan(planned - 1);
@@ -238,6 +268,56 @@ describe('renderPlan', () => {
     expect(mockDownload).toHaveBeenCalledTimes(1);
     expect(mockDownload).toHaveBeenCalledWith('clips/a.mp4');
   }, 60_000);
+
+  it("renders the hook text in the job's style color", async () => {
+    const [style] = await db
+      .insert(styles)
+      .values({
+        name: 'Test Render Color Style',
+        description: 'test',
+        config: {
+          cutMinSeconds: 2,
+          cutMaxSeconds: 5,
+          hookStyleLibrary: ['x'],
+          textColor: '#00ff00',
+          variesClipOrder: false,
+          usesInspirationOverlay: false,
+        },
+      })
+      .returning();
+
+    const styledJob = await createJob({
+      creatorId,
+      productName: 'Styled Color Product',
+      sizingOverlayEnabled: false,
+      lengthSeconds: 15,
+      styleId: style.id,
+      variationCount: 1,
+      clips: [{ storageKey: 'clips/a.mp4', originalFilename: 'a.mp4' }],
+    });
+    const [styledClip] = await db.select().from(rawClips).where(eq(rawClips.jobId, styledJob.id));
+
+    const [plan] = await db
+      .insert(editPlans)
+      .values({
+        jobId: styledJob.id,
+        variationNumber: 1,
+        segments: [{ rawClipId: styledClip.id, startSeconds: 0, endSeconds: 4 }],
+        hookText: 'Green hook check',
+        sizingOverlayText: null,
+        sizingOverlayPlacement: null,
+      })
+      .returning();
+
+    const result = await renderPlan(plan.id);
+
+    expect(result.success).toBe(true);
+    const rendered = uploadedVideoProperties[0];
+    // Green dominant over red and blue: proves the style's color actually
+    // reached the renderer, not merely that rendering succeeded.
+    expect(rendered.hookPixel.g).toBeGreaterThan(rendered.hookPixel.r);
+    expect(rendered.hookPixel.g).toBeGreaterThan(rendered.hookPixel.b);
+  }, 120_000);
 
   it('returns a failure result instead of throwing when the edit plan does not exist', async () => {
     const result = await renderPlan('00000000-0000-0000-0000-000000000000');

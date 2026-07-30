@@ -101,6 +101,9 @@ function wrap(ctx: SKRSContext2D, text: string, maxWidth: number): string[] {
   return lines;
 }
 
+/** Default when a style does not specify its own color. */
+const DEFAULT_TEXT_COLOR = '#ffffff';
+
 type LayerOptions = {
   text: string;
   fontSize: number;
@@ -111,6 +114,7 @@ type LayerOptions = {
   x: number;
   /** Top of the block, or a function of its height for bottom-anchored blocks. */
   y: number | ((blockHeight: number) => number);
+  textColor: string;
 };
 
 /**
@@ -132,7 +136,7 @@ function renderLayer(options: LayerOptions): TextLayer {
   ctx.miterLimit = 2;
   ctx.strokeStyle = 'rgba(0,0,0,0.92)';
   ctx.lineWidth = Math.round(options.fontSize * 0.22);
-  ctx.fillStyle = '#ffffff';
+  ctx.fillStyle = options.textColor;
 
   const lines = wrap(ctx, options.text, options.maxWidth);
   const lineHeight = Math.round(options.fontSize * options.lineHeightRatio);
@@ -149,7 +153,7 @@ function renderLayer(options: LayerOptions): TextLayer {
 }
 
 /** The hook: large, centred, in the upper third. */
-export function renderHookLayer(text: string): TextLayer {
+export function renderHookLayer(text: string, options: { textColor?: string } = {}): TextLayer {
   return renderLayer({
     text,
     fontSize: HOOK.fontSize,
@@ -158,11 +162,16 @@ export function renderHookLayer(text: string): TextLayer {
     align: 'center',
     x: WIDTH / 2,
     y: HOOK.top,
+    textColor: options.textColor ?? DEFAULT_TEXT_COLOR,
   });
 }
 
 /** The sizing block: smaller, in whichever corner the director chose. */
-export function renderSizingLayer(text: string, placement: SizingPlacement): TextLayer {
+export function renderSizingLayer(
+  text: string,
+  placement: SizingPlacement,
+  options: { textColor?: string } = {}
+): TextLayer {
   const known = SIZING_PLACEMENTS.includes(placement) ? placement : 'bottom-left';
   const [vertical, horizontal] = known.split('-');
 
@@ -184,6 +193,7 @@ export function renderSizingLayer(text: string, placement: SizingPlacement): Tex
     y: vertical === 'top'
       ? SIZING.margin
       : (blockHeight: number) => HEIGHT - SIZING.margin - blockHeight,
+    textColor: options.textColor ?? DEFAULT_TEXT_COLOR,
   });
 }
 
@@ -222,6 +232,7 @@ export async function overlayText(input: {
   hookText: string;
   sizing?: { text: string; placement: SizingPlacement } | null;
   tempDir: string;
+  textColor?: string;
 }): Promise<{ success: true } | { success: false; error: string }> {
   const layers: PreparedLayer[] = [];
   const unique = `${path.basename(input.outputPath, path.extname(input.outputPath))}-${process.pid}`;
@@ -230,14 +241,16 @@ export async function overlayText(input: {
     // Each layer is recorded *before* it is written, so the cleanup below also
     // removes a PNG whose write failed halfway through.
     if (input.hookText.trim()) {
-      const png = renderHookLayer(input.hookText).png;
+      const png = renderHookLayer(input.hookText, { textColor: input.textColor }).png;
       const file = path.join(input.tempDir, `hook-${unique}.png`);
       layers.push({ file, from: 0, to: HOOK.seconds });
       await writeFile(file, png);
     }
 
     if (input.sizing?.text.trim()) {
-      const png = renderSizingLayer(input.sizing.text, input.sizing.placement).png;
+      const png = renderSizingLayer(input.sizing.text, input.sizing.placement, {
+        textColor: input.textColor,
+      }).png;
       // The window is placed relative to the finished video's length, so the
       // block lands a third of the way in whatever the edit turned out to be.
       const duration =

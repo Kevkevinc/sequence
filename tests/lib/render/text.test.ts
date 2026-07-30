@@ -60,6 +60,16 @@ async function inkOf(png: Buffer | string): Promise<Ink> {
   };
 }
 
+/** The color at one pixel of a rendered PNG. */
+async function pixelAt(png: Buffer | string, x: number, y: number): Promise<{ r: number; g: number; b: number; a: number }> {
+  const image = await loadImage(png);
+  const canvas = createCanvas(image.width, image.height);
+  const ctx = canvas.getContext('2d');
+  ctx.drawImage(image, 0, 0);
+  const { data } = ctx.getImageData(x, y, 1, 1);
+  return { r: data[0], g: data[1], b: data[2], a: data[3] };
+}
+
 /** Pulls a single frame out of a video at `seconds` and measures its ink. */
 async function frameInk(video: string, seconds: number, dir: string): Promise<Ink> {
   const frame = path.join(dir, `frame-${seconds}-${path.basename(video)}.png`);
@@ -186,6 +196,29 @@ describe('renderSizingLayer', () => {
     const hook = renderHookLayer('Fit check');
     const sizing = renderSizingLayer('Fit check', 'bottom-left');
     expect(sizing.blockHeight).toBeLessThan(hook.blockHeight);
+  });
+});
+
+describe('textColor', () => {
+  it('draws in the requested color instead of the default white', async () => {
+    const white = await inkOf(renderHookLayer('Fit check').png);
+    const coloredLayer = renderHookLayer('Fit check', { textColor: '#00ff00' });
+    const colored = await inkOf(coloredLayer.png);
+
+    expect(colored.count).toBeGreaterThan(0);
+    // Roughly the same layout/position — not pixel-exact, since anti-aliasing
+    // shifts the detected edge by a pixel or two depending on fill color.
+    expect(Math.abs(colored.box!.left - white.box!.left)).toBeLessThanOrEqual(2);
+    expect(Math.abs(colored.box!.top - white.box!.top)).toBeLessThanOrEqual(2);
+
+    // The real color signal: sample a pixel well inside the drawn region (not
+    // an anti-aliased edge, where the fill color is unambiguous) and confirm
+    // it's green, not white.
+    const interiorX = Math.round((colored.box!.left + colored.box!.right) / 2);
+    const interiorY = Math.round((colored.box!.top + colored.box!.bottom) / 2);
+    const interior = await pixelAt(coloredLayer.png, interiorX, interiorY);
+    expect(interior.g).toBeGreaterThan(interior.r);
+    expect(interior.g).toBeGreaterThan(interior.b);
   });
 });
 
