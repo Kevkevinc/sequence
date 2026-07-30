@@ -10,11 +10,15 @@ import type { StyleConfig } from '@/lib/styles';
  */
 const BUILT_IN_STYLES: { name: string; description: string; config: StyleConfig }[] = [
   {
-    name: 'Single-Shot Try-On',
-    description: 'One continuous take, casual caption, sizing in the bottom-right.',
+    name: 'Voiceover Try-On',
+    description: 'Quick cuts under a casual voiceover, sizing in the bottom-right.',
     config: {
-      cutMinSeconds: 15,
-      cutMaxSeconds: 45,
+      // Corrected from an initial (wrong) 15-45s "no forced cuts" reading: a
+      // scene-detection threshold that was too coarse missed real cuts every
+      // ~1.5-5s throughout all three reference clips. Re-measured at a lower
+      // threshold before fixing this value.
+      cutMinSeconds: 2,
+      cutMaxSeconds: 5,
       hookStyleLibrary: [
         'new fav [item]',
         'toughest [item] yet',
