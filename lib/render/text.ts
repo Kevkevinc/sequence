@@ -208,6 +208,15 @@ async function discardOutput(outputPath: string): Promise<void> {
 
 type PreparedLayer = { file: string; from: number; to: number };
 
+/** How long the pop-up inspiration photo stays up, matching the hook's window. */
+const INSPIRATION_IMAGE = {
+  seconds: 4,
+  /** Fixed thumbnail box in the upper-left, clear of the frame edge. */
+  width: 320,
+  height: 480,
+  margin: 40,
+};
+
 /**
  * Burns the hook and the sizing overlay into a video.
  *
@@ -233,9 +242,11 @@ export async function overlayText(input: {
   sizing?: { text: string; placement: SizingPlacement } | null;
   tempDir: string;
   textColor?: string;
+  inspirationImagePath?: string;
 }): Promise<{ success: true } | { success: false; error: string }> {
   const layers: PreparedLayer[] = [];
   const unique = `${path.basename(input.outputPath, path.extname(input.outputPath))}-${process.pid}`;
+  const imageLayers: { file: string; from: number; to: number }[] = [];
 
   try {
     // Each layer is recorded *before* it is written, so the cleanup below also
@@ -261,9 +272,13 @@ export async function overlayText(input: {
       await writeFile(file, png);
     }
 
+    if (input.inspirationImagePath) {
+      imageLayers.push({ file: input.inspirationImagePath, from: 0, to: INSPIRATION_IMAGE.seconds });
+    }
+
     // Nothing to draw: copy the streams rather than spend a re-encode, and a
     // lossless one at that.
-    if (layers.length === 0) {
+    if (layers.length === 0 && imageLayers.length === 0) {
       const copied = await runFfmpeg([
         '-i', input.sourcePath,
         '-c', 'copy',
@@ -274,19 +289,47 @@ export async function overlayText(input: {
       return copied;
     }
 
-    // [0:v] is the footage; each PNG is an input after it. `enable` gates the
-    // overlay to its window; outside it the filter passes the frame straight
-    // through. A PNG input is a single frame, and overlay's default
-    // `eof_action=repeat` holds it for the whole video.
-    const inputs = layers.flatMap((layer) => ['-i', layer.file]);
-    const chain = layers
-      .map((layer, index) => {
-        const base = index === 0 ? '[0:v]' : `[t${index}]`;
-        const label = index === layers.length - 1 ? '[v]' : `[t${index + 1}]`;
-        const window = `between(t,${formatSeconds(layer.from)},${formatSeconds(layer.to)})`;
-        return `${base}[${index + 1}:v]overlay=0:0:enable='${window}'${label}`;
-      })
-      .join(';');
+    // [0:v] is the footage; each PNG/photo is an input after it. `enable` gates
+    // the overlay to its window; outside it the filter passes the frame
+    // straight through. A single-frame input holds for the whole video thanks
+    // to overlay's default `eof_action=repeat`.
+    //
+    // Text layers are full-frame PNGs, overlaid at 0,0. The image layer is an
+    // arbitrary-sized photo, so it is scaled to a fixed thumbnail box first and
+    // overlaid in the upper-left corner — a different position and a different
+    // input type, but the same "extra input, same enable-window overlay" chain
+    // the text layers already use.
+    const allInputs = [...layers.map((l) => l.file), ...imageLayers.map((l) => l.file)];
+    const inputs = allInputs.flatMap((file) => ['-i', file]);
+
+    const filters: string[] = [];
+    let current = '[0:v]';
+    let inputIndex = 1;
+
+    for (const layer of layers) {
+      const label = `[t${inputIndex}]`;
+      const window = `between(t,${formatSeconds(layer.from)},${formatSeconds(layer.to)})`;
+      filters.push(`${current}[${inputIndex}:v]overlay=0:0:enable='${window}'${label}`);
+      current = label;
+      inputIndex += 1;
+    }
+
+    for (const layer of imageLayers) {
+      const scaled = `[img${inputIndex}]`;
+      filters.push(
+        `[${inputIndex}:v]scale=${INSPIRATION_IMAGE.width}:${INSPIRATION_IMAGE.height}${scaled}`
+      );
+      const label = `[t${inputIndex}]`;
+      const window = `between(t,${formatSeconds(layer.from)},${formatSeconds(layer.to)})`;
+      filters.push(
+        `${current}${scaled}overlay=${INSPIRATION_IMAGE.margin}:${INSPIRATION_IMAGE.margin}:enable='${window}'${label}`
+      );
+      current = label;
+      inputIndex += 1;
+    }
+
+    // The last filter's output must be relabelled `[v]` for `-map` below.
+    const chain = filters.join(';').replace(new RegExp(`\\[t${inputIndex - 1}\\]$`), '[v]');
 
     const result = await runFfmpeg([
       '-i', input.sourcePath,
@@ -316,5 +359,7 @@ export async function overlayText(input: {
     for (const layer of layers) {
       await rm(layer.file, { force: true }).catch(() => {});
     }
+    // Note: imageLayers' files belong to the caller (a downloaded temp clip in
+    // renderPlan's case) and are not removed here.
   }
 }

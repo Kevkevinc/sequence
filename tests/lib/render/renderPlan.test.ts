@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeAll, beforeEach, afterAll } from 'vitest';
-import { mkdtemp, rm, readdir } from 'fs/promises';
+import { mkdtemp, rm, readdir, writeFile } from 'fs/promises';
 import { tmpdir } from 'os';
 import path from 'path';
 import { eq } from 'drizzle-orm';
@@ -43,6 +43,7 @@ describe('renderPlan', () => {
   let fixturesDir: string;
   let clipAPath: string;
   let clipBPath: string;
+  let inspirationImagePath: string;
   let creatorId: string;
   let jobId: string;
   let clipAId: string;
@@ -78,6 +79,13 @@ describe('renderPlan', () => {
     ]);
     expect(madeA.success).toBe(true);
     expect(madeB.success).toBe(true);
+
+    inspirationImagePath = path.join(fixturesDir, 'inspiration.jpg');
+    const imgCanvas = createCanvas(200, 300);
+    const imgCtx = imgCanvas.getContext('2d');
+    imgCtx.fillStyle = '#00ff00';
+    imgCtx.fillRect(0, 0, 200, 300);
+    await writeFile(inspirationImagePath, imgCanvas.toBuffer('image/jpeg'));
   }, 60_000);
 
   afterAll(async () => {
@@ -89,7 +97,10 @@ describe('renderPlan', () => {
     uploadedVideoProperties = [];
 
     mockDownload.mockImplementation(async (storageKey: string) => {
-      const path_ = storageKey === 'clips/a.mp4' ? clipAPath : clipBPath;
+      const path_ =
+        storageKey === 'clips/a.mp4' ? clipAPath
+          : storageKey === 'clips/b.mp4' ? clipBPath
+          : inspirationImagePath;
       return { path: path_, contentType: 'video/mp4', cleanUp: vi.fn(async () => {}) };
     });
     let uploadFrameCount = 0;
@@ -350,4 +361,52 @@ describe('renderPlan', () => {
     }
     expect(mockDownload).not.toHaveBeenCalled();
   });
+
+  it('composites the inspiration photo when the job has one', async () => {
+    const [style] = await db
+      .insert(styles)
+      .values({
+        name: 'Test Render Inspo Style',
+        description: 'test',
+        config: {
+          cutMinSeconds: 2,
+          cutMaxSeconds: 5,
+          hookStyleLibrary: ['x'],
+          variesClipOrder: false,
+          usesInspirationOverlay: true,
+        },
+      })
+      .returning();
+
+    const inspoJob = await createJob({
+      creatorId,
+      productName: 'Inspiration Overlay Product',
+      sizingOverlayEnabled: false,
+      lengthSeconds: 15,
+      styleId: style.id,
+      variationCount: 1,
+      clips: [{ storageKey: 'clips/a.mp4', originalFilename: 'a.mp4' }],
+      inspirationImage: { storageKey: 'inspiration/test.jpg' },
+    });
+    const [inspoClip] = await db.select().from(rawClips).where(eq(rawClips.jobId, inspoJob.id));
+
+    const [plan] = await db
+      .insert(editPlans)
+      .values({
+        jobId: inspoJob.id,
+        variationNumber: 1,
+        segments: [{ rawClipId: inspoClip.id, startSeconds: 0, endSeconds: 4 }],
+        hookText: '',
+        sizingOverlayText: null,
+        sizingOverlayPlacement: null,
+      })
+      .returning();
+
+    const result = await renderPlan(plan.id);
+
+    expect(result.success).toBe(true);
+    // The inspiration image is downloaded alongside the source clip: two calls,
+    // one per distinct storage key.
+    expect(mockDownload).toHaveBeenCalledWith('inspiration/test.jpg');
+  }, 120_000);
 });

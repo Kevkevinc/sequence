@@ -7,6 +7,7 @@ import { inArray, eq } from 'drizzle-orm';
 import { db } from '@/db/client';
 import { editPlans, rawClips, jobs, styles } from '@/db/schema';
 import { downloadClipToTempFile, uploadRenderedVideo, type LocalClip } from '@/lib/storage';
+import { getInspirationImageForJob } from '@/db/repositories/jobInspirationImages';
 import { normaliseCut } from '@/lib/render/normalise';
 import { concatCuts } from '@/lib/render/concat';
 import { overlayText } from '@/lib/render/text';
@@ -61,11 +62,21 @@ export async function renderPlan(editPlanId: string): Promise<RenderPlanResult> 
     }
 
     let textColor: string | undefined;
+    let inspirationImageClip: LocalClip | undefined;
     if (job.styleId) {
       const [styleRow] = await db.select().from(styles).where(eq(styles.id, job.styleId));
       if (styleRow) {
         const parsed = StyleConfigSchema.safeParse(styleRow.config);
-        if (parsed.success) textColor = parsed.data.textColor;
+        if (parsed.success) {
+          textColor = parsed.data.textColor;
+          if (parsed.data.usesInspirationOverlay) {
+            const inspirationImage = await getInspirationImageForJob(plan.jobId);
+            if (inspirationImage) {
+              inspirationImageClip = await downloadClipToTempFile(inspirationImage.storageKey);
+              downloadedClips.push(inspirationImageClip); // reuses the existing cleanup loop
+            }
+          }
+        }
       }
     }
 
@@ -142,6 +153,7 @@ export async function renderPlan(editPlanId: string): Promise<RenderPlanResult> 
         : null,
       tempDir,
       textColor,
+      inspirationImagePath: inspirationImageClip?.path,
     });
     if (!textResult.success) {
       return { success: false, error: `Failed to add on-screen text: ${textResult.error}` };

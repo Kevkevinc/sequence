@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { mkdtemp, rm, readdir } from 'fs/promises';
+import { mkdtemp, rm, readdir, writeFile } from 'fs/promises';
 import { existsSync } from 'fs';
 import { tmpdir } from 'os';
 import path from 'path';
@@ -388,4 +388,35 @@ describe('overlayText', () => {
     if (!result.success) expect(result.error).toContain('missing.mp4');
     expect(existsSync(out)).toBe(false);
   }, 60_000);
+
+  it('composites an uploaded inspiration photo into the first few seconds only', async () => {
+    // A small solid-green JPEG, clearly distinguishable from the black source
+    // and from the white hook/sizing text.
+    const imgCanvas = createCanvas(200, 300);
+    const imgCtx = imgCanvas.getContext('2d');
+    imgCtx.fillStyle = '#00ff00';
+    imgCtx.fillRect(0, 0, 200, 300);
+    const imagePath = path.join(dir, 'inspiration.jpg');
+    await writeFile(imagePath, imgCanvas.toBuffer('image/jpeg'));
+
+    const out = path.join(dir, 'inspiration-overlaid.mp4');
+    const result = await overlayText({
+      sourcePath: source,
+      outputPath: out,
+      hookText: '',
+      tempDir: dir,
+      inspirationImagePath: imagePath,
+    });
+
+    expect(result.success).toBe(true);
+
+    // t=1s: inside the image's 4s window, upper-left.
+    const early = await frameInk(out, 1, dir);
+    expect(early.count).toBeGreaterThan(0);
+    expect(early.box?.left).toBeLessThan(WIDTH / 2);
+    expect(early.box?.top).toBeLessThan(HEIGHT / 2);
+
+    // t=9s: long past the 4s window — a pop-up, not a watermark.
+    expect((await frameInk(out, 9, dir)).count).toBeLessThan(200);
+  }, 180_000);
 });
