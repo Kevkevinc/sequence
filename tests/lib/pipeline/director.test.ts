@@ -8,7 +8,7 @@ vi.mock('@/lib/gemini/client', () => ({
 }));
 
 import { db } from '@/db/client';
-import { creators, jobs, rawClips, segments, editPlans } from '@/db/schema';
+import { creators, jobs, rawClips, segments, editPlans, styles } from '@/db/schema';
 import { createCreatorIfNotExists } from '@/db/repositories/creators';
 import { createJob } from '@/db/repositories/jobs';
 import { planJob } from '@/lib/pipeline/director';
@@ -2073,6 +2073,131 @@ describe('planJob', () => {
         if (result.success) expect(result.warning).toContain('Upload more clips');
         expect(mockGenerateContent).toHaveBeenCalledTimes(1);
       }
+    });
+  });
+
+  describe('style mode', () => {
+    const CLERK_ID = 'test_clerk_user_director_style';
+    let styleCreatorId: string;
+    let dupeFlipStyleId: string;
+
+    beforeEach(async () => {
+      const creator = await createCreatorIfNotExists(CLERK_ID);
+      styleCreatorId = creator.id;
+
+      const [style] = await db
+        .insert(styles)
+        .values({
+          name: 'Test Dupe Flip',
+          description: 'test',
+          config: {
+            cutMinSeconds: 2,
+            cutMaxSeconds: 3,
+            hookStyleLibrary: ['Affordable Designer Alternatives..'],
+            sizingPlacement: 'bottom-left',
+            variesClipOrder: false,
+            usesInspirationOverlay: false,
+          },
+        })
+        .returning();
+      dupeFlipStyleId = style.id;
+    });
+
+    async function createStyleJob() {
+      const job = await createJob({
+        creatorId: styleCreatorId,
+        productName: 'Denim',
+        sizingOverlayEnabled: true,
+        sizeWorn: 'M',
+        lengthSeconds: 15,
+        styleId: dupeFlipStyleId,
+        variationCount: 1,
+        clips: [{ storageKey: 'clips/denim.mp4', originalFilename: 'denim.mp4' }],
+      });
+      const [clip] = await db.select().from(rawClips).where(eq(rawClips.jobId, job.id));
+      await db.insert(segments).values([
+        { rawClipId: clip.id, startSeconds: '0', endSeconds: '15', contentTag: 'whole-clip', qualityTag: 'high' },
+      ]);
+      await db
+        .update(creators)
+        .set({ height: '5\'6"', weight: '140 lb' })
+        .where(eq(creators.id, styleCreatorId));
+      return { jobId: job.id, clipId: clip.id };
+    }
+
+    /**
+     * Every cut inside the style's 2-3s band (widened 25% to 1.5-3.75s), 1s of
+     * footage discarded at each same-clip splice so the cuts are visible, and a
+     * fifth cut that jumps backwards to reach the 15s target (four 3s cuts only
+     * total 12s, below the 13.5s floor). 1.5-4.5 overlaps 0-3 by exactly half,
+     * which is not a repeat, and 4-7 by 0.5s.
+     */
+    const styleSegments = (clipId: string) =>
+      [
+        [0, 3],
+        [4, 7],
+        [8, 11],
+        [12, 15],
+        [1.5, 4.5],
+      ].map(([startSeconds, endSeconds]) => ({ rawClipId: clipId, startSeconds, endSeconds }));
+
+    it("uses the style's cut band instead of a named pacing preset", async () => {
+      const { jobId, clipId } = await createStyleJob();
+      mockGenerateContent.mockResolvedValue(
+        geminiResponse([
+          {
+            segments: styleSegments(clipId),
+            hookText: 'Affordable finds for the win',
+            sizingOverlayText: 'For reference',
+            sizingOverlayPlacement: 'bottom-left',
+          },
+        ])
+      );
+
+      const result = await planJob(jobId);
+
+      expect(result).toEqual({ success: true, variationCount: 1, warning: null });
+      expect(promptTextOfCall(0)).toContain('between 1.5 and 3.75 seconds');
+      expect(promptTextOfCall(0)).toContain('Affordable Designer Alternatives..');
+    });
+
+    it("rejects a cut outside the style's band even though it would fit a named preset", async () => {
+      const { jobId, clipId } = await createStyleJob();
+      mockGenerateContent.mockResolvedValue(
+        geminiResponse([
+          {
+            // 8s single cut: inside "medium" pacing's band, but nowhere near this style's 1.5-3.75s band.
+            segments: [{ rawClipId: clipId, startSeconds: 0, endSeconds: 8 }],
+            hookText: 'Affordable finds for the win',
+            sizingOverlayText: null,
+            sizingOverlayPlacement: null,
+          },
+        ])
+      );
+
+      const result = await planJob(jobId);
+
+      expect(result.success).toBe(false);
+    });
+
+    it('forces the sizing placement the style pins, ignoring whatever the model returns', async () => {
+      const { jobId, clipId } = await createStyleJob();
+      mockGenerateContent.mockResolvedValue(
+        geminiResponse([
+          {
+            segments: styleSegments(clipId),
+            hookText: 'Affordable finds for the win',
+            sizingOverlayText: 'For reference',
+            // The model tries to put it top-right; the style pins bottom-left.
+            sizingOverlayPlacement: 'top-right',
+          },
+        ])
+      );
+
+      await planJob(jobId);
+
+      const [saved] = await db.select().from(editPlans).where(eq(editPlans.jobId, jobId));
+      expect(saved.sizingOverlayPlacement).toBe('bottom-left');
     });
   });
 });

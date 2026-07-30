@@ -2,10 +2,11 @@ import { z } from 'zod';
 import { FinishReason } from '@google/genai';
 import { eq, inArray } from 'drizzle-orm';
 import { db } from '@/db/client';
-import { jobs, rawClips, segments, editPlans, creators } from '@/db/schema';
+import { jobs, rawClips, segments, editPlans, creators, styles } from '@/db/schema';
 import { OVERLAY_PLACEMENTS } from '@/lib/editPlan';
 import { getEnvWithDefault } from '@/lib/env';
 import { getGeminiClient } from '@/lib/gemini/client';
+import { StyleConfigSchema, type StyleConfig } from '@/lib/styles';
 import { HOOK_STYLE_LIBRARY } from '@/lib/pipeline/hookLibrary';
 import { describeCause, MAX_CAUSE_LENGTH } from '@/lib/pipeline/errors';
 import { withTransientRetry, type TransientRetryOptions } from '@/lib/pipeline/retry';
@@ -100,8 +101,12 @@ const MIN_CUTS_FOR_SEQUENCE_DISTINCTNESS = 3;
  * Seconds per cut for each pacing preset, taken verbatim from the product spec:
  * "Slow ~5-6s/clip, Medium ~3-4s/clip, Fast ~1-2s/clip". The whole product is
  * fast-cut UGC pacing, so this is a core requirement, not a stylistic hint.
+ *
+ * Keyed on `NonNullable<Job['pacing']>` because the column is nullable now:
+ * a Style-mode job carries no named preset at all and gets its band from
+ * `styles.config` instead (see `resolvePreset`).
  */
-const PACING_PRESET_SECONDS: Record<Job['pacing'], { min: number; max: number }> = {
+const PACING_PRESET_SECONDS: Record<NonNullable<Job['pacing']>, { min: number; max: number }> = {
   slow: { min: 5, max: 6 },
   medium: { min: 3, max: 4 },
   fast: { min: 1, max: 2 },
@@ -301,7 +306,12 @@ type ValidationContext = {
   footageEndByClipId: Map<string, number>;
   sizingOverlayEnabled: boolean;
   footage: PoolCapacity;
-  pacing: Job['pacing'];
+  /**
+   * How the band is described back to the model when a cut breaks it. A label
+   * rather than the raw pacing enum, because a Style-mode job has no enum to
+   * name — see `EffectivePreset.label`.
+   */
+  pacingLabel: string;
   pacingBand: PacingBand;
 };
 
@@ -334,12 +344,55 @@ function segmentKey(segment: { rawClipId: string; startSeconds: number; endSecon
 
 type Cut = { rawClipId: string; startSeconds: number; endSeconds: number };
 
-/** Widest allowed length for one cut under a pacing preset. */
-function bandFor(pacing: Job['pacing']): PacingBand {
-  const preset = PACING_PRESET_SECONDS[pacing];
+type StyleRow = typeof styles.$inferSelect;
+
+/**
+ * Everything the prompt and validator need, resolved uniformly from either a
+ * named pacing preset (Custom mode) or a style's config (Style mode) — every
+ * later rule reads this instead of branching on `job.pacing` vs `job.styleId`.
+ */
+type EffectivePreset = {
+  /** The "ideal" per-cut range named in the prompt, before pacing tolerance widens it. */
+  ideal: { min: number; max: number };
+  /** Reads naturally in "${label} means every cut must be between...". */
+  label: string;
+  hookStyleLibrary: readonly string[];
+  /** Non-null when the style pins one corner for every variation. */
+  sizingPlacementOverride: (typeof OVERLAY_PLACEMENTS)[number] | null;
+  variesClipOrder: boolean;
+};
+
+/**
+ * Resolves the job's editing preset. `style` is defined exactly when
+ * `job.styleId` is set — see the lookup in `planJob`.
+ */
+function resolvePreset(job: Job, style: StyleRow | undefined): EffectivePreset {
+  if (style) {
+    // The style's config was already zod-validated when it was fetched in
+    // planJob; a malformed style row fails the job before this is ever called.
+    const config = style.config as StyleConfig;
+    return {
+      ideal: { min: config.cutMinSeconds, max: config.cutMaxSeconds },
+      label: `the "${style.name}" style`,
+      hookStyleLibrary: config.hookStyleLibrary,
+      sizingPlacementOverride: config.sizingPlacement ?? null,
+      variesClipOrder: config.variesClipOrder,
+    };
+  }
   return {
-    min: preset.min * (1 - PACING_TOLERANCE),
-    max: preset.max * (1 + PACING_TOLERANCE),
+    ideal: PACING_PRESET_SECONDS[job.pacing!],
+    label: `"${job.pacing}" pacing`,
+    hookStyleLibrary: HOOK_STYLE_LIBRARY,
+    sizingPlacementOverride: null,
+    variesClipOrder: false,
+  };
+}
+
+/** Widest allowed length for one cut, from either preset source. */
+function bandForPreset(ideal: { min: number; max: number }): PacingBand {
+  return {
+    min: ideal.min * (1 - PACING_TOLERANCE),
+    max: ideal.max * (1 + PACING_TOLERANCE),
   };
 }
 
@@ -601,7 +654,7 @@ function buildValidator(context: ValidationContext) {
     footageEndByClipId,
     sizingOverlayEnabled,
     footage,
-    pacing,
+    pacingLabel,
     pacingBand,
   } = context;
 
@@ -749,7 +802,7 @@ function buildValidator(context: ValidationContext) {
             code: 'custom',
             path,
             message:
-              `this cut is ${round2(duration)}s long, but "${pacing}" pacing means every cut must ` +
+              `this cut is ${round2(duration)}s long, but ${pacingLabel} means every cut must ` +
               `be between ${round2(pacingBand.min)}s and ${round2(pacingBand.max)}s. Split this ` +
               `footage into shorter cuts and place them at different points in the video instead ` +
               `of using it as one long take`,
@@ -759,7 +812,7 @@ function buildValidator(context: ValidationContext) {
             code: 'custom',
             path,
             message:
-              `this cut is only ${round2(duration)}s long, but "${pacing}" pacing means every cut ` +
+              `this cut is only ${round2(duration)}s long, but ${pacingLabel} means every cut ` +
               `must be between ${round2(pacingBand.min)}s and ${round2(pacingBand.max)}s` +
               (isFinalCut
                 ? ` (the final cut of a variation may go as low as ${round2(floor)}s)`
@@ -922,13 +975,18 @@ function buildPrompt(
   segmentPool: PoolSegment[],
   footage: PoolCapacity,
   band: PacingBand,
+  preset: EffectivePreset,
   correctionNote?: string
 ): string {
   const placements = OVERLAY_PLACEMENTS.map((p) => `"${p}"`).join(', ');
   const sizingInstruction = job.sizingOverlayEnabled
     ? `This ad shows a sizing overlay. The creator's real height and weight are appended automatically from their stored profile${
         job.sizeWorn ? `, along with the size worn: ${job.sizeWorn}` : ''
-      }. So write sizingOverlayText as a short lead-in phrase ONLY (for example "For reference" or "Fit check") and never write any height, weight, or size numbers yourself - you do not know them and inventing them is not acceptable. Set sizingOverlayPlacement to one of: ${placements}.`
+      }. So write sizingOverlayText as a short lead-in phrase ONLY (for example "For reference" or "Fit check") and never write any height, weight, or size numbers yourself - you do not know them and inventing them is not acceptable. ${
+        preset.sizingPlacementOverride
+          ? `Set sizingOverlayPlacement to "${preset.sizingPlacementOverride}" for every variation - this style always places it there.`
+          : `Set sizingOverlayPlacement to one of: ${placements}.`
+      }`
     : 'Set sizingOverlayText and sizingOverlayPlacement to null.';
 
   // When the pool cannot fill the requested length, the model is told the real
@@ -955,13 +1013,12 @@ much better than a repetitive one.`;
   // Pacing is the product: constant clip changes are what makes this read as a
   // UGC ad rather than a home video. It is stated as hard numbers, and the same
   // band is enforced in code, so the instruction and the validator agree.
-  const preset = PACING_PRESET_SECONDS[job.pacing];
   const approximateCuts = Math.max(
     2,
-    Math.round(job.lengthSeconds / ((preset.min + preset.max) / 2))
+    Math.round(job.lengthSeconds / ((preset.ideal.min + preset.ideal.max) / 2))
   );
-  const pacingInstruction = `PACING IS THE MOST IMPORTANT RULE. "${job.pacing}" pacing means every single cut
-must last between ${round2(band.min)} and ${round2(band.max)} seconds, ideally around ${preset.min}-${preset.max} seconds.
+  const pacingInstruction = `PACING IS THE MOST IMPORTANT RULE. ${preset.label} means every single cut
+must last between ${round2(band.min)} and ${round2(band.max)} seconds, ideally around ${preset.ideal.min}-${preset.ideal.max} seconds.
 A ${job.lengthSeconds}s video at this pacing is roughly ${approximateCuts} cuts, not a handful of long takes. A cut longer than
 ${round2(band.max)}s will be rejected: one unbroken shot destroys the fast-cut feel this format depends on.
 Only the FINAL cut of a variation may be shorter than ${round2(band.min)}s (down to ${round2(
@@ -1000,7 +1057,7 @@ Two neighbouring variations that match in every position but one will be rejecte
       : '';
 
   return `You are editing a short-form UGC ad video for the product "${job.productName}".
-Target length: ${job.lengthSeconds} seconds. Pacing: ${job.pacing}.
+Target length: ${job.lengthSeconds} seconds. Editing style: ${preset.label}.
 Produce exactly ${job.variationCount} distinct variations.
 
 Available segments (choose from these only, by rawClipId):
@@ -1023,7 +1080,7 @@ Never reference a rawClipId that is not listed above, and never let endSeconds r
 the end of that clip's listed footage.
 
 Hook text should be adapted from this style library to fit the product (not copied verbatim):
-${JSON.stringify(HOOK_STYLE_LIBRARY)}
+${JSON.stringify(preset.hookStyleLibrary)}
 Write hookText as ONE short on-screen line, under ${MAX_HOOK_LENGTH} characters. It must never contain a
 height, weight or size measurement - you do not know the creator's real numbers, and inventing them
 would print made-up body stats on a real person's published video.
@@ -1050,6 +1107,27 @@ export async function planJob(
       .where(eq(jobs.id, jobId));
     if (!row) return { success: false, error: `Job ${jobId} not found` };
     const { job, creator } = row;
+
+    // Style mode: the whole editing recipe (cut band, hook library, pinned
+    // sizing corner) comes from this row instead of a named pacing preset. A
+    // dangling or malformed style is a hard failure rather than a silent
+    // fallback to `pacing` — the job asked for a specific look, and quietly
+    // giving it a different one would be worse than telling the creator.
+    const style = job.styleId
+      ? (await db.select().from(styles).where(eq(styles.id, job.styleId)))[0]
+      : undefined;
+    if (job.styleId && !style) {
+      return { success: false, error: `Style ${job.styleId} referenced by job ${jobId} was not found` };
+    }
+    if (style) {
+      const parsedConfig = StyleConfigSchema.safeParse(style.config);
+      if (!parsedConfig.success) {
+        return {
+          success: false,
+          error: `Style ${style.id} has an invalid config: ${parsedConfig.error.message}`,
+        };
+      }
+    }
 
     const clips = await db.select().from(rawClips).where(eq(rawClips.jobId, jobId));
     const poolRows =
@@ -1090,9 +1168,10 @@ export async function planJob(
       );
     }
 
-    // The per-cut length the job's pacing preset asks for, used to build the
-    // prompt, to validate the response, and to judge what the pool can reach.
-    const band = bandFor(job.pacing);
+    // The per-cut length the job's preset asks for, used to build the prompt,
+    // to validate the response, and to judge what the pool can reach.
+    const preset = resolvePreset(job, style);
+    const band = bandForPreset(preset.ideal);
 
     // Established before the model is asked for anything: whether the creator's
     // upload can honestly fill the length they asked for.
@@ -1104,7 +1183,7 @@ export async function planJob(
       footageEndByClipId,
       sizingOverlayEnabled: job.sizingOverlayEnabled,
       footage,
-      pacing: job.pacing,
+      pacingLabel: preset.label,
       pacingBand: band,
     });
     const client = getGeminiClient();
@@ -1125,7 +1204,9 @@ export async function planJob(
             contents: [
               {
                 role: 'user',
-                parts: [{ text: buildPrompt(job, segmentPool, footage, band, correctionNote) }],
+                parts: [
+                  { text: buildPrompt(job, segmentPool, footage, band, preset, correctionNote) },
+                ],
               },
             ],
             config: { responseMimeType: 'application/json' },
@@ -1206,8 +1287,12 @@ export async function planJob(
             segments: v.segments,
             hookText: v.hookText,
             sizingOverlayText: overlayText,
-            // A placement without a caption would render an empty overlay.
-            sizingOverlayPlacement: overlayText ? v.sizingOverlayPlacement : null,
+            // A placement without a caption would render an empty overlay. A
+            // style that pins one corner wins over whatever the model returned:
+            // the pin is part of the style's identity, not a suggestion.
+            sizingOverlayPlacement: overlayText
+              ? preset.sizingPlacementOverride ?? v.sizingOverlayPlacement
+              : null,
           };
         })
       );
