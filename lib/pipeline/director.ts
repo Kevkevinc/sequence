@@ -313,6 +313,14 @@ type ValidationContext = {
    */
   pacingLabel: string;
   pacingBand: PacingBand;
+  /** The tagged pool itself, so a cut can be attributed to a content tag. */
+  taggedPool: PoolSegment[];
+  /**
+   * One ordering pattern per variation, or null when this job does not vary its
+   * clip order at all — either the style does not ask for it, or the footage has
+   * only one of the two tags and there is nothing to order.
+   */
+  orderPatterns: OrderPattern[] | null;
 };
 
 /** What the tagged segment pool can physically produce under the reuse cap. */
@@ -397,6 +405,43 @@ function bandForPreset(ideal: { min: number; max: number }): PacingBand {
   };
 }
 
+/**
+ * How the b-roll and try-on halves of a shoot are arranged in one variation.
+ *
+ * Some styles are defined as much by their running order as by their pacing: the
+ * dupe-flip look opens on the product in isolation and pays it off with the
+ * try-on, while the same footage led by the try-on reads as a haul. A style that
+ * sets `variesClipOrder` wants the batch to cover both readings rather than
+ * hand the creator five takes on one structure, so the pattern is assigned per
+ * variation rather than per job.
+ */
+type OrderPattern = 'broll-first' | 'tryon-first' | 'mixed';
+
+const ORDER_PATTERNS: readonly OrderPattern[] = ['broll-first', 'tryon-first', 'mixed'];
+
+/**
+ * Cycles through the three patterns by variation index, so a batch mixes it up.
+ *
+ * Cycling rather than randomising means a two-variation job always gets the two
+ * opposed structures (the interesting contrast) and never two of the same, and
+ * the assignment is reproducible — the prompt and the validator derive it
+ * independently and must agree.
+ */
+function orderPatternsForVariations(count: number): OrderPattern[] {
+  return Array.from({ length: count }, (_, i) => ORDER_PATTERNS[i % ORDER_PATTERNS.length]);
+}
+
+function orderingRuleText(pattern: OrderPattern): string {
+  switch (pattern) {
+    case 'broll-first':
+      return 'every segment tagged "b-roll" must come before every segment tagged "try-on"';
+    case 'tryon-first':
+      return 'every segment tagged "try-on" must come before every segment tagged "b-roll"';
+    case 'mixed':
+      return 'no ordering constraint between "b-roll" and "try-on" segments - arrange them however makes the best edit';
+  }
+}
+
 /** Trims float noise so messages read as "3.5s", never "3.4999999999999996s". */
 function round2(seconds: number): number {
   return Math.round(seconds * 100) / 100;
@@ -417,6 +462,34 @@ function isSameFootage(a: Cut, b: Cut): boolean {
   if (shorter <= 0) return false;
   const overlap = Math.min(a.endSeconds, b.endSeconds) - Math.max(a.startSeconds, b.startSeconds);
   return overlap > shorter * SAME_FOOTAGE_OVERLAP_RATIO + 1e-9;
+}
+
+/**
+ * Which content tag a cut mostly overlaps, ignoring "whole-clip"/"other" (both
+ * unconstrained by the ordering rule). A cut whose majority falls outside any
+ * b-roll/try-on tagged range is unconstrained too.
+ *
+ * Majority rather than any-overlap on purpose: the director is told a listed
+ * segment is a range it may cut inside, so a cut is free to straddle the
+ * boundary between two tagged ranges. Attributing such a cut to whichever tag
+ * it barely clips would make the ordering rule reject edits that read exactly
+ * as the pattern asks, and there is no honest answer for a cut that is half of
+ * each — so those go unconstrained rather than guessed at.
+ */
+function cutContentTag(cut: Cut, taggedPool: PoolSegment[]): 'b-roll' | 'try-on' | null {
+  let bestTag: 'b-roll' | 'try-on' | null = null;
+  let bestOverlap = 0;
+  for (const segment of taggedPool) {
+    if (segment.rawClipId !== cut.rawClipId) continue;
+    if (segment.contentTag !== 'b-roll' && segment.contentTag !== 'try-on') continue;
+    const overlap =
+      Math.min(cut.endSeconds, segment.endSeconds) - Math.max(cut.startSeconds, segment.startSeconds);
+    if (overlap > bestOverlap) {
+      bestOverlap = overlap;
+      bestTag = segment.contentTag;
+    }
+  }
+  return bestOverlap > cutDuration(cut) / 2 ? bestTag : null;
 }
 
 /** Total length covered by a set of possibly-overlapping intervals. */
@@ -657,6 +730,8 @@ function buildValidator(context: ValidationContext) {
     footage,
     pacingLabel,
     pacingBand,
+    taggedPool,
+    orderPatterns,
   } = context;
 
   return DirectorResponseSchema.superRefine((value, ctx) => {
@@ -747,6 +822,38 @@ function buildValidator(context: ValidationContext) {
             message:
               "sizingOverlayText must not contain any height, weight or size measurement; write only a short lead-in phrase, the creator's real measurements are appended automatically",
           });
+        }
+      }
+
+      // The running order this variation was assigned. Enforced as well as
+      // asked for, because it is the whole of what `variesClipOrder` buys: a
+      // batch in which the model quietly used one structure five times is the
+      // defect the flag exists to prevent, and nothing else in this validator
+      // looks at the *order* of a variation's cuts.
+      //
+      // Only the two constrained patterns are checked; 'mixed' is by definition
+      // satisfied. The test is one-sided — a variation is at fault only when a
+      // "second" cut appears before a later "first" cut — so a variation that
+      // uses just one of the two tags always passes, which is right: there is
+      // no ordering to get wrong.
+      if (orderPatterns) {
+        const pattern = orderPatterns[variationIndex];
+        if (pattern && pattern !== 'mixed') {
+          const requiredFirst = pattern === 'broll-first' ? 'b-roll' : 'try-on';
+          const requiredSecond = pattern === 'broll-first' ? 'try-on' : 'b-roll';
+          const tags = variation.segments.map((cut) => cutContentTag(cut, taggedPool));
+          const lastFirstIndex = tags.lastIndexOf(requiredFirst);
+          const firstSecondIndex = tags.indexOf(requiredSecond);
+          if (lastFirstIndex !== -1 && firstSecondIndex !== -1 && firstSecondIndex < lastFirstIndex) {
+            ctx.addIssue({
+              code: 'custom',
+              path: [...variationPath, 'segments'],
+              message:
+                `this style's variation ${variationIndex + 1} must place every "${requiredFirst}" ` +
+                `segment before every "${requiredSecond}" segment, but a "${requiredSecond}" segment ` +
+                `appears before a later "${requiredFirst}" segment`,
+            });
+          }
         }
       }
 
@@ -977,6 +1084,7 @@ function buildPrompt(
   footage: PoolCapacity,
   band: PacingBand,
   preset: EffectivePreset,
+  orderPatterns: OrderPattern[] | null,
   correctionNote?: string
 ): string {
   const placements = OVERLAY_PLACEMENTS.map((p) => `"${p}"`).join(', ');
@@ -1057,6 +1165,17 @@ Each variation must differ from the one before it in ALL of these ways:
 Two neighbouring variations that match in every position but one will be rejected.`
       : '';
 
+  // Stated as well as enforced. The validator can only reject a wrong running
+  // order after the fact, and each rejection costs one of three attempts, so the
+  // per-variation assignment is spelled out here — derived from the same
+  // `orderPatterns` array the validator checks against, so the two cannot drift.
+  const orderingInstruction = orderPatterns
+    ? `CLIP ORDER VARIES BY VARIATION. This style alternates the order footage appears in across variations.
+For each variation (1-indexed, matching its position in your response array), follow this rule:
+${orderPatterns.map((pattern, i) => `- Variation ${i + 1}: ${orderingRuleText(pattern)}`).join('\n')}
+Segments tagged "b-roll" or "try-on" are the ones this rule constrains; segments tagged "whole-clip" or "other" may appear anywhere.`
+    : '';
+
   return `You are editing a short-form UGC ad video for the product "${job.productName}".
 Target length: ${job.lengthSeconds} seconds. Editing style: ${preset.label}.
 Produce exactly ${job.variationCount} distinct variations.
@@ -1070,6 +1189,7 @@ ${visibleCutInstruction}
 
 ${durationInstruction}
 ${distinctnessInstruction}
+${orderingInstruction}
 If there are not enough distinct good segments to reach the target length, you may reuse a moment,
 but never in two consecutive positions in the sequence and never more than ${MAX_SEGMENT_REUSE} times in
 the same variation. Two cuts count as the SAME moment when they come from the same clip and overlap by
@@ -1182,6 +1302,19 @@ export async function planJob(
     // upload can honestly fill the length they asked for.
     const footage = measurePool(segmentPool, job.lengthSeconds, band);
 
+    // A style that varies its clip order can only do so when the shoot actually
+    // has both halves. With only b-roll (or only try-on) tagged, "b-roll before
+    // try-on" and its mirror describe the same single sequence, so asking for
+    // them would add prompt noise and a rule that can never bite. Left null in
+    // that case, which switches the whole mechanism off.
+    const hasBothOrderingTags =
+      segmentPool.some((s) => s.contentTag === 'b-roll') &&
+      segmentPool.some((s) => s.contentTag === 'try-on');
+    const orderPatterns =
+      preset.variesClipOrder && hasBothOrderingTags
+        ? orderPatternsForVariations(job.variationCount)
+        : null;
+
     const validator = buildValidator({
       expectedVariationCount: job.variationCount,
       targetLengthSeconds: job.lengthSeconds,
@@ -1190,6 +1323,8 @@ export async function planJob(
       footage,
       pacingLabel: preset.label,
       pacingBand: band,
+      taggedPool: segmentPool,
+      orderPatterns,
     });
     const client = getGeminiClient();
 
@@ -1210,7 +1345,17 @@ export async function planJob(
               {
                 role: 'user',
                 parts: [
-                  { text: buildPrompt(job, segmentPool, footage, band, preset, correctionNote) },
+                  {
+                    text: buildPrompt(
+                      job,
+                      segmentPool,
+                      footage,
+                      band,
+                      preset,
+                      orderPatterns,
+                      correctionNote
+                    ),
+                  },
                 ],
               },
             ],

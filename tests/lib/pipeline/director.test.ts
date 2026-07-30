@@ -2199,5 +2199,153 @@ describe('planJob', () => {
       const [saved] = await db.select().from(editPlans).where(eq(editPlans.jobId, jobId));
       expect(saved.sizingOverlayPlacement).toBe('bottom-left');
     });
+
+    describe('clip order variation', () => {
+      let orderedJobId: string;
+      let orderedClipId: string;
+
+      beforeEach(async () => {
+        const [style] = await db
+          .insert(styles)
+          .values({
+            name: 'Test Ordered Style',
+            description: 'test',
+            config: {
+              cutMinSeconds: 2,
+              cutMaxSeconds: 6,
+              hookStyleLibrary: ['Affordable Designer Alternatives..'],
+              variesClipOrder: true,
+              usesInspirationOverlay: false,
+            },
+          })
+          .returning();
+
+        const job = await createJob({
+          creatorId: styleCreatorId,
+          productName: 'Denim',
+          sizingOverlayEnabled: false,
+          lengthSeconds: 15,
+          styleId: style.id,
+          variationCount: 2,
+          clips: [{ storageKey: 'clips/denim.mp4', originalFilename: 'denim.mp4' }],
+        });
+        orderedJobId = job.id;
+        const [clip] = await db.select().from(rawClips).where(eq(rawClips.jobId, job.id));
+        orderedClipId = clip.id;
+        // 0-9s tagged b-roll, 9-18s tagged try-on: enough of each, non-overlapping,
+        // so the ordering rule has something unambiguous to check.
+        await db.insert(segments).values([
+          { rawClipId: clip.id, startSeconds: '0', endSeconds: '9', contentTag: 'b-roll', qualityTag: 'high' },
+          { rawClipId: clip.id, startSeconds: '9', endSeconds: '18', contentTag: 'try-on', qualityTag: 'high' },
+        ]);
+      });
+
+      function orderedVariation(cuts: [number, number][], hookText: string): Variation {
+        return {
+          segments: cuts.map(([startSeconds, endSeconds]) => ({
+            rawClipId: orderedClipId,
+            startSeconds,
+            endSeconds,
+          })),
+          hookText,
+          sizingOverlayText: null,
+          sizingOverlayPlacement: null,
+        };
+      }
+
+      /**
+       * All three sequences below are legal under every *other* director rule, so
+       * the only thing these tests can be measuring is the ordering pattern.
+       *
+       * The job targets 15s with a 2-6s style band (widened 25% either side to
+       * 1.5-7.5s), and its single clip carries 18s of footage tagged b-roll (0-9)
+       * and try-on (9-18). Every cut below is exactly 3s, comfortably inside
+       * 1.5-7.5s, and every sequence is five of them: 15s exactly, dead centre of
+       * the accepted 13.5-17.25s window.
+       *
+       * Crucially the cuts are ordered so that neighbouring cuts from the one clip
+       * are never chronologically adjacent: each pair jumps at least 1s
+       * (MIN_CUT_GAP_SECONDS), usually backwards, which reads as a cut. Listing
+       * them in naive order (0-3, 3-6, 6-9, ...) would leave a 0s jump at every
+       * splice and be rejected for that reason instead of the ordering rule.
+       *
+       * No cut overlaps another by more than half, so nothing counts as a repeat
+       * against the reuse cap either, and every cut sits wholly inside one tagged
+       * range so `cutContentTag` attributes it unambiguously.
+       */
+      // b-roll (0-9) first, then try-on (9-18); every same-clip jump is 6s or more.
+      const brollFirst: [number, number][] = [[6, 9], [3, 6], [0, 3], [15, 18], [12, 15]];
+      // The mirror image: try-on first, then b-roll. Also 15s, also 6s jumps.
+      const tryOnFirst: [number, number][] = [[15, 18], [12, 15], [9, 12], [6, 9], [3, 6]];
+      // A second try-on-first edit, distinct enough from `tryOnFirst` to satisfy the
+      // near-identical-sequence rule (only position 1 shows the same footage) and
+      // opening on different footage. Its 12->13 splice leaves exactly the minimum
+      // 1s of footage out, the tightest legal same-clip forward jump.
+      const tryOnFirstAlt: [number, number][] = [[9, 12], [13, 16], [3, 6], [0, 3], [6, 9]];
+
+      it('assigns variation 1 (index 0) the b-roll-first pattern and rejects a try-on-first answer', async () => {
+        mockGenerateContent.mockResolvedValue(
+          geminiResponse([
+            // Variation 1 is given the b-roll-first pattern but answers try-on-first.
+            orderedVariation(tryOnFirst, 'Hook one'),
+            // Variation 2's pattern *is* try-on-first, so only variation 1 is at fault.
+            orderedVariation(tryOnFirstAlt, 'Hook two'),
+          ])
+        );
+
+        const result = await planJob(orderedJobId);
+
+        expect(result.success).toBe(false);
+        if (!result.success) expect(result.error).toContain('b-roll');
+      });
+
+      it('accepts variation 1 with b-roll before try-on and variation 2 with try-on before b-roll', async () => {
+        mockGenerateContent.mockResolvedValue(
+          geminiResponse([
+            orderedVariation(brollFirst, 'Hook one'),
+            orderedVariation(tryOnFirst, 'Hook two'),
+          ])
+        );
+
+        const result = await planJob(orderedJobId);
+
+        expect(result).toEqual({ success: true, variationCount: 2, warning: null });
+      });
+
+      it('tells the model which ordering pattern each variation must follow', async () => {
+        mockGenerateContent.mockResolvedValue(
+          geminiResponse([
+            orderedVariation(brollFirst, 'Hook one'),
+            orderedVariation(tryOnFirst, 'Hook two'),
+          ])
+        );
+
+        await planJob(orderedJobId);
+
+        const prompt = promptTextOfCall(0);
+        expect(prompt).toContain('CLIP ORDER VARIES BY VARIATION');
+        expect(prompt).toContain('Variation 1:');
+        expect(prompt).toContain('Variation 2:');
+      });
+
+      it('does not constrain ordering when the style leaves it unset', async () => {
+        // The Task 6 fixture style (`dupeFlipStyleId`) has variesClipOrder: false.
+        const { jobId, clipId } = await createStyleJob();
+        mockGenerateContent.mockResolvedValue(
+          geminiResponse([
+            {
+              segments: styleSegments(clipId),
+              hookText: 'Affordable finds for the win',
+              sizingOverlayText: 'For reference',
+              sizingOverlayPlacement: 'bottom-left',
+            },
+          ])
+        );
+
+        await planJob(jobId);
+
+        expect(promptTextOfCall(0)).not.toContain('CLIP ORDER VARIES BY VARIATION');
+      });
+    });
   });
 });
