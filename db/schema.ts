@@ -14,6 +14,18 @@ export const creators = pgTable('creators', {
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 });
 
+// Declared before `jobs` so `jobs.styleId` can reference it directly.
+export const styles = pgTable('styles', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  // Null = a built-in/system style. Filled in later by the (not-yet-built) paid
+  // feature where a creator saves their own AI-analyzed style.
+  creatorId: uuid('creator_id').references(() => creators.id),
+  name: text('name').notNull(),
+  description: text('description').notNull(),
+  config: jsonb('config').notNull(),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
 export const jobs = pgTable('jobs', {
   id: uuid('id').primaryKey().defaultRandom(),
   creatorId: uuid('creator_id').notNull().references(() => creators.id),
@@ -21,13 +33,12 @@ export const jobs = pgTable('jobs', {
   sizeWorn: text('size_worn'),
   sizingOverlayEnabled: boolean('sizing_overlay_enabled').notNull().default(false),
   lengthSeconds: integer('length_seconds').notNull(),
-  pacing: pacingEnum('pacing').notNull(),
+  // Nullable: set only in Custom mode. Style mode leaves this null and sets styleId instead.
+  pacing: pacingEnum('pacing'),
+  styleId: uuid('style_id').references(() => styles.id),
   variationCount: integer('variation_count').notNull(),
   status: jobStatusEnum('status').notNull().default('pending'),
   failureReason: text('failure_reason'),
-  // A plain-language note for a job that succeeded with a caveat -- currently
-  // "your footage could not fill the length you asked for". Distinct from
-  // failureReason: the job is `planned` and the result is usable.
   warning: text('warning'),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 });
@@ -37,6 +48,16 @@ export const rawClips = pgTable('raw_clips', {
   jobId: uuid('job_id').notNull().references(() => jobs.id),
   storageKey: text('storage_key').notNull(),
   originalFilename: text('original_filename').notNull(),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
+// One row per job for v1 (a style either doesn't use this or a job supplies
+// exactly one photo) — a table rather than a column on `jobs` so a future
+// multi-photo enhancement is new rows, not a new migration.
+export const jobInspirationImages = pgTable('job_inspiration_images', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  jobId: uuid('job_id').notNull().references(() => jobs.id),
+  storageKey: text('storage_key').notNull(),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 });
 

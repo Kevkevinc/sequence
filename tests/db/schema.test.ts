@@ -62,4 +62,32 @@ describe('database schema', () => {
       expect.arrayContaining(['pending', 'tagging', 'planning', 'planned', 'rendering', 'done', 'failed'])
     );
   });
+
+  it('makes jobs.pacing nullable and adds jobs.style_id, styles, and job_inspiration_images', async () => {
+    const rows = await db.execute<{ table_name: string; column_name: string; is_nullable: string }>(sql`
+      select table_name, column_name, is_nullable
+      from information_schema.columns
+      where table_schema = 'public'
+        and table_name in ('jobs', 'styles', 'job_inspiration_images')
+    `);
+
+    const columns = rows.map((r) => `${r.table_name}.${r.column_name}`);
+    expect(columns).toEqual(
+      expect.arrayContaining([
+        'jobs.style_id',
+        'styles.id',
+        'styles.creator_id',
+        'styles.name',
+        'styles.description',
+        'styles.config',
+        'styles.created_at',
+        'job_inspiration_images.id',
+        'job_inspiration_images.job_id',
+        'job_inspiration_images.storage_key',
+      ])
+    );
+
+    const pacingColumn = rows.find((r) => r.table_name === 'jobs' && r.column_name === 'pacing');
+    expect(pacingColumn?.is_nullable).toBe('YES');
+  });
 });
