@@ -65,9 +65,23 @@ export async function renderPlan(editPlanId: string): Promise<RenderPlanResult> 
     let inspirationImageClip: LocalClip | undefined;
     if (job.styleId) {
       const [styleRow] = await db.select().from(styles).where(eq(styles.id, job.styleId));
-      if (styleRow) {
+      // Unlike the director (a dangling/malformed style there is a hard
+      // failure — see `planJob`), a style that can't be resolved at render
+      // time is a cosmetic-only degrade: default white text and no
+      // inspiration photo still produce a usable video. Failing the whole
+      // render over that would be worse than the degrade itself. But it must
+      // not be a *silent* degrade, so the same `jobs.warning` column the
+      // director uses for short-footage notices carries this one too.
+      let styleWarning: string | undefined;
+      if (!styleRow) {
+        styleWarning =
+          "This video's style could not be found, so it rendered with default text color and no inspiration photo.";
+      } else {
         const parsed = StyleConfigSchema.safeParse(styleRow.config);
-        if (parsed.success) {
+        if (!parsed.success) {
+          styleWarning =
+            "This video's style has an invalid configuration, so it rendered with default text color and no inspiration photo.";
+        } else {
           textColor = parsed.data.textColor;
           if (parsed.data.usesInspirationOverlay) {
             const inspirationImage = await getInspirationImageForJob(plan.jobId);
@@ -77,6 +91,10 @@ export async function renderPlan(editPlanId: string): Promise<RenderPlanResult> 
             }
           }
         }
+      }
+
+      if (styleWarning) {
+        await db.update(jobs).set({ warning: styleWarning }).where(eq(jobs.id, job.id));
       }
     }
 

@@ -32,7 +32,7 @@ vi.mock('@/lib/storage', async (importOriginal) => {
 });
 
 import { db } from '@/db/client';
-import { rawClips, editPlans, styles } from '@/db/schema';
+import { rawClips, editPlans, styles, jobs } from '@/db/schema';
 import { createCreatorIfNotExists } from '@/db/repositories/creators';
 import { createJob } from '@/db/repositories/jobs';
 import { renderPlan } from '@/lib/render/renderPlan';
@@ -361,6 +361,67 @@ describe('renderPlan', () => {
     }
     expect(mockDownload).not.toHaveBeenCalled();
   });
+
+  // A dangling job.styleId (style row deleted out from under a job that still
+  // references it) is the other failure mode `renderPlan` degrades gracefully
+  // for, but it isn't constructible through the schema in a test: `jobs.style_id`
+  // has a non-deferrable `NO ACTION` foreign key to `styles.id` (see
+  // db/migrations/0004_moaning_moondragon.sql), so neither inserting a job with
+  // a bogus styleId nor deleting a style a job still points at is possible
+  // without disabling FK enforcement — which is more dangerous than useful
+  // against a shared dev database. The invalid-config path below exercises the
+  // same `styleWarning` branch in `renderPlan` (a style row that exists but
+  // fails `StyleConfigSchema.safeParse`), which is enough to prove the warning
+  // gets written instead of silently degrading.
+  it('degrades gracefully and writes a job warning when the style config is invalid', async () => {
+    const [invalidStyle] = await db
+      .insert(styles)
+      .values({
+        name: 'Test Invalid Config Style',
+        description: 'test',
+        // Missing `cutMinSeconds`/`cutMaxSeconds`/`hookStyleLibrary`, all
+        // required by StyleConfigSchema — deliberately malformed.
+        config: {
+          variesClipOrder: false,
+          usesInspirationOverlay: false,
+        },
+      })
+      .returning();
+
+    const invalidConfigJob = await createJob({
+      creatorId,
+      productName: 'Invalid Config Product',
+      sizingOverlayEnabled: false,
+      lengthSeconds: 15,
+      styleId: invalidStyle.id,
+      variationCount: 1,
+      clips: [{ storageKey: 'clips/a.mp4', originalFilename: 'a.mp4' }],
+    });
+    const [invalidConfigClip] = await db
+      .select()
+      .from(rawClips)
+      .where(eq(rawClips.jobId, invalidConfigJob.id));
+
+    const [plan] = await db
+      .insert(editPlans)
+      .values({
+        jobId: invalidConfigJob.id,
+        variationNumber: 1,
+        segments: [{ rawClipId: invalidConfigClip.id, startSeconds: 0, endSeconds: 4 }],
+        hookText: 'Invalid style config check',
+        sizingOverlayText: null,
+        sizingOverlayPlacement: null,
+      })
+      .returning();
+
+    const result = await renderPlan(plan.id);
+
+    expect(result.success).toBe(true);
+
+    const [updatedJob] = await db.select().from(jobs).where(eq(jobs.id, invalidConfigJob.id));
+    expect(updatedJob.warning).toBeTruthy();
+    expect(updatedJob.warning).toMatch(/style/i);
+  }, 120_000);
 
   it('composites the inspiration photo when the job has one', async () => {
     const [style] = await db
