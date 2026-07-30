@@ -344,8 +344,6 @@ function segmentKey(segment: { rawClipId: string; startSeconds: number; endSecon
 
 type Cut = { rawClipId: string; startSeconds: number; endSeconds: number };
 
-type StyleRow = typeof styles.$inferSelect;
-
 /**
  * Everything the prompt and validator need, resolved uniformly from either a
  * named pacing preset (Custom mode) or a style's config (Style mode) — every
@@ -364,19 +362,22 @@ type EffectivePreset = {
 
 /**
  * Resolves the job's editing preset. `style` is defined exactly when
- * `job.styleId` is set — see the lookup in `planJob`.
+ * `job.styleId` is set — see the lookup in `planJob`. Its `config` is the
+ * already-`StyleConfigSchema`-validated value, not a re-cast of the raw JSONB
+ * column, so this function never needs to (and must not) trust `styles.config`
+ * directly.
  */
-function resolvePreset(job: Job, style: StyleRow | undefined): EffectivePreset {
+function resolvePreset(
+  job: Job,
+  style: { name: string; config: StyleConfig } | undefined
+): EffectivePreset {
   if (style) {
-    // The style's config was already zod-validated when it was fetched in
-    // planJob; a malformed style row fails the job before this is ever called.
-    const config = style.config as StyleConfig;
     return {
-      ideal: { min: config.cutMinSeconds, max: config.cutMaxSeconds },
+      ideal: { min: style.config.cutMinSeconds, max: style.config.cutMaxSeconds },
       label: `the "${style.name}" style`,
-      hookStyleLibrary: config.hookStyleLibrary,
-      sizingPlacementOverride: config.sizingPlacement ?? null,
-      variesClipOrder: config.variesClipOrder,
+      hookStyleLibrary: style.config.hookStyleLibrary,
+      sizingPlacementOverride: style.config.sizingPlacement ?? null,
+      variesClipOrder: style.config.variesClipOrder,
     };
   }
   return {
@@ -1119,6 +1120,9 @@ export async function planJob(
     if (job.styleId && !style) {
       return { success: false, error: `Style ${job.styleId} referenced by job ${jobId} was not found` };
     }
+    // The validated config, not the raw JSONB row, is what gets threaded into
+    // `resolvePreset` below — nothing downstream may re-cast `style.config`.
+    let resolvedStyle: { name: string; config: StyleConfig } | undefined;
     if (style) {
       const parsedConfig = StyleConfigSchema.safeParse(style.config);
       if (!parsedConfig.success) {
@@ -1127,6 +1131,7 @@ export async function planJob(
           error: `Style ${style.id} has an invalid config: ${parsedConfig.error.message}`,
         };
       }
+      resolvedStyle = { name: style.name, config: parsedConfig.data };
     }
 
     const clips = await db.select().from(rawClips).where(eq(rawClips.jobId, jobId));
@@ -1170,7 +1175,7 @@ export async function planJob(
 
     // The per-cut length the job's preset asks for, used to build the prompt,
     // to validate the response, and to judge what the pool can reach.
-    const preset = resolvePreset(job, style);
+    const preset = resolvePreset(job, resolvedStyle);
     const band = bandForPreset(preset.ideal);
 
     // Established before the model is asked for anything: whether the creator's
