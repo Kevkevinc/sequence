@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterAll } from 'vitest';
 import { eq } from 'drizzle-orm';
 import { db } from '@/db/client';
 import { creators, jobs, styles, jobInspirationImages } from '@/db/schema';
@@ -55,6 +55,23 @@ describe('createJob with a style', () => {
   let styleId: string;
 
   beforeEach(async () => {
+    // Delete any existing test style to prevent orphan rows in the shared dev database.
+    // Since there are FK constraints without cascade delete, delete in dependency order:
+    // jobInspirationImages -> jobs -> styles
+    const existingStyle = await db.query.styles.findFirst({
+      where: eq(styles.name, 'Test Repo Job Style'),
+    });
+    if (existingStyle) {
+      const styleJobs = await db.query.jobs.findMany({
+        where: eq(jobs.styleId, existingStyle.id),
+      });
+      for (const job of styleJobs) {
+        await db.delete(jobInspirationImages).where(eq(jobInspirationImages.jobId, job.id));
+      }
+      await db.delete(jobs).where(eq(jobs.styleId, existingStyle.id));
+      await db.delete(styles).where(eq(styles.id, existingStyle.id));
+    }
+
     const [style] = await db
       .insert(styles)
       .values({
@@ -93,5 +110,23 @@ describe('createJob with a style', () => {
       .from(jobInspirationImages)
       .where(eq(jobInspirationImages.jobId, job.id));
     expect(image.storageKey).toBe('inspiration/test.jpg');
+  });
+
+  afterAll(async () => {
+    // Clean up the test style and any dependent jobs to prevent orphan rows in the shared dev database.
+    // Delete in dependency order: jobInspirationImages -> jobs -> styles
+    const existingStyle = await db.query.styles.findFirst({
+      where: eq(styles.name, 'Test Repo Job Style'),
+    });
+    if (existingStyle) {
+      const styleJobs = await db.query.jobs.findMany({
+        where: eq(jobs.styleId, existingStyle.id),
+      });
+      for (const job of styleJobs) {
+        await db.delete(jobInspirationImages).where(eq(jobInspirationImages.jobId, job.id));
+      }
+      await db.delete(jobs).where(eq(jobs.styleId, existingStyle.id));
+      await db.delete(styles).where(eq(styles.id, existingStyle.id));
+    }
   });
 });
