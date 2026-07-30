@@ -1,10 +1,17 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
+
+type Style = { id: string; name: string; description: string; usesInspirationOverlay: boolean };
 
 export default function NewJobPage() {
   const router = useRouter();
+  const [mode, setMode] = useState<'custom' | 'style'>('custom');
+  const [styles, setStyles] = useState<Style[]>([]);
+  const [selectedStyleId, setSelectedStyleId] = useState<string | null>(null);
+  const [inspirationFile, setInspirationFile] = useState<File | null>(null);
+
   const [files, setFiles] = useState<File[]>([]);
   const [productName, setProductName] = useState('');
   const [sizingOn, setSizingOn] = useState(false);
@@ -15,6 +22,38 @@ export default function NewJobPage() {
   const [errors, setErrors] = useState<{ field: string; message: string }[]>([]);
   const [submitting, setSubmitting] = useState(false);
 
+  useEffect(() => {
+    fetch('/api/styles')
+      .then((res) => res.json())
+      .then((data: Style[]) => setStyles(data))
+      .catch(() => setStyles([]));
+  }, []);
+
+  const selectedStyle = styles.find((s) => s.id === selectedStyleId) ?? null;
+
+  async function uploadFile(file: File): Promise<{ storageKey: string; originalFilename: string }> {
+    const presignRes = await fetch('/api/uploads/presign', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ filename: file.name, contentType: file.type }),
+    });
+    if (!presignRes.ok) {
+      throw new Error(`Failed to get an upload URL for "${file.name}".`);
+    }
+    const { url, storageKey } = await presignRes.json();
+
+    const uploadRes = await fetch(url, {
+      method: 'PUT',
+      body: file,
+      headers: { 'Content-Type': file.type },
+    });
+    if (!uploadRes.ok) {
+      throw new Error(`Failed to upload "${file.name}". Please try again.`);
+    }
+
+    return { storageKey, originalFilename: file.name };
+  }
+
   async function handleSubmit() {
     setSubmitting(true);
     setErrors([]);
@@ -22,26 +61,13 @@ export default function NewJobPage() {
     try {
       const clips = [];
       for (const file of files) {
-        const presignRes = await fetch('/api/uploads/presign', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ filename: file.name, contentType: file.type }),
-        });
-        if (!presignRes.ok) {
-          throw new Error(`Failed to get an upload URL for "${file.name}".`);
-        }
-        const { url, storageKey } = await presignRes.json();
+        clips.push(await uploadFile(file));
+      }
 
-        const uploadRes = await fetch(url, {
-          method: 'PUT',
-          body: file,
-          headers: { 'Content-Type': file.type },
-        });
-        if (!uploadRes.ok) {
-          throw new Error(`Failed to upload "${file.name}". Please try again.`);
-        }
-
-        clips.push({ storageKey, originalFilename: file.name });
+      let inspirationImage: { storageKey: string } | undefined;
+      if (mode === 'style' && selectedStyle?.usesInspirationOverlay && inspirationFile) {
+        const uploaded = await uploadFile(inspirationFile);
+        inspirationImage = { storageKey: uploaded.storageKey };
       }
 
       const res = await fetch('/api/jobs', {
@@ -52,9 +78,11 @@ export default function NewJobPage() {
           sizingOverlayEnabled: sizingOn,
           sizeWorn: sizingOn ? sizeWorn : undefined,
           lengthSeconds,
-          pacing,
+          pacing: mode === 'custom' ? pacing : undefined,
+          styleId: mode === 'style' ? selectedStyleId : undefined,
           variationCount,
           clips,
+          inspirationImage,
         }),
       });
 
@@ -115,14 +143,65 @@ export default function NewJobPage() {
         </select>
       </label>
 
-      <label>
-        Pacing
-        <select value={pacing} onChange={(e) => setPacing(e.target.value as typeof pacing)}>
-          <option value="slow">Slow</option>
-          <option value="medium">Medium</option>
-          <option value="fast">Fast</option>
-        </select>
-      </label>
+      <fieldset>
+        <legend>How do you want to edit this?</legend>
+        <label>
+          <input
+            type="radio"
+            name="mode"
+            checked={mode === 'custom'}
+            onChange={() => setMode('custom')}
+          />
+          Custom
+        </label>
+        <label>
+          <input
+            type="radio"
+            name="mode"
+            checked={mode === 'style'}
+            onChange={() => setMode('style')}
+          />
+          Style
+        </label>
+      </fieldset>
+
+      {mode === 'custom' && (
+        <label>
+          Pacing
+          <select value={pacing} onChange={(e) => setPacing(e.target.value as typeof pacing)}>
+            <option value="slow">Slow</option>
+            <option value="medium">Medium</option>
+            <option value="fast">Fast</option>
+          </select>
+        </label>
+      )}
+
+      {mode === 'style' && (
+        <div>
+          {styles.map((style) => (
+            <label key={style.id} style={{ display: 'block' }}>
+              <input
+                type="radio"
+                name="style"
+                checked={selectedStyleId === style.id}
+                onChange={() => setSelectedStyleId(style.id)}
+              />
+              <strong>{style.name}</strong> — {style.description}
+            </label>
+          ))}
+
+          {selectedStyle?.usesInspirationOverlay && (
+            <label>
+              Inspiration photo
+              <input
+                type="file"
+                accept="image/*"
+                onChange={(e) => setInspirationFile(e.target.files?.[0] ?? null)}
+              />
+            </label>
+          )}
+        </div>
+      )}
 
       <label>
         Variations
