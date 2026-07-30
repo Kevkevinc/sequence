@@ -208,8 +208,13 @@ async function discardOutput(outputPath: string): Promise<void> {
 
 type PreparedLayer = { file: string; from: number; to: number };
 
-/** How long the pop-up inspiration photo stays up, matching the hook's window. */
-const INSPIRATION_IMAGE = {
+/**
+ * How long the pop-up inspiration photo stays up, matching the hook's window.
+ *
+ * Exported so tests can assert against the exact box the filter graph draws
+ * (and its border) instead of duplicating these numbers.
+ */
+export const INSPIRATION_IMAGE = {
   seconds: 4,
   /** Fixed thumbnail box in the upper-left, clear of the frame edge. */
   width: 320,
@@ -314,6 +319,12 @@ export async function overlayText(input: {
       inputIndex += 1;
     }
 
+    // v1 scope is one inspiration photo per job, so this loop runs at most
+    // once — meaning the border step below, when it runs, is always the last
+    // filter in the chain and can label its output `[v]` directly rather than
+    // going through the generic text-layer relabelling below.
+    let chainEndsAtV = false;
+
     for (const layer of imageLayers) {
       const scaled = `[img${inputIndex}]`;
       filters.push(
@@ -326,10 +337,26 @@ export async function overlayText(input: {
       );
       current = label;
       inputIndex += 1;
+
+      // The brief calls for the thumbnail to read as a bordered photo card,
+      // not a bare rectangle of pixels — so draw a white outline around it in
+      // the same box, gated by the same enable window as the overlay above.
+      // `t=4` (not `t=fill`) draws a 4px unfilled outline rather than a filled
+      // box, confirmed against this project's bundled ffmpeg-static binary
+      // (`ffmpeg -h filter=drawbox`, "t / thickness: set the box thickness",
+      // default "3" — fill requires the literal string "fill", not a number).
+      filters.push(
+        `${current}drawbox=x=${INSPIRATION_IMAGE.margin}:y=${INSPIRATION_IMAGE.margin}:w=${INSPIRATION_IMAGE.width}:h=${INSPIRATION_IMAGE.height}:color=white:t=4:enable='${window}'[v]`
+      );
+      chainEndsAtV = true;
     }
 
-    // The last filter's output must be relabelled `[v]` for `-map` below.
-    const chain = filters.join(';').replace(new RegExp(`\\[t${inputIndex - 1}\\]$`), '[v]');
+    // The last filter's output must be labelled `[v]` for `-map` below. The
+    // image-layer loop above already does this itself (see `chainEndsAtV`);
+    // otherwise the last text layer's generated label is relabelled here.
+    const chain = chainEndsAtV
+      ? filters.join(';')
+      : filters.join(';').replace(new RegExp(`\\[t${inputIndex - 1}\\]$`), '[v]');
 
     const result = await runFfmpeg([
       '-i', input.sourcePath,

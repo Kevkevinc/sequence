@@ -10,6 +10,7 @@ import {
   renderHookLayer,
   renderSizingLayer,
   SIZING_PLACEMENTS,
+  INSPIRATION_IMAGE,
   type SizingPlacement,
 } from '@/lib/render/text';
 
@@ -70,12 +71,17 @@ async function pixelAt(png: Buffer | string, x: number, y: number): Promise<{ r:
   return { r: data[0], g: data[1], b: data[2], a: data[3] };
 }
 
-/** Pulls a single frame out of a video at `seconds` and measures its ink. */
-async function frameInk(video: string, seconds: number, dir: string): Promise<Ink> {
+/** Pulls a single frame out of a video at `seconds`, returning the PNG's path. */
+async function extractFrame(video: string, seconds: number, dir: string): Promise<string> {
   const frame = path.join(dir, `frame-${seconds}-${path.basename(video)}.png`);
   const result = await runFfmpeg(['-ss', String(seconds), '-i', video, '-frames:v', '1', frame]);
   if (!result.success) throw new Error(`Could not extract a frame: ${result.error}`);
-  return inkOf(frame);
+  return frame;
+}
+
+/** Pulls a single frame out of a video at `seconds` and measures its ink. */
+async function frameInk(video: string, seconds: number, dir: string): Promise<Ink> {
+  return inkOf(await extractFrame(video, seconds, dir));
 }
 
 /** The exact string the bundled ffmpeg's drawtext truncated to "POV". */
@@ -415,6 +421,35 @@ describe('overlayText', () => {
     expect(early.count).toBeGreaterThan(0);
     expect(early.box?.left).toBeLessThan(WIDTH / 2);
     expect(early.box?.top).toBeLessThan(HEIGHT / 2);
+
+    // The brief calls for the thumbnail to read as a bordered photo card, not
+    // a bare rectangle of pixels: sample right on the box's left edge, partway
+    // down its height, during the visible window. That pixel should be the
+    // white border — distinct from both the green fill just inside it and the
+    // black source frame just outside it.
+    const frame1s = await extractFrame(out, 1, dir);
+    const borderX = INSPIRATION_IMAGE.margin;
+    const borderY = INSPIRATION_IMAGE.margin + Math.round(INSPIRATION_IMAGE.height / 2);
+    const border = await pixelAt(frame1s, borderX, borderY);
+    const interior = await pixelAt(
+      frame1s,
+      INSPIRATION_IMAGE.margin + Math.round(INSPIRATION_IMAGE.width / 2),
+      borderY
+    );
+    const outside = await pixelAt(frame1s, INSPIRATION_IMAGE.margin - 10, borderY);
+
+    // White border: all channels high, not just green.
+    expect(border.r).toBeGreaterThan(180);
+    expect(border.g).toBeGreaterThan(180);
+    expect(border.b).toBeGreaterThan(180);
+    // Distinct from the plain green fill just inside the border.
+    expect(interior.r).toBeLessThan(80);
+    expect(interior.b).toBeLessThan(80);
+    expect(interior.g).toBeGreaterThan(150);
+    // Distinct from the black source frame just outside the box.
+    expect(outside.r).toBeLessThan(40);
+    expect(outside.g).toBeLessThan(40);
+    expect(outside.b).toBeLessThan(40);
 
     // t=9s: long past the 4s window — a pop-up, not a watermark.
     expect((await frameInk(out, 9, dir)).count).toBeLessThan(200);
