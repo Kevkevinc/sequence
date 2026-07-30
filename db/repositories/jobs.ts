@@ -1,6 +1,6 @@
 import { and, desc, eq } from 'drizzle-orm';
 import { db } from '@/db/client';
-import { jobs, rawClips } from '@/db/schema';
+import { jobs, rawClips, jobInspirationImages } from '@/db/schema';
 
 export type CreateJobInput = {
   creatorId: string;
@@ -8,9 +8,11 @@ export type CreateJobInput = {
   sizeWorn?: string;
   sizingOverlayEnabled: boolean;
   lengthSeconds: 15 | 30 | 45 | 60;
-  pacing: 'slow' | 'medium' | 'fast';
+  pacing?: 'slow' | 'medium' | 'fast';
+  styleId?: string;
   variationCount: number;
   clips: { storageKey: string; originalFilename: string }[];
+  inspirationImage?: { storageKey: string };
 };
 
 export async function createJob(input: CreateJobInput) {
@@ -24,6 +26,7 @@ export async function createJob(input: CreateJobInput) {
         sizingOverlayEnabled: input.sizingOverlayEnabled,
         lengthSeconds: input.lengthSeconds,
         pacing: input.pacing,
+        styleId: input.styleId,
         variationCount: input.variationCount,
       })
       .returning();
@@ -36,6 +39,13 @@ export async function createJob(input: CreateJobInput) {
           originalFilename: clip.originalFilename,
         }))
       );
+    }
+
+    if (input.inspirationImage) {
+      await tx.insert(jobInspirationImages).values({
+        jobId: job.id,
+        storageKey: input.inspirationImage.storageKey,
+      });
     }
 
     return job;

@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { eq } from 'drizzle-orm';
 import { db } from '@/db/client';
-import { creators, jobs } from '@/db/schema';
+import { creators, jobs, styles, jobInspirationImages } from '@/db/schema';
 import { createCreatorIfNotExists } from '@/db/repositories/creators';
 import { createJob, listJobsForCreator } from '@/db/repositories/jobs';
 
@@ -47,5 +47,51 @@ describe('listJobsForCreator', () => {
     expect(result).toHaveLength(2);
     expect(result[0].productName).toBe('Second Product');
     expect(result[1].productName).toBe('First Product');
+  });
+});
+
+describe('createJob with a style', () => {
+  const CLERK_ID = 'test_clerk_user_jobs_style';
+  let styleId: string;
+
+  beforeEach(async () => {
+    const [style] = await db
+      .insert(styles)
+      .values({
+        name: 'Test Repo Job Style',
+        description: 'For repository tests',
+        config: {
+          cutMinSeconds: 2,
+          cutMaxSeconds: 5,
+          hookStyleLibrary: ['x'],
+          variesClipOrder: true,
+          usesInspirationOverlay: true,
+        },
+      })
+      .returning();
+    styleId = style.id;
+  });
+
+  it('creates a job with a styleId and no pacing, plus an inspiration image', async () => {
+    const creator = await createCreatorIfNotExists(CLERK_ID);
+    const job = await createJob({
+      creatorId: creator.id,
+      productName: 'Styled Product',
+      sizingOverlayEnabled: false,
+      lengthSeconds: 30,
+      styleId,
+      variationCount: 3,
+      clips: [],
+      inspirationImage: { storageKey: 'inspiration/test.jpg' },
+    });
+
+    expect(job.pacing).toBeNull();
+    expect(job.styleId).toBe(styleId);
+
+    const [image] = await db
+      .select()
+      .from(jobInspirationImages)
+      .where(eq(jobInspirationImages.jobId, job.id));
+    expect(image.storageKey).toBe('inspiration/test.jpg');
   });
 });

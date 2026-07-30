@@ -101,4 +101,27 @@ describe('validateJobInput', () => {
       message: 'Variation count must be between 1 and 20.',
     });
   });
+
+  it('accepts a styleId in place of pacing', () => {
+    const { pacing, ...withoutPacing } = validInput;
+    const errors = validateJobInput({ ...withoutPacing, styleId: '11111111-1111-1111-1111-111111111111' });
+    expect(errors).toEqual([]);
+  });
+
+  it('rejects providing both pacing and a styleId', () => {
+    const errors = validateJobInput({ ...validInput, styleId: '11111111-1111-1111-1111-111111111111' });
+    expect(errors).toContainEqual({
+      field: 'mode',
+      message: 'Choose either a pacing (Custom mode) or a style (Style mode), not both or neither.',
+    });
+  });
+
+  it('rejects providing neither pacing nor a styleId', () => {
+    const { pacing, ...withoutPacing } = validInput;
+    const errors = validateJobInput({ ...withoutPacing });
+    expect(errors).toContainEqual({
+      field: 'mode',
+      message: 'Choose either a pacing (Custom mode) or a style (Style mode), not both or neither.',
+    });
+  });
 });

@@ -7,7 +7,8 @@ export type JobValidationError = { field: string; message: string };
 export function validateJobInput(input: {
   productName: string;
   lengthSeconds: number;
-  pacing: string;
+  pacing?: string;
+  styleId?: string;
   variationCount: number;
   sizingOverlayEnabled: boolean;
   sizeWorn?: string;
@@ -23,9 +24,18 @@ export function validateJobInput(input: {
   if (!ALLOWED_LENGTHS.includes(input.lengthSeconds as (typeof ALLOWED_LENGTHS)[number])) {
     errors.push({ field: 'lengthSeconds', message: 'Length must be 15, 30, 45, or 60 seconds.' });
   }
-  if (!ALLOWED_PACINGS.includes(input.pacing as (typeof ALLOWED_PACINGS)[number])) {
+
+  const hasPacing = typeof input.pacing === 'string' && input.pacing.length > 0;
+  const hasStyleId = typeof input.styleId === 'string' && input.styleId.length > 0;
+  if (hasPacing === hasStyleId) {
+    errors.push({
+      field: 'mode',
+      message: 'Choose either a pacing (Custom mode) or a style (Style mode), not both or neither.',
+    });
+  } else if (hasPacing && !ALLOWED_PACINGS.includes(input.pacing as (typeof ALLOWED_PACINGS)[number])) {
     errors.push({ field: 'pacing', message: 'Pacing must be slow, medium, or fast.' });
   }
+
   if (
     typeof input.variationCount !== 'number' ||
     Number.isNaN(input.variationCount) ||

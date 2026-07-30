@@ -1,7 +1,9 @@
 import { auth } from '@clerk/nextjs/server';
 import { createCreatorIfNotExists } from '@/db/repositories/creators';
 import { createJob, listJobsForCreator } from '@/db/repositories/jobs';
+import { getStyleById } from '@/db/repositories/styles';
 import { validateJobInput } from '@/lib/validation/job';
+import { StyleConfigSchema } from '@/lib/styles';
 
 export async function POST(req: Request) {
   const { userId } = await auth();
@@ -23,10 +25,14 @@ export async function POST(req: Request) {
     );
   }
 
+  const pacing = typeof body.pacing === 'string' ? body.pacing : undefined;
+  const styleId = typeof body.styleId === 'string' && body.styleId ? body.styleId : undefined;
+
   const errors = validateJobInput({
     productName: body.productName ?? '',
     lengthSeconds: body.lengthSeconds,
-    pacing: body.pacing,
+    pacing,
+    styleId,
     variationCount: body.variationCount,
     sizingOverlayEnabled: Boolean(body.sizingOverlayEnabled),
     sizeWorn: body.sizeWorn,
@@ -49,6 +55,32 @@ export async function POST(req: Request) {
     });
   }
 
+  // A named style must actually exist, and its own config decides whether an
+  // inspiration photo is required — never trust the client's word on either.
+  let style: Awaited<ReturnType<typeof getStyleById>> | undefined;
+  if (styleId) {
+    style = await getStyleById(styleId);
+    if (!style) {
+      errors.push({ field: 'styleId', message: 'Selected style does not exist.' });
+    }
+  }
+
+  const inspirationImage = body.inspirationImage;
+  const hasInspirationImage = Boolean(
+    inspirationImage &&
+      typeof inspirationImage.storageKey === 'string' &&
+      inspirationImage.storageKey.trim()
+  );
+  if (style) {
+    const parsedConfig = StyleConfigSchema.safeParse(style.config);
+    if (parsedConfig.success && parsedConfig.data.usesInspirationOverlay && !hasInspirationImage) {
+      errors.push({
+        field: 'inspirationImage',
+        message: 'This style requires an inspiration photo upload.',
+      });
+    }
+  }
+
   if (errors.length > 0) {
     return Response.json({ errors }, { status: 400 });
   }
@@ -59,9 +91,11 @@ export async function POST(req: Request) {
     sizeWorn: body.sizeWorn,
     sizingOverlayEnabled: Boolean(body.sizingOverlayEnabled),
     lengthSeconds: body.lengthSeconds,
-    pacing: body.pacing,
+    pacing: pacing as 'slow' | 'medium' | 'fast' | undefined,
+    styleId: style?.id,
     variationCount: body.variationCount,
     clips: body.clips,
+    inspirationImage: hasInspirationImage ? { storageKey: inspirationImage.storageKey } : undefined,
   });
 
   return Response.json(job, { status: 201 });
