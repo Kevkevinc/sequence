@@ -13,7 +13,10 @@ import { createCreatorIfNotExists } from '@/db/repositories/creators';
 import { createJob } from '@/db/repositories/jobs';
 import { planJob } from '@/lib/pipeline/director';
 import { HOOK_STYLE_LIBRARY } from '@/lib/pipeline/hookLibrary';
-import { cleanUpJobsForClerkId, deleteTestStyles } from '../../helpers/db-cleanup';
+import { cleanUpJobsForClerkId, deleteStylesByName } from '../../helpers/db-cleanup';
+
+/** Every style this file creates inline, by exact name — see deleteStylesByName's docstring. */
+const TEST_STYLE_NAMES = ['Test Dupe Flip', 'Test Ordered Style'];
 
 // The creator's stored profile is the only legitimate source of overlay measurements.
 const CREATOR_HEIGHT = '5\'6"';
@@ -164,7 +167,7 @@ describe('planJob', () => {
     await cleanUpJobsForClerkId(CLERK_ID);
     await cleanUpJobsForClerkId(CLERK_ID_NO_PROFILE);
     await cleanUpJobsForClerkId('test_clerk_user_director_style');
-    await deleteTestStyles();
+    await deleteStylesByName(TEST_STYLE_NAMES);
   });
 
   it('accepts a bare variations array, not just the {variations: [...]} wrapper', async () => {

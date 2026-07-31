@@ -37,7 +37,10 @@ import { createCreatorIfNotExists } from '@/db/repositories/creators';
 import { createJob } from '@/db/repositories/jobs';
 import { renderPlan } from '@/lib/render/renderPlan';
 import { probeDuration, probeMedia } from '@/lib/render/ffmpeg';
-import { cleanUpCreatorJobs, deleteTestStyles } from '../../helpers/db-cleanup';
+import { cleanUpCreatorJobs, deleteStylesByName } from '../../helpers/db-cleanup';
+
+/** Every style this file creates inline, by exact name — see deleteStylesByName's docstring. */
+const TEST_STYLE_NAMES = ['Test Render Color Style', 'Test Invalid Config Style', 'Test Render Inspo Style'];
 
 describe('renderPlan', () => {
   const CLERK_ID = 'test_clerk_user_render_plan';
@@ -95,7 +98,7 @@ describe('renderPlan', () => {
 
   afterEach(async () => {
     await cleanUpCreatorJobs(creatorId);
-    await deleteTestStyles();
+    await deleteStylesByName(TEST_STYLE_NAMES);
   });
 
   beforeEach(async () => {
@@ -118,7 +121,9 @@ describe('renderPlan', () => {
       const canvas = createCanvas(image.width, image.height);
       const ctx = canvas.getContext('2d');
       ctx.drawImage(image, 0, 0);
-      const y = Math.round(image.height * 0.15);
+      // Must land inside the hook's first line (lib/render/text.ts's HOOK.top,
+      // currently 0.17 of the frame height) rather than above it.
+      const y = Math.round(image.height * 0.19);
       let best = { r: 0, g: 0, b: 0 };
       let bestDominance = -Infinity;
       for (let x = Math.round(image.width * 0.2); x < Math.round(image.width * 0.8); x += 2) {
