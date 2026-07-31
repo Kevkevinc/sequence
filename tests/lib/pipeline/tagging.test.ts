@@ -31,14 +31,21 @@ import { rawClips, segments } from '@/db/schema';
 import { createCreatorIfNotExists } from '@/db/repositories/creators';
 import { createJob } from '@/db/repositories/jobs';
 import { tagClip } from '@/lib/pipeline/tagging';
+import { cleanUpCreatorJobs } from '../../helpers/db-cleanup';
 
 describe('tagClip', () => {
   const CLERK_ID = 'test_clerk_user_tagging';
+  let creatorId: string;
   let rawClipId: string;
+
+  afterEach(async () => {
+    await cleanUpCreatorJobs(creatorId);
+  });
 
   beforeEach(async () => {
     vi.clearAllMocks();
     const creator = await createCreatorIfNotExists(CLERK_ID);
+    creatorId = creator.id;
     const job = await createJob({
       creatorId: creator.id,
       productName: 'Test Product',

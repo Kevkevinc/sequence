@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeAll, beforeEach, afterAll } from 'vitest';
+import { describe, it, expect, vi, beforeAll, beforeEach, afterEach, afterAll } from 'vitest';
 import { mkdtemp, rm, readdir, writeFile } from 'fs/promises';
 import { tmpdir } from 'os';
 import path from 'path';
@@ -37,6 +37,7 @@ import { createCreatorIfNotExists } from '@/db/repositories/creators';
 import { createJob } from '@/db/repositories/jobs';
 import { renderPlan } from '@/lib/render/renderPlan';
 import { probeDuration, probeMedia } from '@/lib/render/ffmpeg';
+import { cleanUpCreatorJobs, deleteTestStyles } from '../../helpers/db-cleanup';
 
 describe('renderPlan', () => {
   const CLERK_ID = 'test_clerk_user_render_plan';
@@ -90,6 +91,11 @@ describe('renderPlan', () => {
 
   afterAll(async () => {
     await rm(fixturesDir, { recursive: true, force: true });
+  });
+
+  afterEach(async () => {
+    await cleanUpCreatorJobs(creatorId);
+    await deleteTestStyles();
   });
 
   beforeEach(async () => {

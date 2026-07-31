@@ -13,6 +13,7 @@ import { createCreatorIfNotExists } from '@/db/repositories/creators';
 import { createJob } from '@/db/repositories/jobs';
 import { planJob } from '@/lib/pipeline/director';
 import { HOOK_STYLE_LIBRARY } from '@/lib/pipeline/hookLibrary';
+import { cleanUpJobsForClerkId, deleteTestStyles } from '../../helpers/db-cleanup';
 
 // The creator's stored profile is the only legitimate source of overlay measurements.
 const CREATOR_HEIGHT = '5\'6"';
@@ -149,6 +150,21 @@ describe('planJob', () => {
       { rawClipId: clipBId, startSeconds: '0', endSeconds: '10', contentTag: 'whole-clip', qualityTag: 'medium' },
       { rawClipId: clipBId, startSeconds: '2', endSeconds: '6', contentTag: 'try-on', qualityTag: 'high' },
     ]);
+  });
+
+  /**
+   * One sweep for the whole file: every nested `describe` below reuses one of
+   * these three fixed `clerk_user_id`s rather than minting its own, so
+   * cleaning up after each of them here — at the outermost scope, where
+   * Vitest runs an `afterEach` after every test in every nested block too —
+   * catches every job/style any test in this file created, regardless of
+   * which nested `describe` did it.
+   */
+  afterEach(async () => {
+    await cleanUpJobsForClerkId(CLERK_ID);
+    await cleanUpJobsForClerkId(CLERK_ID_NO_PROFILE);
+    await cleanUpJobsForClerkId('test_clerk_user_director_style');
+    await deleteTestStyles();
   });
 
   it('accepts a bare variations array, not just the {variations: [...]} wrapper', async () => {

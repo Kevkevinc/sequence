@@ -1,13 +1,18 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, afterEach } from 'vitest';
 import { eq } from 'drizzle-orm';
 import { db } from '@/db/client';
 import { creators, jobs, jobInspirationImages } from '@/db/schema';
 import { createCreatorIfNotExists } from '@/db/repositories/creators';
 import { createJob } from '@/db/repositories/jobs';
 import { getInspirationImageForJob } from '@/db/repositories/jobInspirationImages';
+import { cleanUpJobsForClerkId } from '../../helpers/db-cleanup';
 
 describe('getInspirationImageForJob', () => {
   const CLERK_ID = 'test_clerk_user_inspo_images';
+
+  afterEach(async () => {
+    await cleanUpJobsForClerkId(CLERK_ID);
+  });
 
   it('returns the storage key for a job with an inspiration image', async () => {
     const creator = await createCreatorIfNotExists(CLERK_ID);
