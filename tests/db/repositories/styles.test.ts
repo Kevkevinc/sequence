@@ -48,15 +48,15 @@ describe('seedBuiltInStyles', () => {
     await seedBuiltInStyles(); // running it twice must not duplicate rows
 
     const all = await listStyles();
-    const singleShot = all.find((s) => s.name === 'Single-Shot Try-On');
+    const voiceoverTryOn = all.find((s) => s.name === 'Voiceover Try-On');
     const dupeFlip = all.find((s) => s.name === 'Dupe Flip');
 
-    expect(all.filter((s) => s.name === 'Single-Shot Try-On')).toHaveLength(1);
+    expect(all.filter((s) => s.name === 'Voiceover Try-On')).toHaveLength(1);
     expect(all.filter((s) => s.name === 'Dupe Flip')).toHaveLength(1);
 
-    expect(singleShot?.config).toMatchObject({
-      cutMinSeconds: 15,
-      cutMaxSeconds: 45,
+    expect(voiceoverTryOn?.config).toMatchObject({
+      cutMinSeconds: 2,
+      cutMaxSeconds: 5,
       sizingPlacement: 'bottom-right',
       variesClipOrder: false,
       usesInspirationOverlay: false,

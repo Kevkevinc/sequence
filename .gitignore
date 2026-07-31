@@ -44,3 +44,12 @@ next-env.d.ts
 
 # local tool settings
 .claude/
+
+# local copies of rendered videos (real storage is R2, never commit large binaries)
+/local-videos/
+
+# reference-only footage (watched/analyzed for style design, never processed as raw input)
+/example-videos/
+
+# real raw footage used for manual end-to-end testing
+/raw-videos/
