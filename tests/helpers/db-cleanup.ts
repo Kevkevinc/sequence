@@ -1,4 +1,4 @@
-import { eq, inArray, like } from 'drizzle-orm';
+import { and, eq, inArray, isNotNull, like, notInArray } from 'drizzle-orm';
 import { db } from '@/db/client';
 import { creators, jobs, rawClips, segments, editPlans, renders, jobInspirationImages, styles } from '@/db/schema';
 
@@ -40,7 +40,21 @@ export async function cleanUpJobsForClerkId(clerkUserId: string): Promise<void> 
  * `seedBuiltInStyles`). Every such style in this codebase is named with a
  * `Test ` prefix specifically so this sweep can find it; a name that doesn't
  * start with `Test ` is never touched.
+ *
+ * Excludes any style a job still references. Vitest runs test files in
+ * parallel workers, so a style this function would otherwise delete can
+ * momentarily belong to a job created by an unrelated test file's
+ * in-flight test — deleting it out from under that job violates the
+ * `jobs_style_id_styles_id_fk` foreign key. Skipping still-referenced styles
+ * is always safe: that file's own cleanup deletes its job (and so frees the
+ * style) on its next pass.
  */
 export async function deleteTestStyles(): Promise<void> {
-  await db.delete(styles).where(like(styles.name, 'Test %'));
+  const referencedStyleIds = db
+    .select({ styleId: jobs.styleId })
+    .from(jobs)
+    .where(isNotNull(jobs.styleId));
+  await db
+    .delete(styles)
+    .where(and(like(styles.name, 'Test %'), notInArray(styles.id, referencedStyleIds)));
 }

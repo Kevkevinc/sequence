@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterAll } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, afterAll } from 'vitest';
 import { eq } from 'drizzle-orm';
 import { db } from '@/db/client';
 import { creators, jobs, styles, jobInspirationImages } from '@/db/schema';
@@ -8,7 +8,7 @@ import { createJob, listJobsForCreator } from '@/db/repositories/jobs';
 describe('listJobsForCreator', () => {
   const CLERK_ID = 'test_clerk_user_jobs';
 
-  beforeEach(async () => {
+  async function cleanUp() {
     const existing = await db.query.creators.findFirst({
       where: eq(creators.clerkUserId, CLERK_ID),
     });
@@ -18,7 +18,10 @@ describe('listJobsForCreator', () => {
       await db.delete(jobs).where(eq(jobs.creatorId, existing.id));
       await db.delete(creators).where(eq(creators.id, existing.id));
     }
-  });
+  }
+
+  beforeEach(cleanUp);
+  afterEach(cleanUp);
 
   it('returns jobs belonging to the given creator, most recent first', async () => {
     const creator = await createCreatorIfNotExists(CLERK_ID);
