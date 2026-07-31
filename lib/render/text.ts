@@ -25,12 +25,12 @@ const FONT_FAMILY = 'UgcHookFont';
 const DEFAULT_FONT_FILE = path.join(process.cwd(), 'assets', 'fonts', 'Roboto-Bold.ttf');
 
 const HOOK = {
-  fontSize: 68,
+  fontSize: 51,
   lineHeightRatio: 1.18,
   /** Leaves 60px of breathing room each side for the outline and the frame. */
   maxWidth: WIDTH - 120,
   /** Upper third, clear of a phone's status bar and any platform chrome. */
-  top: Math.round(HEIGHT * 0.14),
+  top: Math.round(HEIGHT * 0.17),
   /** Seconds the hook stays up, from the start. */
   seconds: 3,
 };

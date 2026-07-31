@@ -122,8 +122,9 @@ describe('renderHookLayer', () => {
     );
 
     // drawtext offers no word wrap at all: the long hook would be one line
-    // running off both edges of the frame.
-    expect(long.blockHeight).toBeGreaterThan(short.blockHeight * 2);
+    // running off both edges of the frame. Not tied to an exact line count:
+    // that depends on font size/metrics, which are free to change.
+    expect(long.blockHeight).toBeGreaterThan(short.blockHeight);
 
     const ink = await inkOf(long.png);
     expect(ink.box).not.toBeNull();
