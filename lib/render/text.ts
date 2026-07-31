@@ -291,12 +291,14 @@ export async function overlayText(input: {
       });
     }
 
-    // Nothing to draw: copy the streams rather than spend a re-encode, and a
-    // lossless one at that.
+    // Nothing to draw: copy the video stream rather than spend a re-encode,
+    // and a lossless one at that. `-an` strips audio regardless of what the
+    // source happens to carry — v1 never keeps audio, on any code path here.
     if (layers.length === 0 && imageLayers.length === 0) {
       const copied = await runFfmpeg([
         '-i', input.sourcePath,
         '-c', 'copy',
+        '-an',
         '-movflags', '+faststart',
         input.outputPath,
       ]);
@@ -373,12 +375,8 @@ export async function overlayText(input: {
       ...inputs,
       '-filter_complex', chain,
       '-map', '[v]',
-      // Optional: a source with no audio must not fail the whole overlay pass.
-      // The audio is untouched here, so copying keeps it bit-identical to the
-      // normalised parts rather than putting it through a second AAC encode.
-      '-map', '0:a?',
+      '-an',
       '-c:v', 'libx264', '-preset', 'veryfast', '-pix_fmt', 'yuv420p',
-      '-c:a', 'copy',
       // This is the file the creator downloads and the browser streams, so the
       // index belongs at the front.
       '-movflags', '+faststart',

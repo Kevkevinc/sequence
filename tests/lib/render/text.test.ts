@@ -263,7 +263,8 @@ describe('overlayText', () => {
     expect(result.success).toBe(true);
     expect(await probeDimensions(out)).toEqual({ width: WIDTH, height: HEIGHT });
     expect(Math.abs((await probeDuration(out)) - 12)).toBeLessThan(0.2);
-    expect(await probeHasAudio(out)).toBe(true);
+    // v1 does not use source audio — AI-driven audio editing is a future feature.
+    expect(await probeHasAudio(out)).toBe(false);
 
     // t=1s: hook on screen, in the upper half.
     const hookFrame = await frameInk(out, 1, dir);
@@ -311,10 +312,10 @@ describe('overlayText', () => {
     expect(result.success).toBe(true);
     expect(await probeDimensions(out)).toEqual({ width: WIDTH, height: HEIGHT });
     expect(Math.abs((await probeDuration(out)) - 12)).toBeLessThan(0.2);
-    expect(await probeHasAudio(out)).toBe(true);
+    expect(await probeHasAudio(out)).toBe(false);
   }, 120_000);
 
-  it('keeps a source with no audio track working', async () => {
+  it('keeps a video-only source working', async () => {
     const silent = path.join(dir, 'silent.mp4');
     expect((await runFfmpeg([
       '-f', 'lavfi', '-i', 'color=c=black:s=1080x1920:r=30:d=6',

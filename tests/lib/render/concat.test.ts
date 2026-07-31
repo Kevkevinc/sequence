@@ -3,7 +3,7 @@ import { mkdtemp, rm, readdir, readFile } from 'fs/promises';
 import { existsSync } from 'fs';
 import { tmpdir } from 'os';
 import path from 'path';
-import { runFfmpeg, probeDimensions, probeDuration, probeMedia } from '@/lib/render/ffmpeg';
+import { runFfmpeg, probeDimensions, probeDuration } from '@/lib/render/ffmpeg';
 import { normaliseCut } from '@/lib/render/normalise';
 import { concatCuts } from '@/lib/render/concat';
 
@@ -43,15 +43,6 @@ function dominant([r, g, b]: [number, number, number]): 'red' | 'green' | 'blue'
   return 'other';
 }
 
-/** Per-stream durations — the only view that can see audio drifting from video. */
-async function streamDurations(file: string): Promise<{ video: number; audio: number }> {
-  const info = await probeMedia(file);
-  if (!info.video?.duration || !info.audio?.duration) {
-    throw new Error(`Expected a video and an audio duration in ${file}`);
-  }
-  return { video: info.video.duration, audio: info.audio.duration };
-}
-
 describe('concatCuts', () => {
   let dir: string;
   let parts: string[];
@@ -60,24 +51,23 @@ describe('concatCuts', () => {
   beforeAll(async () => {
     dir = await mkdtemp(path.join(tmpdir(), 'ugc-concat-'));
 
-    // Three solid-colour sources with tone, so the order of the parts is
-    // readable from the finished video rather than merely assumed.
+    // Three solid-colour sources, so the order of the parts is readable from
+    // the finished video rather than merely assumed.
     const colours = ['red', 'green', 'blue'];
     const sources: string[] = [];
     for (const colour of colours) {
       const source = path.join(dir, `${colour}.mp4`);
       const made = await runFfmpeg([
         '-f', 'lavfi', '-i', `color=c=${colour}:s=720x1280:r=30:d=8`,
-        '-f', 'lavfi', '-i', 'sine=frequency=440:duration=8',
-        '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-shortest', source,
+        '-c:v', 'libx264', '-pix_fmt', 'yuv420p', source,
       ]);
       expect(made.success).toBe(true);
       sources.push(source);
     }
 
     // Deliberately fractional, unequal ranges. Task 2's suite was blind to a
-    // 57ms audio bug because every fixture landed on an integer second; a concat
-    // of parts that are all exactly 1/30s-aligned by luck would be just as blind.
+    // 57ms bug because every fixture landed on an integer second; a concat of
+    // parts that are all exactly 1/30s-aligned by luck would be just as blind.
     const ranges = [
       { startSeconds: 0.5, endSeconds: 2.25 },
       { startSeconds: 1.234, endSeconds: 3.777 },
@@ -110,17 +100,6 @@ describe('concatCuts', () => {
     // whole join, not a frame per splice.
     expect(Math.abs((await probeDuration(out)) - expected)).toBeLessThan(FRAME_SECONDS);
     expect(await probeDimensions(out)).toEqual({ width: 1080, height: 1920 });
-  }, 120_000);
-
-  it('keeps audio within a frame of video across the join', async () => {
-    // Task 2's hard-won property. Each part is internally aligned; the question
-    // here is whether the concatenation preserves that or accumulates a gap per
-    // splice, which is what an unaligned part sounds like at playback.
-    const out = path.join(dir, 'aligned.mp4');
-    expect((await concatCuts(parts, out)).success).toBe(true);
-
-    const { video, audio } = await streamDurations(out);
-    expect(Math.abs(video - audio)).toBeLessThan(FRAME_SECONDS);
   }, 120_000);
 
   it('preserves the order of the parts', async () => {
