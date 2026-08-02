@@ -14,17 +14,15 @@ import type { StyleConfig } from '@/lib/styles';
  */
 const BUILT_IN_STYLES: { name: string; description: string; config: StyleConfig }[] = [
   {
-    name: 'Voiceover Try-On',
-    description: 'Quick cuts under a casual voiceover, sizing in the bottom-right.',
+    name: 'Mixed Cuts',
+    description:
+      "Quick cuts mixing b-roll and try-on footage, muted so the creator can add their own voiceover, sizing in the bottom-right.",
     config: {
-      // Corrected from an initial (wrong) 15-45s "no forced cuts" reading: a
-      // scene-detection threshold that was too coarse missed real cuts every
-      // ~1.5-5s throughout all three reference clips. Re-measured at a lower
-      // threshold before fixing this value.
-      cutMinSeconds: 2,
-      cutMaxSeconds: 5,
-      // Patterns proven on TikTok in this casual/lowercase voiceover format,
-      // not verbatim lines from the reference clips.
+      // Medium-speed cut band, per creator direction: 2.5-4s.
+      cutMinSeconds: 2.5,
+      cutMaxSeconds: 4,
+      // Patterns proven on TikTok in this casual/lowercase format, not
+      // verbatim lines from the reference clips.
       hookStyleLibrary: [
         'new fav [item]',
         'toughest [item] yet',
