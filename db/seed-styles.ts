@@ -7,10 +7,24 @@ import type { StyleConfig } from '@/lib/styles';
  * The two v1 styles, hand-authored from real reference video (frame sampling
  * plus ffmpeg scene-cut detection on 3 example clips per style — see
  * docs/superpowers/specs/2026-07-30-creator-styles-design.md). Cut rhythm and
- * sizing placement come directly from that footage; each `hookStyleLibrary`
- * captures the tone/format the reference clips demonstrated (casual lowercase
- * vs. bold declarative) plus other patterns known to perform well in that same
- * format — not verbatim transcriptions of the reference clips' own captions.
+ * sizing placement come directly from that footage.
+ *
+ * Each `hookStyleLibrary` blends 2026 TikTok Shop UGC/affiliate hook research
+ * (curiosity, POV, social proof, outcome-first, bold declarative for
+ * dupe/price content) with real examples the creator supplied directly from
+ * what's currently converting for them — short, understated "genuine
+ * reaction" lines outperform obvious ad-copy hooks ("you need this") because
+ * they read as organic content rather than sponsored. Not verbatim
+ * transcriptions of the reference clips' own captions.
+ *
+ * None of these contain a `[product]`/`[item]`/`[X]`/`[Brand]` bracket
+ * placeholder. The director's prompt tells the model to adapt these, not
+ * substitute into them, but a literal bracket token invited literal
+ * fill-in-the-blank behavior anyway — observed producing a nonsense hook
+ * when a job's raw productName wasn't phrase-shaped. Complete natural
+ * sentences give the model tone and rhythm to imitate instead of a slot to
+ * paste into; see lib/pipeline/hookLibrary.ts's docstring for the same fix
+ * applied to Custom mode's default library.
  */
 const BUILT_IN_STYLES: { name: string; description: string; config: StyleConfig }[] = [
   {
@@ -21,19 +35,21 @@ const BUILT_IN_STYLES: { name: string; description: string; config: StyleConfig 
       // Medium-speed cut band, per creator direction: 2.5-4s.
       cutMinSeconds: 2.5,
       cutMaxSeconds: 4,
-      // Patterns proven on TikTok in this casual/lowercase format, not
-      // verbatim lines from the reference clips.
+      // Short, understated "genuine reaction" lines rather than ad-copy —
+      // per creator direction, this register consistently outperforms
+      // obvious hooks like "you need this" because it blends into organic
+      // TikTok content instead of reading as sponsored.
       hookStyleLibrary: [
-        'new fav [item]',
-        'toughest [item] yet',
-        'this [item] hits different',
-        'okay this [item] might be my favorite',
-        'wait til you see this [item]',
-        "not me buying another [item]",
-        "the [item] i've been living in lately",
-        'y\'all weren\'t lying about this [item]',
-        'pov: you just found the [item] everyone is talking about',
-        'okay hear me out on this [item]',
+        'okay these kinda ate',
+        "wasn't expecting this quality",
+        'the fit is actually crazy',
+        'why does this feel so expensive',
+        "i'm keeping this",
+        'one of the best pickups this year',
+        'never taking this off',
+        'obsessed.',
+        'this is your sign',
+        'not me buying another one',
       ],
       sizingPlacement: 'bottom-right',
       variesClipOrder: false,
@@ -46,19 +62,19 @@ const BUILT_IN_STYLES: { name: string; description: string; config: StyleConfig 
     config: {
       cutMinSeconds: 2,
       cutMaxSeconds: 5,
-      // Patterns proven on TikTok in this bold declarative dupe/price-comparison
-      // format, not verbatim lines from the reference clips.
+      // Price-shock/declarative, per creator direction: short punchy price
+      // callouts mixed with the dupe genre's established bold statements.
       hookStyleLibrary: [
-        'Affordable Designer Alternatives..',
-        'How To Dress As A [X]..',
-        '[Item] Under $100',
-        '[Item] Dupes You Need To Know About',
-        'Get The Look For Less..',
-        'Stop Overpaying For [Item]',
-        '[Item] That Looks Way More Expensive Than It Is',
-        'POV: You Found The Dupe',
-        'How To Dress Like You Have Money..',
-        '[Brand] Alternative For A Fraction Of The Price',
+        'crazy cheap',
+        'expensive looking >>',
+        'these look way more expensive',
+        '$20?? no way',
+        'why are these so good??',
+        'get the look for less..',
+        "the dupe you didn't know you needed",
+        'how to dress like you have money..',
+        'under $50 and nobody can tell the difference',
+        "found the dupe everyone's been asking about",
       ],
       sizingPlacement: 'bottom-left',
       variesClipOrder: true,
