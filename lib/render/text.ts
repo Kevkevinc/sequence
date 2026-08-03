@@ -25,7 +25,7 @@ const FONT_FAMILY = 'UgcHookFont';
 const DEFAULT_FONT_FILE = path.join(process.cwd(), 'assets', 'fonts', 'Roboto-Bold.ttf');
 
 const HOOK = {
-  fontSize: 51,
+  fontSize: 42,
   lineHeightRatio: 1.18,
   /** Leaves 60px of breathing room each side for the outline and the frame. */
   maxWidth: WIDTH - 120,
@@ -41,11 +41,15 @@ const HOOK = {
 const SIZING = {
   fontSize: 40,
   lineHeightRatio: 1.2,
-  margin: 60,
   maxWidth: WIDTH - 120,
-  /** Seconds the block stays up, starting a third of the way in. */
-  seconds: 3,
 };
+
+/**
+ * Longer than any video this product renders (`lengthSeconds` tops out at
+ * 60s) — used as the sizing block's end-of-window time so it visibly runs to
+ * the end of the clip without needing to know the exact rendered length.
+ */
+const EFFECTIVELY_FOREVER_SECONDS = 3600;
 
 /** A drawn PNG layer and the height of the text block inside it. */
 export type TextLayer = { png: Buffer; blockHeight: number };
@@ -180,7 +184,11 @@ export function renderHookLayer(text: string, options: { textColor?: string } = 
   });
 }
 
-/** The sizing block: smaller, in whichever corner the director chose. */
+/**
+ * The sizing block: smaller, centred within whichever half/quadrant the
+ * director chose — e.g. "bottom-right" lands at the centre of the bottom-
+ * right quadrant, not hugging the corner of the frame.
+ */
 export function renderSizingLayer(
   text: string,
   placement: SizingPlacement,
@@ -189,24 +197,22 @@ export function renderSizingLayer(
   const known = SIZING_PLACEMENTS.includes(placement) ? placement : 'bottom-left';
   const [vertical, horizontal] = known.split('-');
 
-  const align = horizontal === 'center' ? 'center' : (horizontal as 'left' | 'right');
-  const x =
-    horizontal === 'left' ? SIZING.margin
-      : horizontal === 'right' ? WIDTH - SIZING.margin
+  const xCenter =
+    horizontal === 'left' ? WIDTH / 4
+      : horizontal === 'right' ? (WIDTH * 3) / 4
       : WIDTH / 2;
+  const yCenter = vertical === 'top' ? HEIGHT / 4 : (HEIGHT * 3) / 4;
 
   return renderLayer({
     text,
     fontSize: SIZING.fontSize,
     lineHeightRatio: SIZING.lineHeightRatio,
     maxWidth: SIZING.maxWidth,
-    align,
-    x,
-    // A bottom-anchored block cannot know its top until it knows how many lines
-    // it wrapped onto, so the caller supplies the top as a function of that.
-    y: vertical === 'top'
-      ? SIZING.margin
-      : (blockHeight: number) => HEIGHT - SIZING.margin - blockHeight,
+    align: 'center',
+    x: xCenter,
+    // Centred rather than corner-anchored: the block's top has to shift up
+    // as it grows to more lines to keep its centre fixed at yCenter.
+    y: (blockHeight: number) => Math.round(yCenter - blockHeight / 2),
     textColor: options.textColor ?? DEFAULT_TEXT_COLOR,
   });
 }
@@ -241,8 +247,8 @@ export const INSPIRATION_IMAGE = {
  *
  * Each block is drawn to its own transparent PNG and composited with an
  * `overlay` filter, so each gets its own visibility window: the hook for the
- * first three seconds, then the sizing block for three seconds immediately
- * after — sequential, never overlapping.
+ * first three seconds, then the sizing block immediately after, staying up
+ * for the rest of the video — sequential, never overlapping.
  *
  * ffmpeg never sees the text, only a picture of it. That is deliberate: the
  * bundled ffmpeg 6.1.1's `drawtext` silently truncates at the first colon,
@@ -281,10 +287,11 @@ export async function overlayText(input: {
         textColor: input.textColor,
       }).png;
       // Starts the instant the hook's own window ends, per creator direction,
-      // rather than overlapping it or waiting an arbitrary further delay.
+      // rather than overlapping it or waiting an arbitrary further delay, and
+      // then stays up for the rest of the video rather than a fixed window.
       const from = input.hookText.trim() ? HOOK.seconds : 0;
       const file = path.join(input.tempDir, `sizing-${unique}.png`);
-      layers.push({ file, from, to: from + SIZING.seconds });
+      layers.push({ file, from, to: EFFECTIVELY_FOREVER_SECONDS });
       await writeFile(file, png);
     }
 

@@ -177,7 +177,7 @@ describe('renderSizingLayer', () => {
     expect(drawn.count).toBeGreaterThan(500);
   });
 
-  it.each(SIZING_PLACEMENTS)('puts the block in the %s corner', async (placement) => {
+  it.each(SIZING_PLACEMENTS)('puts the block in the %s region', async (placement) => {
     const ink = await inkOf(renderSizingLayer(SIZING_TEXT, placement as SizingPlacement).png);
     expect(ink.box).not.toBeNull();
     if (!ink.box) return;
@@ -236,10 +236,11 @@ describe('overlayText', () => {
   beforeAll(async () => {
     dir = await mkdtemp(path.join(tmpdir(), 'ugc-text-'));
     source = path.join(dir, 'source.mp4');
-    // Black 1080x1920 with a tone, long enough that the hook window (0-3s) and
-    // the sizing window (immediately after, 3-6s) each get frames on either
-    // side of them to check — so a frame's ink identifies which block is on
-    // screen.
+    // Black 1080x1920 with a tone, long enough to check a frame before the
+    // hook's window (0-3s), one inside it, one after it ends where the
+    // open-ended sizing window has begun, and one much later still inside
+    // that same open-ended window — so a frame's ink identifies which block
+    // is on screen.
     const made = await runFfmpeg([
       '-f', 'lavfi', '-i', 'color=c=black:s=1080x1920:r=30:d=12',
       '-f', 'lavfi', '-i', 'sine=frequency=440:duration=12',
@@ -280,11 +281,12 @@ describe('overlayText', () => {
     expect(sizingFrame.box?.top).toBeGreaterThan(HEIGHT / 2);
     expect(sizingFrame.box?.left).toBeGreaterThan(WIDTH / 2);
 
-    // t=5.9s: still inside the sizing block's own 3s window (3s-6s).
-    expect((await frameInk(out, 5.9, dir)).count).toBeGreaterThan(300);
-
-    // t=9s: both windows closed.
-    expect((await frameInk(out, 9, dir)).count).toBeLessThan(200);
+    // t=9s: the hook's window is long closed, but the sizing block has no end
+    // of its own — it stays up for the rest of the video.
+    const lateFrame = await frameInk(out, 9, dir);
+    expect(lateFrame.count).toBeGreaterThan(300);
+    expect(lateFrame.box?.top).toBeGreaterThan(HEIGHT / 2);
+    expect(lateFrame.box?.left).toBeGreaterThan(WIDTH / 2);
   }, 240_000);
 
   it('renders the hook alone when there is no sizing overlay', async () => {
