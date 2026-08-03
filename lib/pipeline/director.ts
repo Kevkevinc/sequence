@@ -229,9 +229,6 @@ const CAPACITY_SAFETY_MARGIN = 0.15;
 // and validates the response, so prompt and validator cannot drift apart, and
 // sharing it means planning and rendering cannot drift apart either.
 
-// Separator between the measurement fields we assemble ourselves.
-const MEASUREMENT_SEPARATOR = ' · ';
-
 /**
  * Any digit immediately followed by a length/weight unit. The creator's real
  * height and weight come from their profile and are assembled in code; a model
@@ -1053,29 +1050,22 @@ function buildValidator(context: ValidationContext) {
 
 /**
  * Builds the overlay caption from stored values only: the creator's profile
- * measurements and the size they recorded for this job. The model may supply a
- * lead-in phrase, never a number. Returns null when there is nothing truthful to
- * show, so a job with an unfilled profile degrades to no overlay rather than a
- * broken or invented one.
+ * measurements and the size they recorded for this job, one labeled line
+ * each ("Height: ...", "Weight: ...", "Size: ..."), never a number the model
+ * supplied. Returns null when there is nothing truthful to show, so a job
+ * with an unfilled profile degrades to no overlay rather than a broken or
+ * invented one.
  */
-function buildSizingOverlayText(
-  creator: Creator,
-  job: Job,
-  leadIn: string | null
-): string | null {
-  const measurements = [
-    creator.height,
-    creator.weight,
-    job.sizeWorn ? `size ${job.sizeWorn}` : null,
-  ]
-    .map((part) => part?.trim())
-    .filter((part): part is string => Boolean(part));
+function buildSizingOverlayText(creator: Creator, job: Job): string | null {
+  const lines = [
+    creator.height?.trim() ? `Height: ${creator.height.trim()}` : null,
+    creator.weight?.trim() ? `Weight: ${creator.weight.trim()}` : null,
+    job.sizeWorn?.trim() ? `Size: ${job.sizeWorn.trim()}` : null,
+  ].filter((line): line is string => Boolean(line));
 
-  if (measurements.length === 0) return null;
+  if (lines.length === 0) return null;
 
-  const caption = measurements.join(MEASUREMENT_SEPARATOR);
-  const phrase = leadIn?.trim();
-  return phrase ? `${phrase} ${caption}` : caption;
+  return lines.join('\n');
 }
 
 function buildPrompt(
@@ -1089,9 +1079,9 @@ function buildPrompt(
 ): string {
   const placements = OVERLAY_PLACEMENTS.map((p) => `"${p}"`).join(', ');
   const sizingInstruction = job.sizingOverlayEnabled
-    ? `This ad shows a sizing overlay. The creator's real height and weight are appended automatically from their stored profile${
-        job.sizeWorn ? `, along with the size worn: ${job.sizeWorn}` : ''
-      }. So write sizingOverlayText as a short lead-in phrase ONLY (for example "For reference" or "Fit check") and never write any height, weight, or size numbers yourself - you do not know them and inventing them is not acceptable. ${
+    ? `This ad shows a sizing overlay. Its text is built automatically from the creator's stored profile and the size worn${
+        job.sizeWorn ? ` (size worn: ${job.sizeWorn})` : ''
+      } as one labeled line each for Height / Weight / Size - you never write any part of it. Always set sizingOverlayText to null. ${
         preset.sizingPlacementOverride
           ? `Set sizingOverlayPlacement to "${preset.sizingPlacementOverride}" for every variation - this style always places it there.`
           : `Set sizingOverlayPlacement to one of: ${placements}.`
@@ -1428,7 +1418,7 @@ export async function planJob(
           // and never persist a caption the model wrote the numbers for; Stage 3
           // renders whatever is stored here.
           const overlayText = job.sizingOverlayEnabled
-            ? buildSizingOverlayText(creator, job, v.sizingOverlayText)
+            ? buildSizingOverlayText(creator, job)
             : null;
 
           return {

@@ -423,9 +423,9 @@ describe('planJob', () => {
     expect(promptTextOfCall(0)).not.toContain('sizing overlay');
   });
 
-  it('builds the overlay caption from the stored profile, keeping only the model lead-in', async () => {
+  it('builds the overlay text from the stored profile as one labeled line each', async () => {
     const overlayJob = await createOverlayJob({ sizeWorn: 'M' });
-    mockGenerateContent.mockResolvedValue(overlayResponse(overlayJob.clipId, 'For reference'));
+    mockGenerateContent.mockResolvedValue(overlayResponse(overlayJob.clipId, null));
 
     const result = await planJob(overlayJob.id);
 
@@ -435,22 +435,21 @@ describe('planJob', () => {
 
     const saved = await db.select().from(editPlans).where(eq(editPlans.jobId, overlayJob.id));
     expect(saved).toHaveLength(1);
-    // Every measurement comes from the creator row and the job, never the model.
-    expect(saved[0].sizingOverlayText).toBe(
-      `For reference ${CREATOR_HEIGHT} · ${CREATOR_WEIGHT} · size M`
-    );
+    // Every line comes from the creator row and the job, never the model.
+    expect(saved[0].sizingOverlayText).toBe(`Height: ${CREATOR_HEIGHT}\nWeight: ${CREATOR_WEIGHT}\nSize: M`);
     expect(saved[0].sizingOverlayPlacement).toBe('bottom-center');
   });
 
-  it('uses the stored measurements alone when the model supplies no lead-in', async () => {
+  it('ignores anything the model writes in sizingOverlayText, even a lead-in phrase', async () => {
     const overlayJob = await createOverlayJob({ sizeWorn: 'M' });
-    mockGenerateContent.mockResolvedValue(overlayResponse(overlayJob.clipId, null));
+    mockGenerateContent.mockResolvedValue(overlayResponse(overlayJob.clipId, 'For reference'));
 
     const result = await planJob(overlayJob.id);
 
     expect(result).toEqual({ success: true, variationCount: 1, warning: null });
     const saved = await db.select().from(editPlans).where(eq(editPlans.jobId, overlayJob.id));
-    expect(saved[0].sizingOverlayText).toBe(`${CREATOR_HEIGHT} · ${CREATOR_WEIGHT} · size M`);
+    expect(saved[0].sizingOverlayText).not.toContain('For reference');
+    expect(saved[0].sizingOverlayText).toBe(`Height: ${CREATOR_HEIGHT}\nWeight: ${CREATOR_WEIGHT}\nSize: M`);
   });
 
   it('rejects model-authored body measurements in the overlay text', async () => {
@@ -499,7 +498,7 @@ describe('planJob', () => {
 
     expect(result).toEqual({ success: true, variationCount: 1, warning: null });
     const saved = await db.select().from(editPlans).where(eq(editPlans.jobId, overlayJob.id));
-    expect(saved[0].sizingOverlayText).toBe('size L');
+    expect(saved[0].sizingOverlayText).toBe('Size: L');
     expect(saved[0].sizingOverlayPlacement).toBe('top-left');
   });
 

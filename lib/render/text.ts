@@ -3,7 +3,7 @@ import path from 'path';
 import { createCanvas, GlobalFonts, type SKRSContext2D } from '@napi-rs/canvas';
 import { OVERLAY_PLACEMENTS, type OverlayPlacement } from '@/lib/editPlan';
 import { getEnvWithDefault } from '@/lib/env';
-import { probeMedia, runFfmpeg } from '@/lib/render/ffmpeg';
+import { runFfmpeg } from '@/lib/render/ffmpeg';
 
 const WIDTH = 1080;
 const HEIGHT = 1920;
@@ -29,8 +29,11 @@ const HOOK = {
   lineHeightRatio: 1.18,
   /** Leaves 60px of breathing room each side for the outline and the frame. */
   maxWidth: WIDTH - 120,
-  /** Upper third, clear of a phone's status bar and any platform chrome. */
-  top: Math.round(HEIGHT * 0.17),
+  /**
+   * Fraction of frame height where the block's vertical CENTER lands, not
+   * its top — a little higher than dead centre (0.5), per creator direction.
+   */
+  centerAt: 0.44,
   /** Seconds the hook stays up, from the start. */
   seconds: 3,
 };
@@ -73,8 +76,17 @@ function registerFont(): void {
  *
  * ffmpeg's drawtext cannot wrap at all, which is one of several reasons it is
  * not used here: a 73-character hook would run off both edges of the frame.
+ *
+ * A `\n` in the input is a forced break (e.g. the sizing block's "Height /
+ * Weight / Size" lines) — each segment between them is wrapped
+ * independently, so a deliberate line never gets merged back into the one
+ * before it.
  */
 function wrap(ctx: SKRSContext2D, text: string, maxWidth: number): string[] {
+  return text.split('\n').flatMap((segment) => wrapSegment(ctx, segment, maxWidth));
+}
+
+function wrapSegment(ctx: SKRSContext2D, text: string, maxWidth: number): string[] {
   const lines: string[] = [];
   let line = '';
 
@@ -152,7 +164,7 @@ function renderLayer(options: LayerOptions): TextLayer {
   return { png: canvas.toBuffer('image/png'), blockHeight };
 }
 
-/** The hook: large, centred, in the upper third. */
+/** The hook: large, centred, its block vertically centred a little above mid-frame. */
 export function renderHookLayer(text: string, options: { textColor?: string } = {}): TextLayer {
   return renderLayer({
     text,
@@ -161,7 +173,9 @@ export function renderHookLayer(text: string, options: { textColor?: string } = 
     maxWidth: HOOK.maxWidth,
     align: 'center',
     x: WIDTH / 2,
-    y: HOOK.top,
+    // Centred, not top-anchored: the block's top has to shift up as it grows
+    // to more lines, or a two-line hook would sit lower than a one-line one.
+    y: (blockHeight: number) => Math.round(HEIGHT * HOOK.centerAt - blockHeight / 2),
     textColor: options.textColor ?? DEFAULT_TEXT_COLOR,
   });
 }
@@ -227,9 +241,8 @@ export const INSPIRATION_IMAGE = {
  *
  * Each block is drawn to its own transparent PNG and composited with an
  * `overlay` filter, so each gets its own visibility window: the hook for the
- * first three seconds, the sizing block for three seconds starting a third of
- * the way in — late enough to land on try-on footage rather than compete with
- * the hook.
+ * first three seconds, then the sizing block for three seconds immediately
+ * after — sequential, never overlapping.
  *
  * ffmpeg never sees the text, only a picture of it. That is deliberate: the
  * bundled ffmpeg 6.1.1's `drawtext` silently truncates at the first colon,
@@ -267,11 +280,9 @@ export async function overlayText(input: {
       const png = renderSizingLayer(input.sizing.text, input.sizing.placement, {
         textColor: input.textColor,
       }).png;
-      // The window is placed relative to the finished video's length, so the
-      // block lands a third of the way in whatever the edit turned out to be.
-      const duration =
-        (await probeMedia(input.sourcePath)).containerDuration ?? SIZING.seconds * 3;
-      const from = duration / 3;
+      // Starts the instant the hook's own window ends, per creator direction,
+      // rather than overlapping it or waiting an arbitrary further delay.
+      const from = input.hookText.trim() ? HOOK.seconds : 0;
       const file = path.join(input.tempDir, `sizing-${unique}.png`);
       layers.push({ file, from, to: from + SIZING.seconds });
       await writeFile(file, png);

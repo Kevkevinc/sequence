@@ -237,8 +237,9 @@ describe('overlayText', () => {
     dir = await mkdtemp(path.join(tmpdir(), 'ugc-text-'));
     source = path.join(dir, 'source.mp4');
     // Black 1080x1920 with a tone, long enough that the hook window (0-3s) and
-    // the sizing window (a third of the way in, for 3s) do not overlap — so a
-    // frame's ink identifies which block is on screen.
+    // the sizing window (immediately after, 3-6s) each get frames on either
+    // side of them to check — so a frame's ink identifies which block is on
+    // screen.
     const made = await runFfmpeg([
       '-f', 'lavfi', '-i', 'color=c=black:s=1080x1920:r=30:d=12',
       '-f', 'lavfi', '-i', 'sine=frequency=440:duration=12',
@@ -272,14 +273,15 @@ describe('overlayText', () => {
     expect(hookFrame.count).toBeGreaterThan(1000);
     expect(hookFrame.box?.top).toBeLessThan(HEIGHT / 2);
 
-    // t=3.5s: past the hook, before the sizing block — nothing on a black frame.
-    expect((await frameInk(out, 3.5, dir)).count).toBeLessThan(200);
-
-    // t=5s: a third of 12s is 4s, so the sizing block is up, bottom-right.
-    const sizingFrame = await frameInk(out, 5, dir);
+    // t=3.5s: the hook's 3s window just closed and the sizing block's own
+    // window starts immediately after it with no gap, bottom-right.
+    const sizingFrame = await frameInk(out, 3.5, dir);
     expect(sizingFrame.count).toBeGreaterThan(300);
     expect(sizingFrame.box?.top).toBeGreaterThan(HEIGHT / 2);
     expect(sizingFrame.box?.left).toBeGreaterThan(WIDTH / 2);
+
+    // t=5.9s: still inside the sizing block's own 3s window (3s-6s).
+    expect((await frameInk(out, 5.9, dir)).count).toBeGreaterThan(300);
 
     // t=9s: both windows closed.
     expect((await frameInk(out, 9, dir)).count).toBeLessThan(200);

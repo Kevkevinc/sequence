@@ -121,9 +121,11 @@ describe('renderPlan', () => {
       const canvas = createCanvas(image.width, image.height);
       const ctx = canvas.getContext('2d');
       ctx.drawImage(image, 0, 0);
-      // Must land inside the hook's first line (lib/render/text.ts's HOOK.top,
-      // currently 0.17 of the frame height) rather than above it.
-      const y = Math.round(image.height * 0.19);
+      // Must land inside the hook block regardless of how many lines it wraps
+      // to: lib/render/text.ts's HOOK.centerAt (currently 0.44) is where the
+      // block's own vertical CENTER is placed, so sampling there is always
+      // inside the text no matter the line count.
+      const y = Math.round(image.height * 0.44);
       let best = { r: 0, g: 0, b: 0 };
       let bestDominance = -Infinity;
       for (let x = Math.round(image.width * 0.2); x < Math.round(image.width * 0.8); x += 2) {
