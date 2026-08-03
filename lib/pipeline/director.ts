@@ -1050,17 +1050,18 @@ function buildValidator(context: ValidationContext) {
 
 /**
  * Builds the overlay caption from stored values only: the creator's profile
- * measurements and the size they recorded for this job, one labeled line
- * each ("Height: ...", "Weight: ...", "Size: ..."), never a number the model
+ * measurements and the size they recorded for this job, one per line: the
+ * height on its own (e.g. "5'10\""), the weight on its own (e.g. "170 lbs"),
+ * then "Size" plus the size worn (e.g. "Size M") — never a number the model
  * supplied. Returns null when there is nothing truthful to show, so a job
  * with an unfilled profile degrades to no overlay rather than a broken or
  * invented one.
  */
 function buildSizingOverlayText(creator: Creator, job: Job): string | null {
   const lines = [
-    creator.height?.trim() ? `Height: ${creator.height.trim()}` : null,
-    creator.weight?.trim() ? `Weight: ${creator.weight.trim()}` : null,
-    job.sizeWorn?.trim() ? `Size: ${job.sizeWorn.trim()}` : null,
+    creator.height?.trim() || null,
+    creator.weight?.trim() || null,
+    job.sizeWorn?.trim() ? `Size ${job.sizeWorn.trim()}` : null,
   ].filter((line): line is string => Boolean(line));
 
   if (lines.length === 0) return null;
@@ -1081,7 +1082,7 @@ function buildPrompt(
   const sizingInstruction = job.sizingOverlayEnabled
     ? `This ad shows a sizing overlay. Its text is built automatically from the creator's stored profile and the size worn${
         job.sizeWorn ? ` (size worn: ${job.sizeWorn})` : ''
-      } as one labeled line each for Height / Weight / Size - you never write any part of it. Always set sizingOverlayText to null. ${
+      } as one line each for Height / Weight / Size - you never write any part of it. Always set sizingOverlayText to null. ${
         preset.sizingPlacementOverride
           ? `Set sizingOverlayPlacement to "${preset.sizingPlacementOverride}" for every variation - this style always places it there.`
           : `Set sizingOverlayPlacement to one of: ${placements}.`
