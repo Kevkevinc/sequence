@@ -36,6 +36,13 @@
       "when": 1785404453165,
       "tag": "0004_moaning_moondragon",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1785877031261,
+      "tag": "0005_chemical_vampiro",
+      "breakpoints": true
     }
   ]
 }

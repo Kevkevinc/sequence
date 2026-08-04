@@ -1,5 +1,6 @@
 'use client';
 
+import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { UserButton, useUser } from '@clerk/nextjs';
@@ -43,6 +44,29 @@ export function AppShell({
 }) {
   const pathname = usePathname();
   const { user } = useUser();
+
+  /*
+   * Everyone signing up during the beta is labelled a beta tester. Read from
+   * the creator row rather than assumed, so this keeps telling the truth once
+   * the cohort default flips to `public` and the two kinds of account coexist.
+   * Falls back to the plain role while loading, or if the request fails —
+   * a missing badge is better than a wrong one.
+   */
+  const [cohort, setCohort] = useState<'beta' | 'public' | null>(null);
+
+  useEffect(() => {
+    if (!user) return;
+    let cancelled = false;
+    fetch('/api/profile')
+      .then((res) => (res.ok ? res.json() : null))
+      .then((profile) => {
+        if (!cancelled && profile?.cohort) setCohort(profile.cohort);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [user]);
 
   const displayName =
     user?.username ||
@@ -95,7 +119,9 @@ export function AppShell({
             />
             <div style={{ minWidth: 0 }}>
               <div className="userName">{displayName}</div>
-              <div className="userRole">Creator</div>
+              <div className="userRole" data-cohort={cohort ?? undefined}>
+                {cohort === 'beta' ? 'Beta tester' : 'Creator'}
+              </div>
             </div>
           </div>
         </aside>

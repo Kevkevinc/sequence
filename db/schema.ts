@@ -6,11 +6,26 @@ export const jobStatusEnum = pgEnum('job_status', [
 ]);
 export const renderStatusEnum = pgEnum('render_status', ['rendering', 'done', 'failed']);
 
+/**
+ * Which intake a creator arrived through. Recorded once, at sign-up, and never
+ * rewritten: someone who joined during the beta stays a beta tester after the
+ * doors open, which is the whole point of knowing.
+ */
+export const creatorCohortEnum = pgEnum('creator_cohort', ['beta', 'public']);
+
 export const creators = pgTable('creators', {
   id: uuid('id').primaryKey().defaultRandom(),
   clerkUserId: text('clerk_user_id').notNull().unique(),
   height: text('height'),
   weight: text('weight'),
+  /*
+   * Defaulted in the database rather than at the call site. Creator rows are
+   * inserted from both the Clerk webhook and lazy provisioning, and a default
+   * that lives in Postgres cannot be forgotten by a third path added later.
+   * Opening to the public is then a one-line migration changing this default,
+   * with everyone already labelled keeping their label.
+   */
+  cohort: creatorCohortEnum('cohort').notNull().default('beta'),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 });
 

@@ -286,6 +286,14 @@ button {
   color: var(--text-3);
 }
 
+/* Beta testers are told what they are, in the accent the rest of the app
+   uses for "this is notable", rather than reading as a plain job title. */
+.userRole[data-cohort='beta'] {
+  color: var(--accent);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
 /* --------------------------------------------------------------- topbar --- */
 
 .main {
