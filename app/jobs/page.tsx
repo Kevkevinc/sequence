@@ -2,20 +2,12 @@
 
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
-
-type Job = {
-  id: string;
-  productName: string;
-  status: string;
-  lengthSeconds: number;
-  pacing: string;
-  variationCount: number;
-  warning: string | null;
-  createdAt: string;
-};
+import { AppShell } from '@/components/AppShell';
+import { JobCard, type JobSummary } from '@/components/JobCard';
+import { IconVideos } from '@/components/icons';
 
 export default function JobsPage() {
-  const [jobs, setJobs] = useState<Job[]>([]);
+  const [jobs, setJobs] = useState<JobSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -50,30 +42,39 @@ export default function JobsPage() {
   }, []);
 
   return (
-    <main>
-      <h1>Your Videos</h1>
-      <Link href="/jobs/new">+ New Video</Link>
+    <AppShell title="Your videos" subtitle="Everything you've made">
+      {loading && <div style={{ color: 'var(--text-3)', fontSize: 14 }}>Loading…</div>}
 
-      {loading && <p>Loading...</p>}
+      {!loading && error && (
+        <div className="banner" data-tone="failed">
+          {error}
+        </div>
+      )}
 
-      {!loading && error && <p style={{ color: 'red' }}>{error}</p>}
-
-      {!loading && !error && jobs.length === 0 && <p>You have not created any videos yet.</p>}
+      {!loading && !error && jobs.length === 0 && (
+        <div className="emptyState">
+          <span className="emptyIcon glass">
+            <IconVideos size={26} />
+          </span>
+          <h2 className="display" style={{ fontSize: 21 }}>
+            No videos yet
+          </h2>
+          <p style={{ fontSize: 14, color: 'var(--text-3)', maxWidth: 330, lineHeight: 1.55 }}>
+            Upload a clip and Cutloop sends back a few cuts ready to post.
+          </p>
+          <Link href="/jobs/new" className="btn btnAccent" style={{ marginTop: 4 }}>
+            Create your first video
+          </Link>
+        </div>
+      )}
 
       {!loading && !error && jobs.length > 0 && (
-        <ul>
+        <div className="grid">
           {jobs.map((job) => (
-            <li key={job.id}>
-              <Link href={`/jobs/${job.id}`}>
-                {job.productName} — {job.lengthSeconds}s, {job.pacing} pacing, {job.variationCount}{' '}
-                variations — {job.status}
-              </Link>
-              {/* The job succeeded, so this is advice rather than an error. */}
-              {job.warning && <p style={{ color: '#a15c00' }}>{job.warning}</p>}
-            </li>
+            <JobCard key={job.id} job={job} />
           ))}
-        </ul>
+        </div>
       )}
-    </main>
+    </AppShell>
   );
 }

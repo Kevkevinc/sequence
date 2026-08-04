@@ -1,6 +1,9 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
+import { AppShell } from '@/components/AppShell';
+import { Toast } from '@/components/ui';
+import { IconInfo } from '@/components/icons';
 
 export default function ProfilePage() {
   const [height, setHeight] = useState('');
@@ -8,8 +11,10 @@ export default function ProfilePage() {
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
-  const [saved, setSaved] = useState(false);
+  const [toast, setToast] = useState<string | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
+
+  const clearToast = useCallback(() => setToast(null), []);
 
   useEffect(() => {
     let cancelled = false;
@@ -45,7 +50,6 @@ export default function ProfilePage() {
   }, []);
 
   async function handleSave() {
-    setSaved(false);
     setSaveError(null);
     setSaving(true);
 
@@ -70,7 +74,7 @@ export default function ProfilePage() {
         return;
       }
 
-      setSaved(true);
+      setToast('Profile saved');
     } catch {
       setSaveError('Could not reach the server. Please check your connection and try again.');
     } finally {
@@ -78,40 +82,82 @@ export default function ProfilePage() {
     }
   }
 
-  if (loading) {
-    return (
-      <main>
-        <h1>Your Profile</h1>
-        <p>Loading...</p>
-      </main>
-    );
-  }
-
-  if (loadError) {
-    return (
-      <main>
-        <h1>Your Profile</h1>
-        <p style={{ color: 'red' }}>{loadError}</p>
-      </main>
-    );
-  }
-
   return (
-    <main>
-      <h1>Your Profile</h1>
-      <label>
-        Height
-        <input value={height} onChange={(e) => setHeight(e.target.value)} placeholder={'e.g. 5\'6"'} />
-      </label>
-      <label>
-        Weight
-        <input value={weight} onChange={(e) => setWeight(e.target.value)} placeholder="e.g. 135 lbs" />
-      </label>
-      <button onClick={handleSave} disabled={saving}>
-        {saving ? 'Saving...' : 'Save'}
-      </button>
-      {saved && <p>Saved.</p>}
-      {saveError && <p style={{ color: 'red' }}>{saveError}</p>}
-    </main>
+    <AppShell title="Profile" subtitle="Measurements for the sizing overlay">
+      <div style={{ maxWidth: 520 }}>
+        {loading && <div style={{ color: 'var(--text-3)', fontSize: 14 }}>Loading…</div>}
+
+        {!loading && loadError && (
+          <div className="banner" data-tone="failed">
+            {loadError}
+          </div>
+        )}
+
+        {!loading && !loadError && (
+          <>
+            <section className="glass card">
+              <div className="formSection">
+                <label className="label" htmlFor="height">
+                  Height
+                </label>
+                <input
+                  id="height"
+                  className="input"
+                  value={height}
+                  onChange={(e) => setHeight(e.target.value)}
+                  placeholder={'e.g. 5\'10"'}
+                />
+              </div>
+
+              <div className="formSection">
+                <label className="label" htmlFor="weight">
+                  Weight
+                </label>
+                <input
+                  id="weight"
+                  className="input"
+                  value={weight}
+                  onChange={(e) => setWeight(e.target.value)}
+                  placeholder="e.g. 170 lbs"
+                />
+                <p className="helper">
+                  These get burned into every video as the sizing overlay, above the size worn.
+                  Leave one blank and it is simply left off.
+                </p>
+              </div>
+
+              <div style={{ paddingTop: 22 }}>
+                <button className="btn btnAccent" onClick={handleSave} disabled={saving}>
+                  {saving ? 'Saving…' : 'Save'}
+                </button>
+              </div>
+            </section>
+
+            {saveError && (
+              <div className="banner" data-tone="failed" style={{ marginTop: 16 }}>
+                {saveError}
+              </div>
+            )}
+
+            <div
+              style={{
+                display: 'flex',
+                alignItems: 'flex-start',
+                gap: 10,
+                marginTop: 18,
+                fontSize: 13,
+                color: 'var(--text-faint)',
+                lineHeight: 1.5,
+              }}
+            >
+              <IconInfo size={16} />
+              Sign-in &amp; account are handled securely by Clerk, nothing to manage here.
+            </div>
+          </>
+        )}
+      </div>
+
+      {toast && <Toast message={toast} onDone={clearToast} />}
+    </AppShell>
   );
 }

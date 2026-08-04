@@ -1,7 +1,7 @@
 import { auth } from '@clerk/nextjs/server';
 import { createCreatorIfNotExists } from '@/db/repositories/creators';
 import { createJob, listJobsForCreator } from '@/db/repositories/jobs';
-import { getStyleById } from '@/db/repositories/styles';
+import { getStyleById, listStyles } from '@/db/repositories/styles';
 import { validateJobInput } from '@/lib/validation/job';
 import { StyleConfigSchema } from '@/lib/styles';
 
@@ -108,5 +108,17 @@ export async function GET() {
   const creator = await createCreatorIfNotExists(userId);
 
   const jobs = await listJobsForCreator(creator.id);
-  return Response.json(jobs);
+
+  // The list UI labels each job by its style ("30s · Mixed Cuts"), and jobs
+  // only store a styleId. Resolve the whole catalogue once and map, rather
+  // than a lookup per row.
+  const styles = await listStyles();
+  const styleNameById = new Map(styles.map((style) => [style.id, style.name]));
+
+  return Response.json(
+    jobs.map((job) => ({
+      ...job,
+      styleName: job.styleId ? styleNameById.get(job.styleId) ?? null : null,
+    }))
+  );
 }

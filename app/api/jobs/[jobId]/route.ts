@@ -4,6 +4,7 @@ import { db } from '@/db/client';
 import { editPlans, renders } from '@/db/schema';
 import { createCreatorIfNotExists } from '@/db/repositories/creators';
 import { getJobForCreator } from '@/db/repositories/jobs';
+import { getStyleById } from '@/db/repositories/styles';
 import { createDownloadUrl } from '@/lib/storage';
 
 type VariationResponse = {
@@ -92,12 +93,18 @@ export async function GET(request: Request, context: { params: Promise<{ jobId: 
     })
   );
 
+  // Style-mode jobs have no `pacing`; the detail header labels them by style
+  // name instead, so resolve it here rather than making the client fetch the
+  // whole catalogue just to name one job.
+  const style = job.styleId ? await getStyleById(job.styleId) : undefined;
+
   return Response.json({
     id: job.id,
     productName: job.productName,
     status: job.status,
     lengthSeconds: job.lengthSeconds,
     pacing: job.pacing,
+    styleName: style?.name ?? null,
     variationCount: job.variationCount,
     warning: job.warning,
     failureReason: job.failureReason,

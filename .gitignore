@@ -53,3 +53,6 @@ next-env.d.ts
 
 # real raw footage used for manual end-to-end testing
 /raw-videos/
+
+# Extracted from the committed design zip — derived, not source.
+/Claude Designs/extracted/
