@@ -19,6 +19,9 @@
 
   --frame-radius: 31px;
 
+  /* Every screen's content sits in one centred column of this width. */
+  --column-width: 940px;
+
   /* Liquid Glass tunables. Defaults are the values the design shipped with. */
   --glass: 0.04;
   --frost: 6px;
@@ -297,12 +300,22 @@ button {
 .topbar {
   position: relative;
   z-index: 2;
+  padding: 24px 30px;
+  border-bottom: 1px solid var(--hairline);
+}
+
+/*
+ * The divider runs the full width of the screen, but the title and the CTA
+ * sit in the same centred column as the page content below — otherwise the
+ * heading floats far to the left of the cards it belongs to.
+ */
+.topbarInner {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 20px;
-  padding: 24px 30px;
-  border-bottom: 1px solid var(--hairline);
+  max-width: var(--column-width);
+  margin: 0 auto;
 }
 
 .pageTitle {
@@ -590,23 +603,25 @@ button {
 .grid {
   display: grid;
   gap: 16px;
-  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
 }
 
-/* Home: hero card beside a fixed-width 9:16 preview. */
-.homeTop {
-  display: grid;
-  grid-template-columns: minmax(0, 1.4fr) 244px;
-  gap: 26px;
-  align-items: start;
+/*
+ * The one working column, applied by AppShell to every screen. Capping it
+ * here — rather than letting each page's cards stretch the full width of a
+ * wide monitor — is what keeps panels a sane size instead of full of dead
+ * space, and keeps the column centred rather than pinned to one edge.
+ */
+.screenInner {
+  max-width: var(--column-width);
+  margin: 0 auto;
 }
 
 /* New Video: form beside a sticky summary rail. */
 .newVideoLayout {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 336px;
-  gap: 28px;
-  max-width: 1040px;
+  grid-template-columns: minmax(0, 1fr) 320px;
+  gap: 24px;
   align-items: start;
 }
 
@@ -618,8 +633,8 @@ button {
 /* Video detail: sticky info column beside the variations grid. */
 .detailLayout {
   display: grid;
-  grid-template-columns: 352px minmax(0, 1fr);
-  gap: 28px;
+  grid-template-columns: 320px minmax(0, 1fr);
+  gap: 24px;
   align-items: start;
 }
 

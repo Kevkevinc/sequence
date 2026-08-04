@@ -27,6 +27,7 @@ type Variation = {
   status: VariationStatus;
   durationSeconds: number | null;
   playbackUrl: string | null;
+  thumbnailUrl: string | null;
   failureReason: string | null;
 };
 
@@ -310,7 +311,11 @@ function VariationCard({
 
       {variation.status === 'done' && variation.playbackUrl && (
         <>
-          <VideoTile src={variation.playbackUrl} hue={hueFor(variation.variationNumber)} />
+          <VideoTile
+            src={variation.playbackUrl}
+            poster={variation.thumbnailUrl}
+            hue={hueFor(variation.variationNumber)}
+          />
 
           {variation.hookText && (
             <p

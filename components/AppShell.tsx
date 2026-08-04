@@ -102,19 +102,28 @@ export function AppShell({
 
         <div className="main">
           <header className="topbar">
-            <div style={{ minWidth: 0 }}>
-              <h1 className="pageTitle">{title}</h1>
-              {subtitle && <div className="pageSubtitle">{subtitle}</div>}
+            <div className="topbarInner">
+              <div style={{ minWidth: 0 }}>
+                <h1 className="pageTitle">{title}</h1>
+                {subtitle && <div className="pageSubtitle">{subtitle}</div>}
+              </div>
+              {showNewVideoAction && (
+                <Link href="/jobs/new" className="btn btnAccent">
+                  <IconPlus size={17} />
+                  New video
+                </Link>
+              )}
             </div>
-            {showNewVideoAction && (
-              <Link href="/jobs/new" className="btn btnAccent">
-                <IconPlus size={17} />
-                New video
-              </Link>
-            )}
           </header>
 
-          <main className="screen">{children}</main>
+          <main className="screen">
+            {/*
+              One centred column for every screen, rather than each page
+              stretching its cards the full width of a wide monitor — which
+              is what left all that dead space inside the boxes.
+            */}
+            <div className="screenInner">{children}</div>
+          </main>
         </div>
       </div>
     </div>

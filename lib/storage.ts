@@ -133,6 +133,40 @@ export async function uploadRenderedVideo(
   }
 }
 
+/**
+ * Uploads a still frame for a render.
+ *
+ * Stored at a key *derived* from the video's own (`<key>.jpg`) rather than
+ * recorded in a column of its own: the renders table already knows the video
+ * key, so a derived key needs no migration and no extra state to keep in sync,
+ * and a render made before thumbnails existed simply has no object at that key
+ * — which the UI already treats as "fall back to the placeholder".
+ */
+export function thumbnailKeyFor(storageKey: string): string {
+  return `${storageKey}.jpg`;
+}
+
+export async function uploadRenderThumbnail(
+  localPath: string,
+  storageKey: string
+): Promise<{ success: true } | { success: false; error: string }> {
+  try {
+    const { size } = await stat(localPath);
+    await client.send(
+      new PutObjectCommand({
+        Bucket: getRequiredEnv('R2_BUCKET_NAME'),
+        Key: thumbnailKeyFor(storageKey),
+        Body: createReadStream(localPath),
+        ContentLength: size,
+        ContentType: 'image/jpeg',
+      })
+    );
+    return { success: true };
+  } catch (error) {
+    return { success: false, error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
 export async function getClipBuffer(storageKey: string): Promise<{ buffer: Buffer; contentType: string }> {
   const result = await client.send(
     new GetObjectCommand({

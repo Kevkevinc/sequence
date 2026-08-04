@@ -1,4 +1,8 @@
 import { auth } from '@clerk/nextjs/server';
+import { and, eq, inArray } from 'drizzle-orm';
+import { db } from '@/db/client';
+import { editPlans, renders } from '@/db/schema';
+import { createDownloadUrl, thumbnailKeyFor } from '@/lib/storage';
 import { createCreatorIfNotExists } from '@/db/repositories/creators';
 import { createJob, listJobsForCreator } from '@/db/repositories/jobs';
 import { getStyleById, listStyles } from '@/db/repositories/styles';
@@ -115,10 +119,49 @@ export async function GET() {
   const styles = await listStyles();
   const styleNameById = new Map(styles.map((style) => [style.id, style.name]));
 
+  // Card thumbnails are a real frame of the finished video, not a stand-in, so
+  // the list needs one playable URL per job. One query for every finished
+  // render across all of this creator's jobs, keeping the earliest variation
+  // per job, rather than a query per card.
+  const finishedByJobId = new Map<string, string>();
+  if (jobs.length > 0) {
+    const finished = await db
+      .select({ jobId: renders.jobId, storageKey: renders.storageKey })
+      .from(renders)
+      .innerJoin(editPlans, eq(renders.editPlanId, editPlans.id))
+      .where(
+        and(
+          inArray(
+            renders.jobId,
+            jobs.map((job) => job.id)
+          ),
+          eq(renders.status, 'done')
+        )
+      )
+      .orderBy(editPlans.variationNumber);
+
+    for (const row of finished) {
+      if (row.storageKey && !finishedByJobId.has(row.jobId)) {
+        finishedByJobId.set(row.jobId, row.storageKey);
+      }
+    }
+  }
+
   return Response.json(
-    jobs.map((job) => ({
-      ...job,
-      styleName: job.styleId ? styleNameById.get(job.styleId) ?? null : null,
-    }))
+    await Promise.all(
+      jobs.map(async (job) => {
+        const storageKey = finishedByJobId.get(job.id);
+        return {
+          ...job,
+          styleName: job.styleId ? styleNameById.get(job.styleId) ?? null : null,
+          // Presigning a key that may not exist is fine: renders made before
+          // thumbnails existed 404 on fetch, and the card falls back to its
+          // placeholder rather than showing a broken image.
+          thumbnailUrl: storageKey
+            ? await createDownloadUrl(thumbnailKeyFor(storageKey))
+            : null,
+        };
+      })
+    )
   );
 }

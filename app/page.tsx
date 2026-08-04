@@ -5,7 +5,6 @@ import Link from 'next/link';
 import { SignInButton, SignUpButton, useAuth } from '@clerk/nextjs';
 import { AppShell } from '@/components/AppShell';
 import { JobCard, type JobSummary } from '@/components/JobCard';
-import { VideoTile } from '@/components/ui';
 import { IconMute, IconPlus } from '@/components/icons';
 
 export default function HomePage() {
@@ -39,48 +38,40 @@ export default function HomePage() {
 
   return (
     <AppShell title="Home" subtitle="Your workspace at a glance">
-      <div style={{ maxWidth: 1000 }}>
-        <div className="homeTop">
-          <section className="glass card" style={{ display: 'flex', flexDirection: 'column' }}>
-            <div className="eyebrow">For UGC creators</div>
-            <h2 className="display" style={{ fontSize: 38, lineHeight: 1.08, marginTop: 14 }}>
-              Your footage, cut and captioned.
-            </h2>
-            <p
-              style={{
-                marginTop: 14,
-                fontSize: 15,
-                lineHeight: 1.6,
-                color: 'var(--text-2)',
-                maxWidth: 420,
-              }}
-            >
-              Upload your try-on footage. The AI picks the cuts, writes the hook, and burns it
-              in. As many variations as you want, no editing.
-            </p>
+      <div>
+        <section className="glass card">
+          <div className="eyebrow">For UGC creators</div>
+          <h2 className="display" style={{ fontSize: 38, lineHeight: 1.08, marginTop: 14 }}>
+            Your footage, cut and captioned.
+          </h2>
+          <p
+            style={{
+              marginTop: 14,
+              fontSize: 15,
+              lineHeight: 1.6,
+              color: 'var(--text-2)',
+              maxWidth: 520,
+            }}
+          >
+            Upload your try-on footage. The AI picks the cuts, writes the hook, and burns it in.
+            As many variations as you want, no editing.
+          </p>
 
-            <div style={{ display: 'flex', gap: 34, marginTop: 26 }}>
-              <Stat label="videos" value={jobs?.length ?? 0} />
-              <Stat label="ready" value={ready} />
-              <Stat label="rendering" value={rendering} tone="var(--status-rendering)" />
-            </div>
+          <div style={{ display: 'flex', gap: 40, marginTop: 26 }}>
+            <Stat label="videos" value={jobs?.length ?? 0} />
+            <Stat label="ready" value={ready} />
+            <Stat label="rendering" value={rendering} tone="var(--status-rendering)" />
+          </div>
 
-            <Link
-              href="/jobs/new"
-              className="btn btnAccent"
-              style={{ alignSelf: 'flex-start', marginTop: 26 }}
-            >
-              <IconPlus size={17} />
-              New video
-            </Link>
-          </section>
-
-          <VideoTile
-            hue={268}
-            hook="pov: you found the hoodie that goes with everything"
-            sizing={{ sizeWorn: 'M' }}
-          />
-        </div>
+          <Link
+            href="/jobs/new"
+            className="btn btnAccent"
+            style={{ display: 'inline-flex', marginTop: 26 }}
+          >
+            <IconPlus size={17} />
+            New video
+          </Link>
+        </section>
 
         <div
           style={{

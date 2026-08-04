@@ -6,12 +6,17 @@ import { z } from 'zod';
 import { inArray, eq } from 'drizzle-orm';
 import { db } from '@/db/client';
 import { editPlans, rawClips, jobs, styles } from '@/db/schema';
-import { downloadClipToTempFile, uploadRenderedVideo, type LocalClip } from '@/lib/storage';
+import {
+  downloadClipToTempFile,
+  uploadRenderThumbnail,
+  uploadRenderedVideo,
+  type LocalClip,
+} from '@/lib/storage';
 import { getInspirationImageForJob } from '@/db/repositories/jobInspirationImages';
 import { normaliseCut } from '@/lib/render/normalise';
 import { concatCuts } from '@/lib/render/concat';
 import { overlayText } from '@/lib/render/text';
-import { probeDuration } from '@/lib/render/ffmpeg';
+import { probeDuration, runFfmpeg } from '@/lib/render/ffmpeg';
 import type { OverlayPlacement } from '@/lib/editPlan';
 import { StyleConfigSchema } from '@/lib/styles';
 
@@ -183,6 +188,28 @@ export async function renderPlan(editPlanId: string): Promise<RenderPlanResult> 
     const uploadResult = await uploadRenderedVideo(finalPath, storageKey);
     if (!uploadResult.success) {
       return { success: false, error: `Failed to upload the rendered video: ${uploadResult.error}` };
+    }
+
+    // A still frame for list thumbnails. Best effort on purpose: the video is
+    // already uploaded and watchable, so a thumbnail that fails to generate is
+    // a missing poster (the UI falls back to a placeholder), not a failed
+    // render the creator has to redo.
+    const thumbnailPath = path.join(tempDir, 'thumbnail.jpg');
+    const thumbnailResult = await runFfmpeg([
+      '-ss', '0.6',
+      '-i', finalPath,
+      '-frames:v', '1',
+      '-q:v', '4',
+      '-update', '1',
+      thumbnailPath,
+    ]);
+    if (thumbnailResult.success) {
+      const thumbUpload = await uploadRenderThumbnail(thumbnailPath, storageKey);
+      if (!thumbUpload.success) {
+        console.warn(`Render ${storageKey}: thumbnail upload failed: ${thumbUpload.error}`);
+      }
+    } else {
+      console.warn(`Render ${storageKey}: thumbnail extraction failed: ${thumbnailResult.error}`);
     }
 
     return { success: true, storageKey, durationSeconds };

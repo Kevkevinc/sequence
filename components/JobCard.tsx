@@ -12,6 +12,8 @@ export type JobSummary = {
   pacing: 'slow' | 'medium' | 'fast' | null;
   styleName?: string | null;
   variationCount: number;
+  /** A finished render to still-frame as the card thumbnail; null until one exists. */
+  thumbnailUrl?: string | null;
 };
 
 /** A job is labelled by its style when it has one, and by its pacing otherwise. */
@@ -32,6 +34,7 @@ export function JobCard({ job }: { job: JobSummary }) {
     <Link href={`/jobs/${job.id}`} className="jobCard glass">
       <div style={{ position: 'relative', width: 66, flexShrink: 0 }}>
         <VideoTile
+          poster={job.thumbnailUrl}
           hue={hueFor(job.productName.length + job.variationCount)}
           showPlay={false}
           showChrome={false}

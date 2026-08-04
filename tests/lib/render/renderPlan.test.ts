@@ -17,9 +17,10 @@ import { runFfmpeg } from '@/lib/render/ffmpeg';
  * the mocks stand in for storage, and every render step in between runs for
  * real against locally-generated fixtures, exactly like Tasks 2 and 3.
  */
-const { mockDownload, mockUpload } = vi.hoisted(() => ({
+const { mockDownload, mockUpload, mockUploadThumbnail } = vi.hoisted(() => ({
   mockDownload: vi.fn(),
   mockUpload: vi.fn(),
+  mockUploadThumbnail: vi.fn(),
 }));
 
 vi.mock('@/lib/storage', async (importOriginal) => {
@@ -28,6 +29,10 @@ vi.mock('@/lib/storage', async (importOriginal) => {
     ...actual,
     downloadClipToTempFile: mockDownload,
     uploadRenderedVideo: mockUpload,
+    // Must be mocked alongside the video upload: the thumbnail is written to
+    // R2 by the same code path, so leaving it real would put a live network
+    // call back into a suite whose whole point is that it never makes one.
+    uploadRenderThumbnail: mockUploadThumbnail,
   };
 });
 
@@ -64,6 +69,9 @@ describe('renderPlan', () => {
     durationSeconds: number;
     hookPixel: { r: number; g: number; b: number };
   }[];
+
+  /** Same measure-on-the-way-past trick as above, for the poster frame. */
+  let uploadedThumbnails: { storageKey: string; width: number; height: number }[];
 
   beforeAll(async () => {
     fixturesDir = await mkdtemp(path.join(tmpdir(), 'ugc-renderplan-fixtures-'));
@@ -104,6 +112,7 @@ describe('renderPlan', () => {
   beforeEach(async () => {
     vi.clearAllMocks();
     uploadedVideoProperties = [];
+    uploadedThumbnails = [];
 
     mockDownload.mockImplementation(async (storageKey: string) => {
       const path_ =
@@ -141,6 +150,16 @@ describe('renderPlan', () => {
         height: media.video?.height ?? 0,
         durationSeconds: await probeDuration(localPath),
         hookPixel: best,
+      });
+      return { success: true };
+    });
+
+    mockUploadThumbnail.mockImplementation(async (localPath: string, storageKey: string) => {
+      const media = await probeMedia(localPath);
+      uploadedThumbnails.push({
+        storageKey,
+        width: media.video?.width ?? 0,
+        height: media.video?.height ?? 0,
       });
       return { success: true };
     });
@@ -209,10 +228,47 @@ describe('renderPlan', () => {
       hookPixel: expect.anything(),
     });
 
+    // A real still frame goes up alongside the video, at the video's own
+    // dimensions and under the derived key the UI presigns to find it.
+    expect(mockUploadThumbnail).toHaveBeenCalledTimes(1);
+    expect(uploadedThumbnails[0]).toEqual({
+      storageKey: result.success ? result.storageKey : '',
+      width: 1080,
+      height: 1920,
+    });
+
     const planned = 4 + 4 + 4; // three 4s cuts
     expect(rendered.durationSeconds).toBeGreaterThan(planned - 1);
     expect(rendered.durationSeconds).toBeLessThan(planned + 1);
     expect(result.success && result.durationSeconds).toBeCloseTo(rendered.durationSeconds, 1);
+  }, 120_000);
+
+  it('still reports success when the thumbnail upload fails', async () => {
+    // The video is already in R2 and watchable by this point, so a thumbnail
+    // that does not make it is a missing poster the UI falls back from — not a
+    // failed render the creator has to pay for and run again.
+    mockUploadThumbnail.mockResolvedValue({ success: false, error: 'bucket unreachable' });
+
+    const [plan] = await db
+      .insert(editPlans)
+      .values({
+        jobId,
+        variationNumber: 1,
+        segments: [{ rawClipId: clipAId, startSeconds: 0, endSeconds: 4 }],
+        hookText: 'thumbnail failure is not render failure',
+        sizingOverlayText: null,
+        sizingOverlayPlacement: 'bottom-left',
+      })
+      .returning();
+
+    const result = await renderPlan(plan.id);
+
+    expect(result).toEqual({
+      success: true,
+      storageKey: expect.stringMatching(/^renders\/.+\.mp4$/),
+      durationSeconds: expect.any(Number),
+    });
+    expect(mockUpload).toHaveBeenCalledTimes(1);
   }, 120_000);
 
   it('cleans up every temp file and downloaded clip, on success', async () => {
