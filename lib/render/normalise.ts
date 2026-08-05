@@ -15,8 +15,19 @@ const FPS = 30;
  * upright, and the re-encode drops the tag so nothing rotates it twice.
  */
 const REFRAME =
-  `scale=${WIDTH}:${HEIGHT}:force_original_aspect_ratio=increase,` +
+  `scale=${WIDTH}:${HEIGHT}:force_original_aspect_ratio=increase:flags=lanczos,` +
   `crop=${WIDTH}:${HEIGHT},setsar=1,fps=${FPS}`;
+
+/**
+ * Quality of the per-cut intermediate.
+ *
+ * These parts are re-encoded once more when the hook text is burned in, so
+ * whatever they lose is baked into the delivered video. Near-transparent here
+ * (source phone footage is 25-40Mbps) keeps the second pass from compounding
+ * a first-generation loss. The files are large but live only for the length of
+ * one render, inside a temp directory that is deleted either way.
+ */
+const INTERMEDIATE_CRF = '14';
 
 /**
  * Rounds a time to the nearest frame boundary.
@@ -147,7 +158,8 @@ export async function normaliseCut(input: {
     '-filter_complex', videoChain(seconds),
     '-map', '[v]',
     '-an',
-    '-c:v', 'libx264', '-preset', 'veryfast', '-pix_fmt', 'yuv420p',
+    '-c:v', 'libx264', '-preset', 'veryfast', '-crf', INTERMEDIATE_CRF,
+    '-pix_fmt', 'yuv420p',
     input.outputPath,
   ]);
 
