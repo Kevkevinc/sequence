@@ -1,12 +1,48 @@
-import { and, eq } from 'drizzle-orm';
+import { and, eq, like, notExists, sql } from 'drizzle-orm';
 import { db } from '@/db/client';
-import { jobs, rawClips, editPlans, renders, jobStatusEnum } from '@/db/schema';
+import { jobs, rawClips, editPlans, renders, creators, jobStatusEnum } from '@/db/schema';
 import { tagClip } from '@/lib/pipeline/tagging';
 import { planJob } from '@/lib/pipeline/director';
 import { describeCause } from '@/lib/pipeline/errors';
 import { renderPlan } from '@/lib/render/renderPlan';
 
 const POLL_INTERVAL_MS = 5000;
+
+/* ------------------------------------------------------- timed logging --- */
+
+/** Wall-clock stamp, local time, so a line can be matched against what a creator saw. */
+function stamp(): string {
+  return new Date().toTimeString().slice(0, 8);
+}
+
+function log(message: string): void {
+  console.log(`[${stamp()}] ${message}`);
+}
+
+/** Seconds to one decimal — the resolution that matters for a step taking 10s-10min. */
+function since(startedAt: number): string {
+  return `${((Date.now() - startedAt) / 1000).toFixed(1)}s`;
+}
+
+/**
+ * Runs a pipeline step, printing when it starts and how long it took.
+ *
+ * Every stage is timed the same way so the log reads as a breakdown rather
+ * than as scattered progress notes -- when a job feels slow, the point is to
+ * see *which* step ate the time without instrumenting it after the fact.
+ */
+async function timed<T>(label: string, operation: () => Promise<T>): Promise<T> {
+  const startedAt = Date.now();
+  log(`  ${label}...`);
+  try {
+    const result = await operation();
+    log(`  ${label} finished in ${since(startedAt)}`);
+    return result;
+  } catch (error) {
+    log(`  ${label} FAILED after ${since(startedAt)}`);
+    throw error;
+  }
+}
 
 /**
  * How many clips may be tagged at once.
@@ -52,6 +88,21 @@ async function mapWithConcurrency<T, R>(
 type JobStatus = (typeof jobStatusEnum.enumValues)[number];
 
 /**
+ * Matches the creator row behind `creatorId` when it is a test fixture.
+ *
+ * Test creators are seeded with a `test_clerk_user...` id; no Clerk-issued id
+ * takes that form, so real work is never excluded. The escape on `_` matters:
+ * unescaped it is a single-character wildcard, which would also match a real
+ * id beginning "testX".
+ */
+function testCreatorFor(creatorId: typeof jobs.creatorId) {
+  return db
+    .select({ one: sql`1` })
+    .from(creators)
+    .where(and(eq(creators.id, creatorId), like(creators.clerkUserId, 'test\\_%')));
+}
+
+/**
  * Takes ownership of the oldest job in `fromStatus`, flipping it to `toStatus`,
  * and returns it. Returns `undefined` when there is nothing to claim.
  *
@@ -92,7 +143,13 @@ async function claimJob(
 ): Promise<{ id: string } | undefined> {
   const claimable = options.restrictToCreatorId
     ? and(eq(jobs.status, fromStatus), eq(jobs.creatorId, options.restrictToCreatorId))
-    : eq(jobs.status, fromStatus);
+    : // Production claims the queue globally, but the suite runs against this
+      // same database and seeds its own jobs. Without this exclusion a running
+      // worker races the tests for those rows and wins -- which fails a
+      // different assertion on every run, since whichever test seeded a job
+      // most recently is the one robbed. Tests scope *their* claims to a
+      // throwaway creator; this is the other half of that guard.
+      and(eq(jobs.status, fromStatus), notExists(testCreatorFor(jobs.creatorId)));
 
   const [claimed] = await db
     .update(jobs)
@@ -168,8 +225,8 @@ export async function processJob(jobId: string): Promise<void> {
       return;
     }
 
-    const tagResults = await mapWithConcurrency(clips, TAG_CONCURRENCY, (clip) =>
-      tagClip(clip.id)
+    const tagResults = await timed(`Tagging ${clips.length} clips`, () =>
+      mapWithConcurrency(clips, TAG_CONCURRENCY, (clip) => tagClip(clip.id))
     );
     const failedTags = clips
       .map((clip, index) => ({ clip, result: tagResults[index] }))
@@ -199,7 +256,7 @@ export async function processJob(jobId: string): Promise<void> {
 
     await db.update(jobs).set({ status: 'planning' }).where(eq(jobs.id, jobId));
 
-    const planResult = await planJob(jobId);
+    const planResult = await timed('Planning cuts', () => planJob(jobId));
 
     if (!planResult.success) {
       await failJob(jobId, planResult.error);
@@ -319,7 +376,11 @@ export async function renderJob(jobId: string): Promise<void> {
 
     const outcomes: RenderOutcome[] = [];
     for (const plan of plans) {
-      outcomes.push(await renderVariation(jobId, plan));
+      outcomes.push(
+        await timed(`Rendering variation ${plan.variationNumber} of ${plans.length}`, () =>
+          renderVariation(jobId, plan)
+        )
+      );
     }
 
     const succeeded = outcomes.filter((o) => o.success).length;
@@ -402,17 +463,19 @@ async function main() {
       // the `planned` queue from growing behind a steady stream of new jobs.
       const readyToRender = await claimNextPlannedJob();
       if (readyToRender) {
-        console.log(`Rendering job ${readyToRender.id}...`);
+        const startedAt = Date.now();
+        log(`RENDER STAGE  job ${readyToRender.id}`);
         await renderJob(readyToRender.id);
-        console.log(`Finished rendering job ${readyToRender.id}.`);
+        log(`RENDER STAGE  job ${readyToRender.id} done in ${since(startedAt)}\n`);
         continue;
       }
 
       const readyToTag = await claimNextPendingJob();
       if (readyToTag) {
-        console.log(`Processing job ${readyToTag.id}...`);
+        const startedAt = Date.now();
+        log(`AI STAGE      job ${readyToTag.id}`);
         await processJob(readyToTag.id);
-        console.log(`Finished job ${readyToTag.id}.`);
+        log(`AI STAGE      job ${readyToTag.id} done in ${since(startedAt)}`);
         continue;
       }
     } catch (error) {
