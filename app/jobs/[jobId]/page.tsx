@@ -27,6 +27,7 @@ type Variation = {
   status: VariationStatus;
   durationSeconds: number | null;
   playbackUrl: string | null;
+  downloadUrl: string | null;
   thumbnailUrl: string | null;
   failureReason: string | null;
 };
@@ -126,7 +127,7 @@ export default function JobDetailPage() {
     // browser treats them as separate downloads because each is a presigned
     // URL to a distinct object.
     for (const variation of doneVariations) {
-      if (variation.playbackUrl) window.open(variation.playbackUrl, '_blank');
+      if (variation.downloadUrl) window.open(variation.downloadUrl, '_blank');
     }
     setToast(`Downloading ${doneVariations.length} video${doneVariations.length === 1 ? '' : 's'}`);
   }
@@ -342,9 +343,13 @@ function VariationCard({
               : '—'}
           </div>
 
+          {/*
+            No `download` attribute: it is ignored cross-origin, and R2 is a
+            different origin. The presigned URL carries the attachment
+            disposition instead, which is what makes this work on a phone.
+          */}
           <a
-            href={variation.playbackUrl}
-            download
+            href={variation.downloadUrl ?? undefined}
             onClick={onDownloaded}
             className="btn btnGhost btnFull"
             style={{ marginTop: 12 }}

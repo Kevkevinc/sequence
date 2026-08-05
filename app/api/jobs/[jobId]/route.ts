@@ -14,6 +14,11 @@ type VariationResponse = {
   status: 'pending' | 'rendering' | 'done' | 'failed';
   durationSeconds: number | null;
   playbackUrl: string | null;
+  /**
+   * Same object as `playbackUrl`, presigned to download rather than play.
+   * Separate URL because the two need opposite Content-Dispositions.
+   */
+  downloadUrl: string | null;
   /** Still frame shown before playback, so the player isn't a black box. */
   thumbnailUrl: string | null;
   failureReason: string | null;
@@ -67,6 +72,7 @@ export async function GET(request: Request, context: { params: Promise<{ jobId: 
           status: 'pending',
           durationSeconds: null,
           playbackUrl: null,
+          downloadUrl: null,
           thumbnailUrl: null,
           failureReason: null,
         };
@@ -81,6 +87,11 @@ export async function GET(request: Request, context: { params: Promise<{ jobId: 
           // storageKey is only ever null while a render is in flight; a `done`
           // row always has one, but the column itself is nullable in the schema.
           playbackUrl: render.storageKey ? await createDownloadUrl(render.storageKey) : null,
+          downloadUrl: render.storageKey
+            ? await createDownloadUrl(render.storageKey, {
+                downloadAs: `${job.productName}-v${plan.variationNumber}`,
+              })
+            : null,
           // Presigning a key that may not exist is fine: renders made before
           // thumbnails existed 404 on fetch and the player falls back to its
           // own black first frame, exactly as it behaved before.
@@ -97,6 +108,7 @@ export async function GET(request: Request, context: { params: Promise<{ jobId: 
         status: render.status,
         durationSeconds: null,
         playbackUrl: null,
+        downloadUrl: null,
         thumbnailUrl: null,
         failureReason: render.status === 'failed' ? render.failureReason : null,
       };

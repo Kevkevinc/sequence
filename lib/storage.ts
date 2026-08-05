@@ -37,10 +37,46 @@ export async function createUploadUrl(originalFilename: string, contentType: str
  * scrub through several variations without the link expiring mid-session,
  * short enough that a leaked or logged URL is worthless soon after.
  */
-export async function createDownloadUrl(storageKey: string, expiresIn = 3600): Promise<string> {
+/**
+ * Reduces a product name to something safe for a Content-Disposition header:
+ * ASCII only, no quotes, no path separators. Anything else risks a malformed
+ * header or a filename the OS refuses to write.
+ */
+function safeFilename(name: string): string {
+  const base = name
+    .normalize('NFKD')
+    .replace(/[^\x20-\x7E]/g, '')
+    .replace(/[^a-zA-Z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 60)
+    .toLowerCase();
+  return base || 'video';
+}
+
+/**
+ * Presigns a GET for an object.
+ *
+ * `downloadAs` makes the response an attachment rather than something the
+ * browser plays inline. It has to come from the URL itself: the page's
+ * download links point at R2, which is a different origin, and the HTML
+ * `download` attribute is *ignored cross-origin* — so without this the browser
+ * simply navigates to the video. On a phone that means it opens in a player
+ * with no way to save it, which is why downloads only ever worked on desktop.
+ *
+ * Left off for playback and thumbnails, which must stay inline for `<video>`
+ * and `<img>` to render them.
+ */
+export async function createDownloadUrl(
+  storageKey: string,
+  options: { expiresIn?: number; downloadAs?: string } = {}
+): Promise<string> {
+  const { expiresIn = 3600, downloadAs } = options;
   const command = new GetObjectCommand({
     Bucket: getRequiredEnv('R2_BUCKET_NAME'),
     Key: storageKey,
+    ...(downloadAs
+      ? { ResponseContentDisposition: `attachment; filename="${safeFilename(downloadAs)}.mp4"` }
+      : {}),
   });
   return getSignedUrl(client, command, { expiresIn });
 }
