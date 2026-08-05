@@ -98,7 +98,8 @@ export function AppShell({
                 data-active={isActive(href, pathname)}
               >
                 <Icon size={19} />
-                {label}
+                {/* Wrapped so narrow phones can drop to an icon-only bar. */}
+                <span className="navLabel">{label}</span>
               </Link>
             ))}
           </nav>
@@ -112,6 +113,10 @@ export function AppShell({
               Every export is muted by default. Add your voiceover after.
             </p>
           </div>
+
+          {/* Which build a tester is actually running — the first thing worth
+              knowing when a bug report and the current code disagree. */}
+          <div className="versionTag">v{process.env.NEXT_PUBLIC_APP_VERSION}</div>
 
           <div className="userChip">
             <UserButton

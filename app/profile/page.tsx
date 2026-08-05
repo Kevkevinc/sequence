@@ -153,6 +153,22 @@ export default function ProfilePage() {
               <IconInfo size={16} />
               Sign-in &amp; account are handled securely by Clerk, nothing to manage here.
             </div>
+
+            {/* Repeated here because the sidebar's version tag is hidden on
+                phones, and a tester on a phone is exactly who gets asked
+                "what version are you on?". */}
+            <div
+              style={{
+                marginTop: 14,
+                textAlign: 'center',
+                fontFamily: 'var(--font-space-mono), ui-monospace, monospace',
+                fontSize: 11,
+                letterSpacing: '0.08em',
+                color: 'var(--text-faint)',
+              }}
+            >
+              Cutloop v{process.env.NEXT_PUBLIC_APP_VERSION}
+            </div>
           </>
         )}
       </div>

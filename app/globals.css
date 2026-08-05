@@ -1237,17 +1237,223 @@ button {
   }
 }
 
+/* ------------------------------------------------------------- mobile --- */
+
+/*
+ * Phones are the primary device here: creators shoot, upload and download on
+ * the same phone. The desktop layout is a fixed 246px rail beside a centred
+ * column, which at 390px wide leaves nothing for content -- so below this
+ * breakpoint the rail becomes a horizontal bar and every fixed width is
+ * released.
+ */
 @media (max-width: 900px) {
-  .appFrameInner {
-    grid-template-columns: 1fr;
+  /*
+   * Full-bleed: the rounded inset frame is a nice desktop affordance and pure
+   * waste on a phone, where it steals ~36px of a 390px screen.
+   */
+  .appFrame {
+    padding: 0;
+    /* dvh, not vh: vh counts the space *under* mobile browser chrome, so the
+       bottom of the page sits behind the address bar. */
+    height: 100dvh;
   }
 
+  .appFrameInner {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto minmax(0, 1fr);
+    border-radius: 0;
+    border-left: none;
+    border-right: none;
+  }
+
+  /* The rail becomes a single scrollable strip along the top. */
   .sidebar {
+    flex-direction: row;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 12px;
     border-right: none;
     border-bottom: 1px solid var(--hairline);
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+  .sidebar::-webkit-scrollbar {
+    display: none;
+  }
+
+  .brand {
+    padding: 0;
+    flex-shrink: 0;
+  }
+  /* Mark only -- the wordmark is the first thing worth losing for space. */
+  .brandName,
+  .brandSub {
+    display: none;
+  }
+
+  .nav {
+    flex-direction: row;
+    gap: 6px;
+  }
+  .navItem {
+    width: auto;
+    white-space: nowrap;
+    padding: 10px 12px;
+  }
+
+  /* Informational, and the largest single block in the rail. */
+  .silentCallout {
+    display: none;
   }
 
   .userChip {
     margin-top: 0;
+    margin-left: auto;
+    padding: 4px;
+    border: none;
+    background: transparent;
+    flex-shrink: 0;
   }
+  /* Avatar only; the name is already the account you are signed into. */
+  .userName,
+  .userRole {
+    display: none;
+  }
+
+  .topbar {
+    padding: 16px 16px;
+  }
+  .screen {
+    padding: 18px 16px 40px;
+  }
+
+  /* The centred column is the whole width now. */
+  .screenInner,
+  .topbarInner {
+    max-width: none;
+  }
+
+  .pageTitle {
+    font-size: 25px;
+  }
+
+  /* One card per row rather than a 280px minimum that forces a sideways
+     scroll on a 360px screen. */
+  .grid,
+  .variationGrid {
+    grid-template-columns: 1fr;
+  }
+
+  /* Comfortable thumb targets. */
+  .btn {
+    min-height: 46px;
+  }
+  .segmented {
+    flex-wrap: wrap;
+  }
+
+  .dropzone {
+    padding: 26px 16px;
+  }
+}
+
+/* Never let the page itself scroll sideways; wide content scrolls its own box. */
+@media (max-width: 900px) {
+  body {
+    overflow-x: hidden;
+  }
+}
+
+/*
+ * Phone-width: the four labelled nav items need ~620px, so on a 390-430px
+ * screen the last two start off the edge of a scrolling strip -- a nav you
+ * cannot see is a nav you will not use. Icons alone fit with room to spare.
+ */
+@media (max-width: 560px) {
+  .navLabel {
+    /* Not display:none -- assistive tech should still read the label. */
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+
+  .navItem {
+    justify-content: center;
+    padding: 11px 14px;
+  }
+
+  .nav {
+    gap: 4px;
+  }
+}
+
+/* ------------------------------------------------------------- version --- */
+
+.versionTag {
+  margin-top: auto;
+  padding: 0 6px 8px;
+  font-family: var(--font-space-mono), ui-monospace, monospace;
+  font-size: 10.5px;
+  letter-spacing: 0.08em;
+  color: var(--text-faint);
+}
+
+/* The user chip owns `margin-top: auto` on desktop; with the version tag above
+   it, the tag pushes instead and the chip sits directly beneath it. */
+.versionTag + .userChip {
+  margin-top: 0;
+}
+
+@media (max-width: 900px) {
+  /* No room in the horizontal strip; the Profile screen carries it instead. */
+  .versionTag {
+    display: none;
+  }
+}
+
+/* ------------------------------------------------------- live status --- */
+
+.liveStatus {
+  padding: 14px 16px;
+}
+
+.liveStatusTop {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 14.5px;
+}
+
+.liveClock {
+  margin-left: auto;
+  font-family: var(--font-space-mono), ui-monospace, monospace;
+  font-size: 12px;
+  color: var(--text-3);
+}
+
+.liveStatusDetail {
+  margin-top: 7px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text-3);
+}
+
+/* ------------------------------------------------------------ progress --- */
+
+.progressTrack {
+  height: 8px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.09);
+  overflow: hidden;
+}
+
+.progressFill {
+  height: 100%;
+  border-radius: 999px;
+  background: var(--accent);
+  /* Eases the jumps between XHR progress events, which arrive in chunks. */
+  transition: width 0.25s ease;
 }

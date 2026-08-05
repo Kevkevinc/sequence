@@ -1,5 +1,5 @@
 import { ClerkProvider } from '@clerk/nextjs';
-import type { Metadata } from 'next';
+import type { Metadata, Viewport } from 'next';
 import { Bricolage_Grotesque, Manrope, Space_Mono } from 'next/font/google';
 import { LiquidGlassDefs } from '@/components/LiquidGlassDefs';
 import './globals.css';
@@ -25,6 +25,20 @@ const spaceMono = Space_Mono({
 export const metadata: Metadata = {
   title: 'Cutloop — UGC AI Editor',
   description: 'Upload your raw footage. The AI picks the cuts, writes the hook, and burns it in.',
+};
+
+/**
+ * Stated explicitly rather than relying on the framework default, because two
+ * of these are not the default: `viewportFit: 'cover'` lets the dark frame run
+ * under a notched phone's rounded corners, and `maximumScale` is deliberately
+ * left unset so pinch-zoom still works — creators check burned-in caption
+ * placement by zooming in on the preview.
+ */
+export const viewport: Viewport = {
+  width: 'device-width',
+  initialScale: 1,
+  viewportFit: 'cover',
+  themeColor: '#0a0b10',
 };
 
 export default function RootLayout({

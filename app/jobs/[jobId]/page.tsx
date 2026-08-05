@@ -60,15 +60,41 @@ function stillInProgress(job: JobDetail): boolean {
   return job.status !== 'done' && job.status !== 'failed';
 }
 
-/** The pipeline the worker actually walks, in order. */
-const PIPELINE: { status: JobStatus; label: string }[] = [
-  { status: 'pending', label: 'Queued' },
-  { status: 'tagging', label: 'Tagging clips' },
-  { status: 'planning', label: 'Planning cuts' },
-  { status: 'planned', label: 'Planned' },
-  { status: 'rendering', label: 'Rendering' },
-  { status: 'done', label: 'Done' },
+/**
+ * The pipeline the worker actually walks, in order, with a plain-language note
+ * about what is happening and roughly how long it takes.
+ *
+ * The waits here are minutes, not seconds — tagging alone measures ~2.5min on
+ * real phone footage. Without saying so, a creator watching a spinner assumes
+ * it has hung and reloads or gives up.
+ */
+const PIPELINE: { status: JobStatus; label: string; detail: string }[] = [
+  { status: 'pending', label: 'Queued', detail: 'Waiting for a free slot.' },
+  {
+    status: 'tagging',
+    label: 'Tagging clips',
+    detail: 'The AI is watching your footage to find the usable moments. Usually 2-3 minutes.',
+  },
+  {
+    status: 'planning',
+    label: 'Planning cuts',
+    detail: 'Choosing the cuts and writing the hooks. Around 10 seconds.',
+  },
+  { status: 'planned', label: 'Planned', detail: 'Cuts decided, about to render.' },
+  {
+    status: 'rendering',
+    label: 'Rendering',
+    detail: 'Cutting and exporting each video at full quality. Roughly 1.5 minutes each.',
+  },
+  { status: 'done', label: 'Done', detail: 'All videos ready to download.' },
 ];
+
+/** Elapsed time in a shape a person reads at a glance: "4m 12s", not "252s". */
+function formatElapsed(fromIso: string, now: number): string {
+  const seconds = Math.max(0, Math.floor((now - new Date(fromIso).getTime()) / 1000));
+  const minutes = Math.floor(seconds / 60);
+  return minutes > 0 ? `${minutes}m ${seconds % 60}s` : `${seconds}s`;
+}
 
 export default function JobDetailPage() {
   const params = useParams<{ jobId: string }>();
@@ -193,6 +219,12 @@ export default function JobDetailPage() {
               </div>
             )}
 
+            {stillInProgress(job) && (
+              <div style={{ marginTop: 18 }}>
+                <LiveStatus job={job} />
+              </div>
+            )}
+
             <div style={{ marginTop: 24 }}>
               <Pipeline job={job} />
             </div>
@@ -244,6 +276,58 @@ export default function JobDetailPage() {
   );
 }
 
+/**
+ * The one-line answer to "is this thing still working?".
+ *
+ * The pipeline below shows *where* a job is; this shows that it is still
+ * moving, with a running clock and a count of finished videos. Renders now
+ * take ~1.5 minutes each, so a five-variation job runs for the better part of
+ * ten minutes — long enough that silence reads as a crash.
+ */
+function LiveStatus({ job }: { job: JobDetail }) {
+  const [now, setNow] = useState(() => Date.now());
+
+  useEffect(() => {
+    // Ticks independently of the 5s data poll so the clock moves every second.
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, []);
+
+  const ready = job.variations.filter((v) => v.status === 'done').length;
+  const rendering = job.variations.find((v) => v.status === 'rendering');
+  const step = PIPELINE.find((s) => s.status === job.status);
+
+  const headline =
+    job.status === 'rendering' && rendering
+      ? `Rendering video ${rendering.variationNumber} of ${job.variationCount}`
+      : (step?.label ?? 'Working');
+
+  return (
+    <div className="glass card liveStatus">
+      <div className="liveStatusTop">
+        <span className="spinner" style={{ width: 16, height: 16 }} />
+        <strong>{headline}</strong>
+        <span className="liveClock">{formatElapsed(job.createdAt, now)}</span>
+      </div>
+      <p className="liveStatusDetail">{step?.detail}</p>
+      {job.variationCount > 0 && (
+        <div style={{ marginTop: 10 }}>
+          <div className="progressTrack">
+            <div
+              className="progressFill"
+              style={{ width: `${Math.round((ready / job.variationCount) * 100)}%` }}
+            />
+          </div>
+          <p className="helper" style={{ marginTop: 6 }}>
+            {ready} of {job.variationCount} videos ready
+            {ready > 0 ? ' — you can download the finished ones now' : ''}
+          </p>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function Pipeline({ job }: { job: JobDetail }) {
   const currentIndex = PIPELINE.findIndex((step) => step.status === job.status);
 
@@ -274,7 +358,9 @@ function Pipeline({ job }: { job: JobDetail }) {
             </div>
             <div className="pipeLabel">
               {step.label}
-              {state === 'active' && <div className="pipeNote">in progress</div>}
+              {/* The explanation only appears on the step that is actually
+                  running — showing all six at once is a wall of text. */}
+              {state === 'active' && <div className="pipeNote">{step.detail}</div>}
             </div>
           </div>
         );

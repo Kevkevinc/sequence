@@ -32,6 +32,10 @@ export default function NewJobPage() {
   const [variationCount, setVariationCount] = useState(5);
   const [errors, setErrors] = useState<{ field: string; message: string }[]>([]);
   const [submitting, setSubmitting] = useState(false);
+  /** Drives the upload progress bar: which stage, and how far through the bytes. */
+  const [phase, setPhase] = useState<'idle' | 'uploading' | 'creating'>('idle');
+  const [uploadedBytes, setUploadedBytes] = useState(0);
+  const [totalUploadBytes, setTotalUploadBytes] = useState(0);
 
   // The preview rail shows the sizing overlay exactly as the renderer will
   // build it, which means it needs the creator's stored measurements.
@@ -54,7 +58,43 @@ export default function NewJobPage() {
   const selectedStyle = styles.find((s) => s.id === selectedStyleId) ?? null;
   const errorFor = (field: string) => errors.find((e) => e.field === field)?.message;
 
-  async function uploadFile(file: File): Promise<{ storageKey: string; originalFilename: string }> {
+  const uploadPercent =
+    totalUploadBytes > 0 ? Math.min(100, Math.round((uploadedBytes / totalUploadBytes) * 100)) : 0;
+  const formatMb = (bytes: number) => Math.round(bytes / 1e6);
+
+  /**
+   * PUTs one file to R2, reporting bytes as they go.
+   *
+   * XMLHttpRequest rather than fetch: fetch cannot report *upload* progress at
+   * all, which is why this screen used to sit silent for minutes on a phone
+   * while 100MB+ of 4K footage went up with no sign it was working.
+   */
+  function putWithProgress(
+    url: string,
+    file: File,
+    onProgress: (bytesSent: number) => void
+  ): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open('PUT', url);
+      xhr.setRequestHeader('Content-Type', file.type);
+      xhr.upload.onprogress = (event) => {
+        if (event.lengthComputable) onProgress(event.loaded);
+      };
+      xhr.onload = () =>
+        xhr.status >= 200 && xhr.status < 300
+          ? resolve()
+          : reject(new Error(`Upload of "${file.name}" failed (${xhr.status}).`));
+      xhr.onerror = () => reject(new Error(`Upload of "${file.name}" failed. Check your connection.`));
+      xhr.onabort = () => reject(new Error(`Upload of "${file.name}" was cancelled.`));
+      xhr.send(file);
+    });
+  }
+
+  async function uploadFile(
+    file: File,
+    onProgress: (bytesSent: number) => void = () => {}
+  ): Promise<{ storageKey: string; originalFilename: string }> {
     const presignRes = await fetch('/api/uploads/presign', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -65,33 +105,64 @@ export default function NewJobPage() {
     }
     const { url, storageKey } = await presignRes.json();
 
-    const uploadRes = await fetch(url, {
-      method: 'PUT',
-      body: file,
-      headers: { 'Content-Type': file.type },
-    });
-    if (!uploadRes.ok) {
-      throw new Error(`Failed to upload "${file.name}". Please try again.`);
-    }
+    await putWithProgress(url, file, onProgress);
 
     return { storageKey, originalFilename: file.name };
+  }
+
+  /**
+   * Uploads with a ceiling on how many are in flight.
+   *
+   * Was strictly sequential, so three 130MB clips went up one after another on
+   * a phone connection. Two at a time keeps the pipe busy while the request
+   * bodies stay small enough not to stall a mobile uplink.
+   */
+  async function uploadAll(
+    toUpload: File[],
+    onProgress: (bytesSentPerFile: number[]) => void
+  ): Promise<{ storageKey: string; originalFilename: string }[]> {
+    const sent = new Array(toUpload.length).fill(0);
+    const results = new Array<{ storageKey: string; originalFilename: string }>(toUpload.length);
+    let next = 0;
+
+    const workers = Array.from({ length: Math.min(2, toUpload.length) }, async () => {
+      for (let index = next++; index < toUpload.length; index = next++) {
+        results[index] = await uploadFile(toUpload[index], (bytes) => {
+          sent[index] = bytes;
+          onProgress([...sent]);
+        });
+        sent[index] = toUpload[index].size;
+        onProgress([...sent]);
+      }
+    });
+
+    await Promise.all(workers);
+    return results;
   }
 
   async function handleSubmit() {
     setSubmitting(true);
     setErrors([]);
 
+    // Inspiration photos are tiny next to video; counting them would make the
+    // bar jump. They upload after, under the same "uploading" state.
+    const totalBytes = files.reduce((sum, file) => sum + file.size, 0);
+    setUploadedBytes(0);
+    setTotalUploadBytes(totalBytes);
+    setPhase('uploading');
+
     try {
-      const clips = [];
-      for (const file of files) {
-        clips.push(await uploadFile(file));
-      }
+      const clips = await uploadAll(files, (perFile) =>
+        setUploadedBytes(perFile.reduce((a, b) => a + b, 0))
+      );
 
       let inspirationImage: { storageKey: string } | undefined;
       if (mode === 'style' && selectedStyle?.usesInspirationOverlay && inspirationFile) {
         const uploaded = await uploadFile(inspirationFile);
         inspirationImage = { storageKey: uploaded.storageKey };
       }
+
+      setPhase('creating');
 
       const res = await fetch('/api/jobs', {
         method: 'POST',
@@ -113,6 +184,7 @@ export default function NewJobPage() {
         const body = await res.json();
         setErrors(body.errors ?? [{ field: 'form', message: 'Something went wrong.' }]);
         setSubmitting(false);
+        setPhase('idle');
         return;
       }
 
@@ -123,6 +195,7 @@ export default function NewJobPage() {
         { field: 'form', message: err instanceof Error ? err.message : 'Something went wrong.' },
       ]);
       setSubmitting(false);
+      setPhase('idle');
     }
   }
 
@@ -413,11 +486,34 @@ export default function NewJobPage() {
               onClick={handleSubmit}
               disabled={submitting}
             >
-              {submitting ? 'Creating…' : 'Generate videos'}
+              {phase === 'uploading'
+                ? `Uploading… ${uploadPercent}%`
+                : phase === 'creating'
+                  ? 'Starting…'
+                  : 'Generate videos'}
             </button>
 
+            {phase === 'uploading' && (
+              /*
+               * Phone footage is 100MB+ per clip, so this runs for minutes on a
+               * mobile uplink. Showing real bytes is the difference between
+               * "it's working" and "it's frozen".
+               */
+              <div style={{ marginTop: 12 }}>
+                <div className="progressTrack">
+                  <div className="progressFill" style={{ width: `${uploadPercent}%` }} />
+                </div>
+                <p className="helper" style={{ textAlign: 'center', marginTop: 6 }}>
+                  {formatMb(uploadedBytes)} of {formatMb(totalUploadBytes)} MB
+                  {files.length > 1 ? ` · ${files.length} clips` : ''}
+                </p>
+              </div>
+            )}
+
             <p className="helper" style={{ textAlign: 'center' }}>
-              Renders in the background. You&apos;ll see live progress.
+              {phase === 'uploading'
+                ? 'Keep this tab open until the upload finishes.'
+                : "Renders in the background. You'll see live progress."}
             </p>
           </div>
         </aside>
