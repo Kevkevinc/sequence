@@ -83,11 +83,28 @@ const BUILT_IN_STYLES: { name: string; description: string; config: StyleConfig 
   },
 ];
 
-/** Idempotent: safe to run against a fresh database or one that already has these rows. */
+/**
+ * Idempotent: safe to run against a fresh database or one that already has
+ * these rows.
+ *
+ * Existing built-ins are *updated* rather than skipped. This file is the source
+ * of truth for their cut bands and hook libraries, and skipping meant editing a
+ * band here changed nothing: the row kept whatever it was first seeded with,
+ * silently, so a retuned preset only applied on a database that had never been
+ * seeded. Matched on name, which is what `styles.name` uniquely identifies a
+ * built-in by; creator-authored styles are never touched because none of them
+ * carry these names.
+ */
 export async function seedBuiltInStyles(): Promise<void> {
   for (const style of BUILT_IN_STYLES) {
     const existing = await db.query.styles.findFirst({ where: eq(styles.name, style.name) });
-    if (existing) continue;
+    if (existing) {
+      await db
+        .update(styles)
+        .set({ description: style.description, config: style.config })
+        .where(eq(styles.id, existing.id));
+      continue;
+    }
     await db.insert(styles).values(style);
   }
 }
