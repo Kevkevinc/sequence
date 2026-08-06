@@ -43,7 +43,7 @@ export async function getCreatorByClerkId(clerkUserId: string) {
 
 export async function updateCreatorProfile(
   clerkUserId: string,
-  data: { height?: string; weight?: string }
+  data: { height?: string; weight?: string; audience?: 'mens' | 'womens' | 'any' }
 ) {
   const [updated] = await db
     .update(creators)

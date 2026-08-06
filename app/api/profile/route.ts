@@ -16,9 +16,14 @@ export async function PATCH(req: Request) {
   const body = await req.json();
 
   // Validate that at least one field is provided
-  if (body.height === undefined && body.weight === undefined) {
+  const AUDIENCES = ['mens', 'womens', 'any'];
+  if (body.audience !== undefined && !AUDIENCES.includes(body.audience)) {
+    return Response.json({ error: 'Audience must be mens, womens, or any.' }, { status: 400 });
+  }
+
+  if (body.height === undefined && body.weight === undefined && body.audience === undefined) {
     return Response.json(
-      { error: 'At least one of height or weight is required.' },
+      { error: 'At least one of height, weight or audience is required.' },
       { status: 400 }
     );
   }
@@ -30,6 +35,7 @@ export async function PATCH(req: Request) {
   const updated = await updateCreatorProfile(userId, {
     height: body.height,
     weight: body.weight,
+    audience: body.audience,
   });
 
   // Return 404 if no creator exists for this user

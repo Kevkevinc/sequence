@@ -5,9 +5,21 @@ import { AppShell } from '@/components/AppShell';
 import { Toast } from '@/components/ui';
 import { IconInfo } from '@/components/icons';
 
+/**
+ * "Either" rather than "Neutral": the creator is choosing who they make for,
+ * and the honest default is that we have not been told — which yields the
+ * neutral hooks, since a mismatched register is worse than a plain one.
+ */
+const AUDIENCES = [
+  { value: 'mens', label: "Men's" },
+  { value: 'womens', label: "Women's" },
+  { value: 'any', label: 'Either' },
+] as const;
+
 export default function ProfilePage() {
   const [height, setHeight] = useState('');
   const [weight, setWeight] = useState('');
+  const [audience, setAudience] = useState<'mens' | 'womens' | 'any'>('any');
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
@@ -33,6 +45,7 @@ export default function ProfilePage() {
         if (!cancelled) {
           setHeight(data?.height ?? '');
           setWeight(data?.weight ?? '');
+          setAudience(data?.audience ?? 'any');
         }
       } catch (err) {
         if (!cancelled) {
@@ -57,7 +70,7 @@ export default function ProfilePage() {
       const res = await fetch('/api/profile', {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ height, weight }),
+        body: JSON.stringify({ height, weight, audience }),
       });
 
       if (!res.ok) {
@@ -123,6 +136,28 @@ export default function ProfilePage() {
                 <p className="helper">
                   These get burned into every video as the sizing overlay, above the size worn.
                   Leave one blank and it is simply left off.
+                </p>
+              </div>
+
+              <div className="formSection">
+                <span className="label">Who you make content for</span>
+                <div className="segmented">
+                  {AUDIENCES.map((option) => (
+                    <button
+                      key={option.value}
+                      type="button"
+                      className="segment"
+                      data-active={audience === option.value}
+                      onClick={() => setAudience(option.value)}
+                    >
+                      {option.label}
+                    </button>
+                  ))}
+                </div>
+                <p className="helper">
+                  Sets the wording of the hook the AI writes on screen — lines like
+                  &ldquo;obsessed.&rdquo; read as women&apos;s content and sound off on a menswear
+                  video. Not sure? Leave it on Either and you only get neutral lines.
                 </p>
               </div>
 

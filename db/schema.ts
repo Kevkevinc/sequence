@@ -13,6 +13,14 @@ export const renderStatusEnum = pgEnum('render_status', ['rendering', 'done', 'f
  */
 export const creatorCohortEnum = pgEnum('creator_cohort', ['beta', 'public']);
 
+/**
+ * Who the creator makes content for, used to pick the register of the burned-in
+ * hook. `any` is the honest default: a neutral line never sounds wrong, and
+ * guessing produces a menswear creator captioned in women's-content cadence,
+ * which is the mismatch this exists to prevent.
+ */
+export const creatorAudienceEnum = pgEnum('creator_audience', ['mens', 'womens', 'any']);
+
 export const creators = pgTable('creators', {
   id: uuid('id').primaryKey().defaultRandom(),
   clerkUserId: text('clerk_user_id').notNull().unique(),
@@ -26,6 +34,7 @@ export const creators = pgTable('creators', {
    * with everyone already labelled keeping their label.
    */
   cohort: creatorCohortEnum('cohort').notNull().default('beta'),
+  audience: creatorAudienceEnum('audience').notNull().default('any'),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 });
 

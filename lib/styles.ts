@@ -13,7 +13,19 @@ export const StyleConfigSchema = z.object({
   cutMinSeconds: z.number().positive(),
   cutMaxSeconds: z.number().positive(),
   /** Replaces the global HOOK_STYLE_LIBRARY for jobs using this style. */
-  hookStyleLibrary: z.array(z.string()).min(1),
+  /*
+   * Either bare strings or `{text, audience}` entries. The union keeps rows
+   * seeded before hooks carried an audience readable — an untagged string is
+   * treated as `any`, which is what it effectively was.
+   */
+  hookStyleLibrary: z
+    .array(
+      z.union([
+        z.string(),
+        z.object({ text: z.string(), audience: z.enum(['mens', 'womens', 'any']) }),
+      ])
+    )
+    .min(1),
   /** Hex color for hook/sizing text. Unset = today's default (white fill, black outline). */
   textColor: z.string().optional(),
   /** Pins sizing text to one corner for every variation of this style, instead of letting the director pick freely. */

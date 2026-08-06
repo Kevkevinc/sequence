@@ -7,7 +7,7 @@ import { OVERLAY_PLACEMENTS } from '@/lib/editPlan';
 import { getEnvWithDefault } from '@/lib/env';
 import { getGeminiClient } from '@/lib/gemini/client';
 import { StyleConfigSchema, type StyleConfig } from '@/lib/styles';
-import { HOOK_STYLE_LIBRARY } from '@/lib/pipeline/hookLibrary';
+import { hooksForAudience, type HookAudience } from '@/lib/pipeline/hookLibrary';
 import { describeCause, MAX_CAUSE_LENGTH } from '@/lib/pipeline/errors';
 import { withTransientRetry, type TransientRetryOptions } from '@/lib/pipeline/retry';
 
@@ -378,13 +378,14 @@ type EffectivePreset = {
  */
 function resolvePreset(
   job: Job,
-  style: { name: string; config: StyleConfig } | undefined
+  style: { name: string; config: StyleConfig } | undefined,
+  audience: HookAudience
 ): EffectivePreset {
   if (style) {
     return {
       ideal: { min: style.config.cutMinSeconds, max: style.config.cutMaxSeconds },
       label: `the "${style.name}" style`,
-      hookStyleLibrary: style.config.hookStyleLibrary,
+      hookStyleLibrary: hooksForCreator(style.config.hookStyleLibrary, audience),
       sizingPlacementOverride: style.config.sizingPlacement ?? null,
       variesClipOrder: style.config.variesClipOrder,
     };
@@ -392,10 +393,33 @@ function resolvePreset(
   return {
     ideal: PACING_PRESET_SECONDS[job.pacing!],
     label: `"${job.pacing}" pacing`,
-    hookStyleLibrary: HOOK_STYLE_LIBRARY,
+    hookStyleLibrary: hooksForAudience(audience),
     sizingPlacementOverride: null,
     variesClipOrder: false,
   };
+}
+
+/**
+ * Narrows a style's hook library to the lines that suit this creator's
+ * audience.
+ *
+ * A bare string is an untagged legacy entry and counts as neutral. If filtering
+ * would leave nothing — a style whose whole library is coded for the other
+ * audience — the full library is used rather than handing the director an empty
+ * list, since a mismatched register still beats no reference at all.
+ */
+function hooksForCreator(
+  library: StyleConfig['hookStyleLibrary'],
+  audience: HookAudience
+): string[] {
+  const all = library.map((entry) => (typeof entry === 'string' ? entry : entry.text));
+  const suited = library
+    .filter(
+      (entry) =>
+        typeof entry === 'string' || entry.audience === 'any' || entry.audience === audience
+    )
+    .map((entry) => (typeof entry === 'string' ? entry : entry.text));
+  return suited.length > 0 ? suited : all;
 }
 
 /**
@@ -1337,7 +1361,8 @@ export async function planJob(
 
     // The per-cut length the job's preset asks for, used to build the prompt,
     // to validate the response, and to judge what the pool can reach.
-    const preset = resolvePreset(job, resolvedStyle);
+    // The creator's audience picks the register of the hook, not its topic.
+    const preset = resolvePreset(job, resolvedStyle, creator.audience);
     const band = bandForPreset(preset.ideal);
 
     // Established before the model is asked for anything: whether the creator's

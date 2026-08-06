@@ -43,6 +43,13 @@
       "when": 1785877031261,
       "tag": "0005_chemical_vampiro",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1786000685152,
+      "tag": "0006_short_aaron_stack",
+      "breakpoints": true
     }
   ]
 }

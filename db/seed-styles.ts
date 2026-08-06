@@ -39,17 +39,30 @@ const BUILT_IN_STYLES: { name: string; description: string; config: StyleConfig 
       // per creator direction, this register consistently outperforms
       // obvious hooks like "you need this" because it blends into organic
       // TikTok content instead of reading as sponsored.
+      //
+      // Tagged by the audience each line's *register* sounds native to, not by
+      // the product. Per creator direction, a menswear creator captioned in
+      // women's-content cadence ("obsessed.", "these kinda ate") reads as
+      // someone else's script — so those lines are kept for the creators they
+      // fit rather than deleted, and a creator who has not set an audience is
+      // only ever offered the neutral ones.
       hookStyleLibrary: [
-        'okay these kinda ate',
-        "wasn't expecting this quality",
-        'the fit is actually crazy',
-        'why does this feel so expensive',
-        "i'm keeping this",
-        'one of the best pickups this year',
-        'never taking this off',
-        'obsessed.',
-        'this is your sign',
-        'not me buying another one',
+        { text: "wasn't expecting this quality", audience: 'any' },
+        { text: 'why does this feel so expensive', audience: 'any' },
+        { text: "i'm keeping this", audience: 'any' },
+        { text: 'never taking this off', audience: 'any' },
+        { text: 'this is actually worth it', audience: 'any' },
+
+        { text: 'the fit is actually crazy', audience: 'mens' },
+        { text: 'one of the best pickups this year', audience: 'mens' },
+        { text: 'been wearing this nonstop', audience: 'mens' },
+        { text: 'this is actually solid', audience: 'mens' },
+        { text: 'quality is not what i expected', audience: 'mens' },
+
+        { text: 'okay these kinda ate', audience: 'womens' },
+        { text: 'obsessed.', audience: 'womens' },
+        { text: 'this is your sign', audience: 'womens' },
+        { text: 'not me buying another one', audience: 'womens' },
       ],
       sizingPlacement: 'bottom-right',
       variesClipOrder: false,
@@ -64,17 +77,19 @@ const BUILT_IN_STYLES: { name: string; description: string; config: StyleConfig 
       cutMaxSeconds: 5,
       // Price-shock/declarative, per creator direction: short punchy price
       // callouts mixed with the dupe genre's established bold statements.
+      // Price-shock lines carry no gendered cadence, so most sit either side.
       hookStyleLibrary: [
-        'crazy cheap',
-        'expensive looking >>',
-        'these look way more expensive',
-        '$20?? no way',
-        'why are these so good??',
-        'get the look for less..',
-        "the dupe you didn't know you needed",
-        'how to dress like you have money..',
-        'under $50 and nobody can tell the difference',
-        "found the dupe everyone's been asking about",
+        { text: 'crazy cheap', audience: 'any' },
+        { text: 'expensive looking >>', audience: 'any' },
+        { text: 'these look way more expensive', audience: 'any' },
+        { text: '$20?? no way', audience: 'any' },
+        { text: 'get the look for less..', audience: 'any' },
+        { text: "the dupe you didn't know you needed", audience: 'any' },
+        { text: 'how to dress like you have money..', audience: 'any' },
+        { text: 'under $50 and nobody can tell the difference', audience: 'any' },
+
+        { text: 'why are these so good??', audience: 'womens' },
+        { text: "found the dupe everyone's been asking about", audience: 'womens' },
       ],
       sizingPlacement: 'bottom-left',
       variesClipOrder: true,

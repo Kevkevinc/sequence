@@ -12,7 +12,7 @@ import { creators, jobs, rawClips, segments, editPlans, styles } from '@/db/sche
 import { createCreatorIfNotExists } from '@/db/repositories/creators';
 import { createJob } from '@/db/repositories/jobs';
 import { bandForPacing, planJob } from '@/lib/pipeline/director';
-import { HOOK_STYLE_LIBRARY } from '@/lib/pipeline/hookLibrary';
+import { hooksForAudience } from '@/lib/pipeline/hookLibrary';
 
 /**
  * The widened per-cut bands the prompt actually quotes, derived from the
@@ -254,8 +254,11 @@ describe('planJob', () => {
     expect(prompt).not.toContain('"startSeconds":"');
     expect(prompt).not.toContain('"endSeconds":"');
     // Hook styles are references the model adapts from.
-    expect(prompt).toContain(HOOK_STYLE_LIBRARY[0]);
-    expect(prompt).toContain(HOOK_STYLE_LIBRARY[HOOK_STYLE_LIBRARY.length - 1]);
+    // Test creators carry the default 'any' audience, so the prompt gets the
+    // neutral hooks — not every line in the library.
+    const neutralHooks = hooksForAudience('any');
+    expect(prompt).toContain(neutralHooks[0]);
+    expect(prompt).toContain(neutralHooks[neutralHooks.length - 1]);
     // No correction note on a first attempt.
     expect(prompt).not.toContain('previous response was invalid');
   });
