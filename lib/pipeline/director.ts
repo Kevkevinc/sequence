@@ -394,7 +394,18 @@ function resolvePreset(
     ideal: PACING_PRESET_SECONDS[job.pacing!],
     label: `"${job.pacing}" pacing`,
     hookStyleLibrary: hooksForAudience(audience),
-    sizingPlacementOverride: null,
+    /*
+     * Pinned, not left to the model.
+     *
+     * Custom mode used to let the director choose a placement per variation,
+     * and a live five-variation job came back with five different ones --
+     * including `top-center`, which lands the block at the middle of the upper
+     * half of the frame: directly over the creator's face in a vertical try-on.
+     * There is no editorial reason for the sizing block to move between
+     * variations of the same shoot, and one corner is the only placement that
+     * is reliably clear of the subject.
+     */
+    sizingPlacementOverride: 'bottom-right',
     variesClipOrder: false,
   };
 }

@@ -1441,6 +1441,16 @@ button {
   color: var(--text-3);
 }
 
+/*
+ * For controls that genuinely cannot work on a phone — currently only the
+ * multi-file "Download all", which needs one popup per file.
+ */
+@media (max-width: 900px) {
+  .desktopOnly {
+    display: none;
+  }
+}
+
 /* -------------------------------------------------------------- slider --- */
 
 .labelRow {

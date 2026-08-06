@@ -244,7 +244,19 @@ export default function JobDetailPage() {
                 Variations
               </h3>
               {doneVariations.length > 0 && (
-                <button className="btn btnAccent" onClick={downloadAll}>
+                /*
+                 * Desktop only. This opens one window per video, and mobile
+                 * browsers block every window after the first — so on a phone
+                 * the button appeared to do nothing, or silently saved one of
+                 * five. Each variation has its own Download button that does
+                 * work there, which is what a tester fell back to anyway.
+                 *
+                 * A server-side zip would be one request, but 5x67MB lands as a
+                 * 300MB archive in Files that still has to be unzipped and
+                 * saved to Photos one video at a time — worse than tapping
+                 * five buttons.
+                 */
+                <button className="btn btnAccent desktopOnly" onClick={downloadAll}>
                   <IconDownload size={16} />
                   Download all ({doneVariations.length})
                 </button>
