@@ -99,16 +99,20 @@ const MIN_CUTS_FOR_SEQUENCE_DISTINCTNESS = 3;
 
 /**
  * Seconds per cut for each pacing preset, taken verbatim from the product spec:
- * "Slow ~5-6s/clip, Medium ~3-4s/clip, Fast ~1-2s/clip". The whole product is
- * fast-cut UGC pacing, so this is a core requirement, not a stylistic hint.
+ * "fast is 1-2s. medium is 1.5-4s. slow is 4-7s". The whole product is fast-cut
+ * UGC pacing, so this is a core requirement, not a stylistic hint.
+ *
+ * The bands deliberately overlap (fast 1-2 sits inside medium 1.5-4): they name
+ * the feel a creator asked for, not a partition of the number line, and a 1.8s
+ * cut is legitimately available to either.
  *
  * Keyed on `NonNullable<Job['pacing']>` because the column is nullable now:
  * a Style-mode job carries no named preset at all and gets its band from
  * `styles.config` instead (see `resolvePreset`).
  */
 const PACING_PRESET_SECONDS: Record<NonNullable<Job['pacing']>, { min: number; max: number }> = {
-  slow: { min: 5, max: 6 },
-  medium: { min: 3, max: 4 },
+  slow: { min: 4, max: 7 },
+  medium: { min: 1.5, max: 4 },
   fast: { min: 1, max: 2 },
 };
 
@@ -394,7 +398,17 @@ function resolvePreset(
   };
 }
 
-/** Widest allowed length for one cut, from either preset source. */
+/**
+ * Widest allowed length for one cut, from either preset source.
+ *
+ * Exported so tests derive the widened band instead of hard-coding the
+ * arithmetic: the presets above are product settings the creator retunes, and
+ * duplicated numbers meant every retune broke a dozen unrelated assertions.
+ */
+export function bandForPacing(pacing: NonNullable<Job['pacing']>): PacingBand {
+  return bandForPreset(PACING_PRESET_SECONDS[pacing]);
+}
+
 function bandForPreset(ideal: { min: number; max: number }): PacingBand {
   return {
     min: ideal.min * (1 - PACING_TOLERANCE),
@@ -999,6 +1013,43 @@ function buildValidator(context: ValidationContext) {
             `the creator would receive two identical videos with different hook text. Every ` +
             `variation must be a different edit from every other one, not just from the one ` +
             `before it: change the order, the subdivision boundaries and which moments are used`,
+        });
+      });
+
+      /*
+       * No byte-identical cut may appear in two different variations.
+       *
+       * Stricter than the sequence rule above, which only catches a wholly
+       * duplicated edit. Per creator direction: an exact clip -- same source,
+       * same start, same end, therefore the same frames -- must never be reused
+       * across variations. Two videos sharing a literal cut are two videos
+       * sharing a stretch of identical frames, which is what a platform's
+       * duplicate detection fingerprints.
+       *
+       * Exact identity, not overlap: shifting a cut's boundaries produces
+       * genuinely different frames at both ends, which is a real edit decision
+       * and the cheapest way for the model to comply. Within one variation,
+       * reuse stays governed by MAX_SEGMENT_REUSE.
+       */
+      const firstUseOfCut = new Map<string, number>();
+      value.variations.forEach((variation, index) => {
+        variation.segments.forEach((cut, cutIndex) => {
+          const key = segmentKey(cut);
+          const original = firstUseOfCut.get(key);
+          if (original === undefined) {
+            firstUseOfCut.set(key, index);
+            return;
+          }
+          if (original === index) return; // same variation: MAX_SEGMENT_REUSE owns this
+          ctx.addIssue({
+            code: 'custom',
+            path: ['variations', index, 'segments', cutIndex],
+            message:
+              `this cut (${round2(cut.startSeconds)}-${round2(cut.endSeconds)}s of the same clip) ` +
+              `is byte-identical to one in variation ${original + 1}. No two variations may reuse ` +
+              `the exact same frames — move this cut to a different part of the footage, or shift ` +
+              `its start and end so it shows a different moment`,
+          });
         });
       });
 

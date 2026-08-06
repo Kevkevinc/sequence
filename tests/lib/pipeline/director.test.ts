@@ -11,8 +11,19 @@ import { db } from '@/db/client';
 import { creators, jobs, rawClips, segments, editPlans, styles } from '@/db/schema';
 import { createCreatorIfNotExists } from '@/db/repositories/creators';
 import { createJob } from '@/db/repositories/jobs';
-import { planJob } from '@/lib/pipeline/director';
+import { bandForPacing, planJob } from '@/lib/pipeline/director';
 import { HOOK_STYLE_LIBRARY } from '@/lib/pipeline/hookLibrary';
+
+/**
+ * The widened per-cut bands the prompt actually quotes, derived from the
+ * director's presets rather than restated here — the creator retunes those
+ * numbers, and a copy in the tests only records what they used to be.
+ */
+const MEDIUM = bandForPacing('medium');
+const SLOW = bandForPacing('slow');
+
+/** Matches the director's own rounding, so expected prompt text lines up. */
+const round2 = (seconds: number) => Math.round(seconds * 100) / 100;
 import { cleanUpJobsForClerkId, deleteStylesByName } from '../../helpers/db-cleanup';
 
 /** Every style this file creates inline, by exact name — see deleteStylesByName's docstring. */
@@ -67,11 +78,17 @@ describe('planJob', () => {
   const HOOK_ONE = 'POV: you just found the Cozy Hoodie everyone is talking about';
   const HOOK_TWO = 'Things I wish I knew before buying this Cozy Hoodie';
   // 16s and 15s, both within 15% of the job's 15s target, and every cut inside
-  // the 2.25-5s band that "medium" pacing means.
+  // the band that "medium" pacing (1.5-4s, widened by tolerance) means.
+  //
+  // No cut here is byte-identical to one in the other variation: two variations
+  // sharing an exact clip/start/end is rejected outright, so the second
+  // variation's last cut is 3.5-7.5s where the first uses 4-8s. It has to stay
+  // inside clip A's 8s of footage, which is why it shifts earlier rather than
+  // later.
   const validVariationOne = () =>
     variation([segA(0, 4), segB(0, 4), segA(4, 8), segB(4, 8)], HOOK_ONE);
   const validVariationTwo = () =>
-    variation([segB(0, 3.5), segA(0, 3.5), segB(6, 10), segA(4, 8)], HOOK_TWO);
+    variation([segB(0, 3.5), segA(0, 3.5), segB(6, 10), segA(3.5, 7.5)], HOOK_TWO);
   const validResponse = () => geminiResponse([validVariationOne(), validVariationTwo()]);
 
   /**
@@ -914,7 +931,7 @@ describe('planJob', () => {
       const retryPrompt = promptTextOfCall(1);
       expect(retryPrompt).toContain('previous response was invalid');
       expect(retryPrompt).toContain('this cut is 8s long');
-      expect(retryPrompt).toContain('between 2.25s and 5s');
+      expect(retryPrompt).toContain(`between ${round2(MEDIUM.min)}s and ${round2(MEDIUM.max)}s`);
       expect(retryPrompt).toContain('Split this footage into shorter cuts');
 
       const saved = await db.select().from(editPlans).where(eq(editPlans.jobId, jobId));
@@ -1006,7 +1023,7 @@ describe('planJob', () => {
       await planJob(jobId);
 
       const prompt = promptTextOfCall(0);
-      expect(prompt).toContain('between 2.25 and 5 seconds');
+      expect(prompt).toContain(`between ${round2(MEDIUM.min)} and ${round2(MEDIUM.max)} seconds`);
       expect(prompt).toContain('roughly 4 cuts');
       expect(prompt).toContain('RANGE YOU MAY CUT INSIDE');
       expect(prompt).toContain('SPLIT IT');
@@ -1020,7 +1037,7 @@ describe('planJob', () => {
       await planJob(slowJob.id);
 
       // "slow" is 5-6s per cut, widened by the 25% tolerance.
-      expect(promptTextOfCall(0)).toContain('between 3.75 and 7.5 seconds');
+      expect(promptTextOfCall(0)).toContain(`between ${round2(SLOW.min)} and ${round2(SLOW.max)} seconds`);
     });
   });
 
@@ -1913,10 +1930,12 @@ describe('planJob', () => {
     // 13s made the same job *succeed*, via the fallback path.
     const TARGET_SECONDS = 30;
     const MIN_GAP_SECONDS = 1;
+    // Derived from the director's own presets, so retuning a pacing band does
+    // not silently invalidate this model of what is achievable.
     const BANDS = {
-      slow: { min: 3.75, max: 7.5 },
-      medium: { min: 2.25, max: 5 },
-      fast: { min: 0.75, max: 2.5 },
+      slow: bandForPacing('slow'),
+      medium: bandForPacing('medium'),
+      fast: bandForPacing('fast'),
     } as const;
 
     /**

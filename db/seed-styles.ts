@@ -32,8 +32,8 @@ const BUILT_IN_STYLES: { name: string; description: string; config: StyleConfig 
     description:
       "Quick cuts mixing b-roll and try-on footage, muted so the creator can add their own voiceover, sizing in the bottom-right.",
     config: {
-      // Medium-speed cut band, per creator direction: 2.5-4s.
-      cutMinSeconds: 2.5,
+      // Medium-speed cut band, per creator direction: 1.5-4s, on a 30s target.
+      cutMinSeconds: 1.5,
       cutMaxSeconds: 4,
       // Short, understated "genuine reaction" lines rather than ad-copy —
       // per creator direction, this register consistently outperforms

@@ -21,11 +21,18 @@ describe('validateJobInput', () => {
     expect(errors).toContainEqual({ field: 'productName', message: 'Product name is required.' });
   });
 
-  it('rejects a length outside the allowed presets', () => {
-    const errors = validateJobInput({ ...validInput, lengthSeconds: 25 });
+  // Length is a 10-60s slider, not four fixed presets, so any whole second in
+  // range is valid — 25s used to be rejected and must not be any more.
+  it.each([10, 25, 33, 60])('accepts %ss, anywhere in the slider range', (lengthSeconds) => {
+    const errors = validateJobInput({ ...validInput, lengthSeconds });
+    expect(errors.filter((e) => e.field === 'lengthSeconds')).toEqual([]);
+  });
+
+  it.each([9, 61, 0, -5, 30.5, NaN])('rejects %s as a length', (lengthSeconds) => {
+    const errors = validateJobInput({ ...validInput, lengthSeconds });
     expect(errors).toContainEqual({
       field: 'lengthSeconds',
-      message: 'Length must be 15, 30, 45, or 60 seconds.',
+      message: 'Length must be a whole number between 10 and 60 seconds.',
     });
   });
 

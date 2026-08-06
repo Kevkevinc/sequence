@@ -1,4 +1,9 @@
-export const ALLOWED_LENGTHS = [15, 30, 45, 60] as const;
+/**
+ * Video length is now a continuous range rather than four fixed buttons, so the
+ * creator can match whatever a given shoot actually supports.
+ */
+export const MIN_LENGTH_SECONDS = 10;
+export const MAX_LENGTH_SECONDS = 60;
 export const ALLOWED_PACINGS = ['slow', 'medium', 'fast'] as const;
 export const MAX_VARIATION_COUNT = 20;
 
@@ -21,8 +26,18 @@ export function validateJobInput(input: {
   if (typeof input.productName !== 'string' || !input.productName.trim()) {
     errors.push({ field: 'productName', message: 'Product name is required.' });
   }
-  if (!ALLOWED_LENGTHS.includes(input.lengthSeconds as (typeof ALLOWED_LENGTHS)[number])) {
-    errors.push({ field: 'lengthSeconds', message: 'Length must be 15, 30, 45, or 60 seconds.' });
+  // Whole seconds only: the slider steps in seconds, and a fractional target
+  // would make the "within 10% of target" rule read strangely in the UI.
+  if (
+    typeof input.lengthSeconds !== 'number' ||
+    !Number.isInteger(input.lengthSeconds) ||
+    input.lengthSeconds < MIN_LENGTH_SECONDS ||
+    input.lengthSeconds > MAX_LENGTH_SECONDS
+  ) {
+    errors.push({
+      field: 'lengthSeconds',
+      message: `Length must be a whole number between ${MIN_LENGTH_SECONDS} and ${MAX_LENGTH_SECONDS} seconds.`,
+    });
   }
 
   const hasPacing = typeof input.pacing === 'string' && input.pacing.length > 0;

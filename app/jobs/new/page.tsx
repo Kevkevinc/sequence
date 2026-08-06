@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation';
 import { AppShell } from '@/components/AppShell';
 import { VideoTile } from '@/components/ui';
 import { IconCheck, IconImage, IconUpload } from '@/components/icons';
+import { MAX_LENGTH_SECONDS, MIN_LENGTH_SECONDS } from '@/lib/validation/job';
 
 type Style = {
   id: string;
@@ -13,8 +14,19 @@ type Style = {
   usesInspirationOverlay: boolean;
 };
 
-const LENGTHS = [15, 30, 45, 60] as const;
+
 const PACINGS = ['slow', 'medium', 'fast'] as const;
+
+/**
+ * Cut lengths per preset, mirroring PACING_PRESET_SECONDS in the director.
+ * Shown because "medium" means nothing on its own — the creator is choosing how
+ * long each shot holds, and that is the number they actually care about.
+ */
+const PACING_HELP: Record<(typeof PACINGS)[number], string> = {
+  slow: 'Each cut holds 4–7 seconds.',
+  medium: 'Each cut holds 1.5–4 seconds.',
+  fast: 'Each cut holds 1–2 seconds.',
+};
 
 export default function NewJobPage() {
   const router = useRouter();
@@ -292,20 +304,29 @@ export default function NewJobPage() {
             </div>
 
             <div className="formSection">
-              <span className="label">Length</span>
-              <div className="segmented">
-                {LENGTHS.map((value) => (
-                  <button
-                    key={value}
-                    type="button"
-                    className="segment"
-                    data-active={lengthSeconds === value}
-                    onClick={() => setLengthSeconds(value)}
-                  >
-                    {value}s
-                  </button>
-                ))}
+              <div className="labelRow">
+                <span className="label" style={{ marginBottom: 0 }}>
+                  Length
+                </span>
+                <span className="labelValue">{lengthSeconds}s</span>
               </div>
+              <input
+                type="range"
+                className="slider"
+                min={MIN_LENGTH_SECONDS}
+                max={MAX_LENGTH_SECONDS}
+                step={1}
+                value={lengthSeconds}
+                onChange={(e) => setLengthSeconds(Number(e.target.value))}
+                aria-label="Video length in seconds"
+              />
+              <div className="sliderScale">
+                <span>{MIN_LENGTH_SECONDS}s</span>
+                <span>{MAX_LENGTH_SECONDS}s</span>
+              </div>
+              {errorFor('lengthSeconds') && (
+                <p className="errorText">{errorFor('lengthSeconds')}</p>
+              )}
             </div>
 
             <div className="formSection">
@@ -348,6 +369,7 @@ export default function NewJobPage() {
                       </button>
                     ))}
                   </div>
+                  <p className="helper">{PACING_HELP[pacing]}</p>
                 </div>
               )}
 
