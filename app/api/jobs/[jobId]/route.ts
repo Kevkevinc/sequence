@@ -1,7 +1,7 @@
 import { auth } from '@clerk/nextjs/server';
 import { inArray, eq } from 'drizzle-orm';
 import { db } from '@/db/client';
-import { editPlans, renders } from '@/db/schema';
+import { editPlans, rawClips, renders } from '@/db/schema';
 import { createCreatorIfNotExists } from '@/db/repositories/creators';
 import { getJobForCreator } from '@/db/repositories/jobs';
 import { getStyleById } from '@/db/repositories/styles';
@@ -120,6 +120,11 @@ export async function GET(request: Request, context: { params: Promise<{ jobId: 
   // whole catalogue just to name one job.
   const style = job.styleId ? await getStyleById(job.styleId) : undefined;
 
+  // Clip count drives the time estimate the page shows: tagging is one Gemini
+  // round trip per clip and is by far the longest stage, so an estimate that
+  // ignores how many clips were uploaded is wrong by minutes.
+  const clips = await db.select({ id: rawClips.id }).from(rawClips).where(eq(rawClips.jobId, job.id));
+
   return Response.json({
     id: job.id,
     productName: job.productName,
@@ -128,6 +133,7 @@ export async function GET(request: Request, context: { params: Promise<{ jobId: 
     pacing: job.pacing,
     styleName: style?.name ?? null,
     variationCount: job.variationCount,
+    clipCount: clips.length,
     warning: job.warning,
     failureReason: job.failureReason,
     createdAt: job.createdAt,

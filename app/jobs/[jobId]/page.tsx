@@ -40,6 +40,7 @@ type JobDetail = {
   pacing: 'slow' | 'medium' | 'fast' | null;
   styleName: string | null;
   variationCount: number;
+  clipCount: number;
   warning: string | null;
   failureReason: string | null;
   createdAt: string;
@@ -84,10 +85,61 @@ const PIPELINE: { status: JobStatus; label: string; detail: string }[] = [
   {
     status: 'rendering',
     label: 'Rendering',
-    detail: 'Cutting and exporting each video at full quality. Roughly 1.5 minutes each.',
+    detail: 'Cutting and exporting each video at full quality. Around 2-3 minutes each.',
   },
   { status: 'done', label: 'Done', detail: 'All videos ready to download.' },
 ];
+
+/**
+ * Rough per-stage costs, from timing real jobs on the render machine.
+ *
+ * Tagging dominates and scales per clip: each one is downloaded, uploaded to
+ * Gemini and analysed. Rendering is per variation and went up when the encoder
+ * moved to a higher quality target. These are estimates shown as "about N
+ * minutes left" — never a countdown, because the real number depends on
+ * footage size and how busy the machine is.
+ */
+const ESTIMATE = {
+  taggingSecondsPerClip: 55,
+  planningSeconds: 12,
+  renderSecondsPerVariation: 150,
+};
+
+/**
+ * Seconds still to go, or null once there is nothing left to wait for.
+ *
+ * Self-correcting where it can be: once variations start finishing, the
+ * measured pace of *this* job replaces the constant, so a slow machine or
+ * unusually long clips stop being systematically underestimated.
+ */
+function estimateRemainingSeconds(job: JobDetail, now: number): number | null {
+  if (!stillInProgress(job)) return null;
+
+  const elapsed = (now - new Date(job.createdAt).getTime()) / 1000;
+  const done = job.variations.filter((v) => v.status === 'done').length;
+  const remainingVariations = Math.max(0, job.variationCount - done);
+
+  if (job.status === 'rendering' && done > 0) {
+    // Everything before the first finished render was setup; the rest is pace.
+    const perVariation = elapsed / done;
+    return Math.round(remainingVariations * Math.min(perVariation, ESTIMATE.renderSecondsPerVariation * 3));
+  }
+
+  const aiTotal =
+    job.clipCount * ESTIMATE.taggingSecondsPerClip + ESTIMATE.planningSeconds;
+  const renderTotal = remainingVariations * ESTIMATE.renderSecondsPerVariation;
+  const aiRemaining =
+    job.status === 'rendering' || job.status === 'planned' ? 0 : Math.max(0, aiTotal - elapsed);
+
+  return Math.round(aiRemaining + renderTotal);
+}
+
+/** "about 4 minutes left" — deliberately coarse, because the estimate is. */
+function formatRemaining(seconds: number): string {
+  if (seconds < 45) return 'less than a minute left';
+  const minutes = Math.round(seconds / 60);
+  return `about ${minutes} minute${minutes === 1 ? '' : 's'} left`;
+}
 
 /** Elapsed time in a shape a person reads at a glance: "4m 12s", not "252s". */
 function formatElapsed(fromIso: string, now: number): string {
@@ -308,6 +360,7 @@ function LiveStatus({ job }: { job: JobDetail }) {
   const ready = job.variations.filter((v) => v.status === 'done').length;
   const rendering = job.variations.find((v) => v.status === 'rendering');
   const step = PIPELINE.find((s) => s.status === job.status);
+  const remaining = estimateRemainingSeconds(job, now);
 
   const headline =
     job.status === 'rendering' && rendering
@@ -321,6 +374,7 @@ function LiveStatus({ job }: { job: JobDetail }) {
         <strong>{headline}</strong>
         <span className="liveClock">{formatElapsed(job.createdAt, now)}</span>
       </div>
+      {remaining !== null && <p className="liveEta">{formatRemaining(remaining)}</p>}
       <p className="liveStatusDetail">{step?.detail}</p>
       {job.variationCount > 0 && (
         <div style={{ marginTop: 10 }}>

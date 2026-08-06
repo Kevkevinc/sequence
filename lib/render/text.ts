@@ -395,14 +395,17 @@ export async function overlayText(input: {
       '-map', '[v]',
       '-an',
       /*
-       * `-crf 18` rather than libx264's default of 23. This is the file the
+       * `-crf 15 -preset slow` rather than libx264's default of 23. This is the file the
        * creator re-uploads to TikTok, which re-encodes it again, so it has to
        * survive a further generation of loss — a "good enough to stream"
        * default arrives there already soft. 18 is the usual
-       * visually-transparent mark; `medium` spends a little more time to hold
-       * that quality at a sane file size.
+       * visually-transparent mark and 15 sits deliberately below it, buying
+       * headroom for TikTok'''s re-encode rather than for the eye here.
+       * `slow` spends real time to hold that quality without the file size
+       * running away; per creator direction, render time is the cheaper thing
+       * to spend.
        */
-      '-c:v', 'libx264', '-preset', 'medium', '-crf', '18',
+      '-c:v', 'libx264', '-preset', 'slow', '-crf', '15',
       '-pix_fmt', 'yuv420p',
       // This is the file the creator downloads and the browser streams, so the
       // index belongs at the front.

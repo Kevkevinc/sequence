@@ -27,7 +27,7 @@ const REFRAME =
  * a first-generation loss. The files are large but live only for the length of
  * one render, inside a temp directory that is deleted either way.
  */
-const INTERMEDIATE_CRF = '14';
+const INTERMEDIATE_CRF = '11';
 
 /**
  * Rounds a time to the nearest frame boundary.
