@@ -23,13 +23,18 @@ const FILE_POLL_INTERVAL_MS = 2000;
 
 /**
  * Gemini's "this model is currently experiencing high demand" 503 dropped three
- * of six clips on the first live run. Three tries with ~0.5-1s then ~1-2s of
- * backoff rides out a demand spike while costing at most ~3s per clip, so a
- * genuine outage still fails the job in seconds rather than minutes.
+ * of six clips on the first live run.
+ *
+ * Widened from 3 tries over ~2s after a live job died to a sustained spike: the
+ * old window was sized for a blip and gave up while the model was still busy.
+ * Five tries backing off to ~16s covers about half a minute, which is the
+ * shape these outages actually have, and costs nothing when the first call
+ * succeeds.
  */
 const TAGGING_RETRY: TransientRetryOptions = {
-  attempts: 3,
+  attempts: 5,
   baseDelayMs: 1000,
+  maxDelayMs: 16000,
   label: 'Gemini tagging call',
 };
 
@@ -89,6 +94,20 @@ export async function tagClip(
   try {
     const [clip] = await db.select().from(rawClips).where(eq(rawClips.id, rawClipId));
     if (!clip) return { success: false, error: `Raw clip ${rawClipId} not found` };
+
+    /*
+     * Already tagged: return what is stored instead of paying for it again.
+     *
+     * A job that fails after tagging -- most likely at the planning call, which
+     * is a single point of failure at the end of a four-minute stage -- used to
+     * restart from nothing on retry, re-uploading every clip to Gemini and
+     * spending the daily quota a second time for an answer already in the
+     * database. Tagging is deterministic enough that re-running it buys nothing.
+     */
+    const existing = await db.select().from(segments).where(eq(segments.rawClipId, rawClipId));
+    if (existing.length > 0) {
+      return { success: true, segmentCount: existing.length };
+    }
 
     // Streamed to disk rather than buffered: a raw phone clip is routinely
     // 100-200MB and the old path held it three times over in memory, which is

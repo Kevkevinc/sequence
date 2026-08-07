@@ -29,10 +29,16 @@ const DIRECTOR_MODEL = getEnvWithDefault('GEMINI_DIRECTOR_MODEL', 'gemini-3.6-fl
 // reach the correction-note loop.
 const MAX_ATTEMPTS = 3;
 
-/** Matches the tagging step's policy; see the note on TAGGING_RETRY. */
+/**
+ * Matches the tagging step's policy; see the note on TAGGING_RETRY.
+ *
+ * This call matters more than any single tagging call: it happens once, at the
+ * end of a four-minute stage, and failing it used to discard the whole job.
+ */
 const DIRECTOR_RETRY: TransientRetryOptions = {
-  attempts: 3,
+  attempts: 5,
   baseDelayMs: 1000,
+  maxDelayMs: 16000,
   label: 'Gemini director call',
 };
 

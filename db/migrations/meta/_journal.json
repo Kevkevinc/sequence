@@ -57,6 +57,13 @@
       "when": 1786062507024,
       "tag": "0007_lucky_blade",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1786093060143,
+      "tag": "0008_clean_dagger",
+      "breakpoints": true
     }
   ]
 }

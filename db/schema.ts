@@ -62,6 +62,12 @@ export const jobs = pgTable('jobs', {
   styleId: uuid('style_id').references(() => styles.id),
   variationCount: integer('variation_count').notNull(),
   status: jobStatusEnum('status').notNull().default('pending'),
+  /**
+   * How many times this job has been put back on the queue after a transient
+   * failure. Bounds the requeue loop: without it, a model that is down for an
+   * hour would cycle the same job forever.
+   */
+  attempts: integer('attempts').notNull().default(0),
   failureReason: text('failure_reason'),
   warning: text('warning'),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),

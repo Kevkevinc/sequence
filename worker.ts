@@ -4,6 +4,7 @@ import { jobs, rawClips, editPlans, renders, creators, jobStatusEnum } from '@/d
 import { tagClip } from '@/lib/pipeline/tagging';
 import { planJob } from '@/lib/pipeline/director';
 import { describeCause } from '@/lib/pipeline/errors';
+import { isTransientError } from '@/lib/pipeline/retry';
 import { renderPlan } from '@/lib/render/renderPlan';
 
 const POLL_INTERVAL_MS = 5000;
@@ -187,6 +188,40 @@ export async function claimNextPlannedJob(
   return claimJob('planned', 'rendering', options);
 }
 
+/**
+ * How many times a job may be put back on the queue before giving up.
+ *
+ * Guards against a model outage cycling one job forever, while being generous
+ * enough to ride one out: the retries inside a single call cover seconds, this
+ * covers the minutes an actual capacity spike lasts.
+ */
+const MAX_JOB_ATTEMPTS = 4;
+
+/**
+ * Puts a job back on the queue instead of failing it.
+ *
+ * A transient Gemini failure at the *planning* call used to destroy the whole
+ * job: the creator had already waited through four minutes of tagging, the
+ * segments were sitting in the database, and one 503 at the end threw all of it
+ * away with nothing to resume from. Tagging now skips clips it has already
+ * done, so a requeued job costs a few seconds and no extra quota to reach the
+ * step that failed.
+ *
+ * Returns false when the job has used up its attempts and should fail properly.
+ */
+async function requeueForTransientFailure(jobId: string, reason: string): Promise<boolean> {
+  const [job] = await db.select({ attempts: jobs.attempts }).from(jobs).where(eq(jobs.id, jobId));
+  const attempts = (job?.attempts ?? 0) + 1;
+  if (attempts >= MAX_JOB_ATTEMPTS) return false;
+
+  await db
+    .update(jobs)
+    .set({ status: 'pending', attempts, warning: `Retrying after a temporary AI outage: ${reason}` })
+    .where(eq(jobs.id, jobId));
+  log(`  job ${jobId} hit a transient failure, requeued (attempt ${attempts}/${MAX_JOB_ATTEMPTS})`);
+  return true;
+}
+
 /** Records a terminal failure. Never throws: the caller is already failing. */
 async function failJob(jobId: string, reason: string): Promise<void> {
   try {
@@ -259,6 +294,12 @@ export async function processJob(jobId: string): Promise<void> {
     const planResult = await timed('Planning cuts', () => planJob(jobId));
 
     if (!planResult.success) {
+      // The tagging above is already saved, so a requeue resumes here rather
+      // than starting over -- which is the difference between a slow job and a
+      // destroyed one.
+      if (isTransientError(planResult.error) && (await requeueForTransientFailure(jobId, planResult.error))) {
+        return;
+      }
       await failJob(jobId, planResult.error);
       return;
     }
