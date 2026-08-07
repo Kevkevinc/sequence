@@ -78,10 +78,23 @@ export const rawClips = pgTable('raw_clips', {
 // One row per job for v1 (a style either doesn't use this or a job supplies
 // exactly one photo) — a table rather than a column on `jobs` so a future
 // multi-photo enhancement is new rows, not a new migration.
+/**
+ * What an inspiration image is, which decides how the renderer treats it.
+ *
+ * A `person` fit pic has its background removed so the figure floats over the
+ * footage; a `listing` screenshot is composited untouched, because cutting its
+ * background out would remove the white card and the price that are the point
+ * of showing it.
+ */
+export const inspirationImageKindEnum = pgEnum('inspiration_image_kind', ['person', 'listing']);
+
 export const jobInspirationImages = pgTable('job_inspiration_images', {
   id: uuid('id').primaryKey().defaultRandom(),
   jobId: uuid('job_id').notNull().references(() => jobs.id),
   storageKey: text('storage_key').notNull(),
+  kind: inspirationImageKindEnum('kind').notNull().default('person'),
+  /** Order they appear on screen. Ascending, assigned at upload. */
+  position: integer('position').notNull().default(0),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 });
 
