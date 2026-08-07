@@ -68,13 +68,30 @@ const TaggingResponseSchema = z
   ])
   .transform((value) => (Array.isArray(value) ? { segments: value } : value));
 
-const TAGGING_PROMPT = `Analyze this raw video clip for a short-form UGC ad edit.
-Always include one segment spanning the entire clip (start 0 to the clip's full duration),
-tagged with contentTag "whole-clip". If the clip is long enough to contain additional
-distinct good moments, also include those as separate segments with their own start/end
-times in seconds. Tag each segment's contentTag as one of: "whole-clip", "b-roll",
-"try-on", "other". Tag qualityTag as one of: "low", "medium", "high" based on how
-engaging/usable the moment is (steady footage, clear subject, good lighting).
+const TAGGING_PROMPT = `You are indexing a raw video clip so an editor can build several DIFFERENT short-form
+UGC ad cuts from it. Your job is to find EVERY distinct usable moment, not to summarize the clip.
+
+Return MANY short segments — aim for one every 2-4 seconds of usable footage. A 30-second clip
+should yield roughly 8-15 segments, not 2 or 3. Each segment should be a single coherent moment:
+a specific action, angle, or beat (a turn, a close-up of a detail, a full-body shot, a gesture).
+Keep them mostly 2-6 seconds long. Overlapping segments are fine when a stretch works both as a
+quick beat and as part of a longer one.
+
+Do NOT return one or two giant blocks covering the whole clip — that is the failure case. The
+editor builds distinct variations by drawing DIFFERENT subsets of your segments, so a handful of
+large segments forces every variation to reuse the same footage. More, smaller, specific moments
+is always better.
+
+Also include exactly one segment spanning the entire clip (start 0 to full duration) tagged
+contentTag "whole-clip", as a fallback — but it is in ADDITION to the granular segments above,
+never instead of them.
+
+Tag each segment's contentTag as one of: "whole-clip", "b-roll" (product on its own / detail /
+environment), "try-on" (person wearing or using the product), "other".
+Tag qualityTag as "low", "medium", or "high" by how usable the moment is — steady footage, clear
+subject, good lighting, strong composition. Be discerning: this score is how the editor picks the
+best moments, so do not mark everything "high".
+
 Respond with JSON only, matching this shape:
 {"segments": [{"startSeconds": number, "endSeconds": number, "contentTag": string, "qualityTag": string}]}`;
 
