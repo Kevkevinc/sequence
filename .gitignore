@@ -56,3 +56,6 @@ next-env.d.ts
 
 # Extracted from the committed design zip — derived, not source.
 /Claude Designs/extracted/
+
+# Design handoff zip — not needed in the repo
+/Claude Designs/
