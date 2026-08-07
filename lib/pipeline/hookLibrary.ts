@@ -7,14 +7,18 @@
  * behavior: the model was observed substituting the job's raw productName
  * text directly into `[item]`, which produced a nonsense hook when that
  * name was not phrase-shaped ("...the voiceover reset everyone is talking
- * about"). Lines the creator supplied with a bracket -- "crazy [item]",
- * "can't believe these are [price]" -- are dropped outright rather than
- * paraphrased into "crazy piece": the paraphrase is vaguer than the original
- * and the register is already covered by lines that never needed one.
+ * about").
  *
- * The product name still reaches a hook when the model chooses to name it; the
- * director prompt handles that separately by asking for the shortest natural
- * noun ("zip-up", not "Black Streetwear Zip-up").
+ * `[item]` is now used deliberately, with the failure designed out rather than
+ * avoided. The director prompt states exactly what to put there: the shortest
+ * natural noun for the product, normally one word -- "zip-up", not "Black
+ * Streetwear Zip-up" -- which is what makes the substitution read as a person
+ * talking instead of a retail title. {@link hooksWithoutItemSlot} drops these
+ * lines entirely when there is no product name to put in them.
+ *
+ * `[price]` lines and lines naming a specific garment (`[hoodie]`, `[jorts]`)
+ * are not carried: we do not know the price, and a hook hard-coded to a hoodie
+ * is wrong on everything else.
  */
 
 /** Who a line reads as being written by, judged on register rather than topic. */
@@ -57,6 +61,14 @@ export const MENS_FIT = mens(
 );
 
 export const MENS_PRODUCT = mens(
+  'my new fav [item]',
+  'crazy [item]',
+  'clean [item]',
+  'this [item] >',
+  'new [item] unlocked',
+  'found my new [item]',
+  'this [item] goes crazy',
+  'the [item] on this >',
   'these might be my new fav',
   'these are actually so clean',
   'okay these are tough',
@@ -82,13 +94,19 @@ export const MENS_PICKUP = mens(
   'been looking for something like this',
   'probably my best pickup lately',
   'sleeper pickup',
-  'lowkey a crazy pickup'
+  'lowkey a crazy pickup',
+  'found a crazy [item]',
+  'finally found the perfect [item]'
 );
 
 export const MENS_VALUE = mens(
   'these for HOW much?',
   'no way these are this cheap',
-  "affordable but doesn't look cheap"
+  "affordable but doesn't look cheap",
+  'crazy cheap [item]',
+  '[item] this cheap should NOT look this good',
+  "best [item] i've gotten for the price",
+  "if you're looking for cheap [item]…"
 );
 
 export const MENS_SEASONAL = mens(
@@ -108,7 +126,8 @@ export const MENS_SEASONAL = mens(
   'weekend fits >',
   'gym-to-street fits >',
   "this is what i'm wearing all fall",
-  'this is about to be my daily'
+  'this is about to be my daily',
+  'perfect everyday [item]'
 );
 
 export const MENS_CURIOSITY = mens(
@@ -147,7 +166,8 @@ export const MENS_SHORT = mens(
   'daily uniform',
   'wardrobe upgrade',
   'fit upgrade',
-  'sleeper piece'
+  'sleeper piece',
+  '[item] of the summer'
 );
 
 /* ------------------------------------------------------------- neutral --- */
@@ -224,4 +244,17 @@ export function hooksForAudience(audience: HookAudience): string[] {
   return HOOK_LIBRARY.filter(
     (hook) => hook.audience === 'any' || hook.audience === audience
   ).map((hook) => hook.text);
+}
+
+/**
+ * Drops the `[item]` lines when there is nothing to fill the slot with.
+ *
+ * Offering "crazy [item]" with no product name is how the placeholder gets
+ * filled with whatever the model has to hand — the original bug. Job creation
+ * requires a product name, so this should never fire; it exists so that the
+ * guarantee lives next to the placeholder rather than two files away in a
+ * validator someone could relax.
+ */
+export function hooksWithoutItemSlot(hooks: string[]): string[] {
+  return hooks.filter((hook) => !hook.includes('[item]'));
 }

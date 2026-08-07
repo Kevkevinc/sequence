@@ -10,56 +10,7 @@ import {
   MENS_SEASONAL,
   MENS_SHORT,
   MENS_VALUE,
-  type Hook,
 } from '@/lib/pipeline/hookLibrary';
-
-/** Style-specific lines, kept beside the style they belong to. */
-const MIXED_CUTS_NEUTRAL: Hook[] = [
-  { text: "wasn't expecting this quality", audience: 'any' },
-  { text: 'why does this feel so expensive', audience: 'any' },
-  { text: "i'm keeping this", audience: 'any' },
-  { text: 'never taking this off', audience: 'any' },
-  { text: 'this is actually worth it', audience: 'any' },
-];
-const MIXED_CUTS_WOMENS: Hook[] = [
-  { text: 'okay these kinda ate', audience: 'womens' },
-  { text: 'obsessed.', audience: 'womens' },
-  { text: 'this is your sign', audience: 'womens' },
-  { text: 'not me buying another one', audience: 'womens' },
-];
-
-const DUPE_FLIP_NEUTRAL: Hook[] = [
-  { text: 'crazy cheap', audience: 'any' },
-  { text: 'expensive looking >>', audience: 'any' },
-  { text: 'these look way more expensive', audience: 'any' },
-  { text: '$20?? no way', audience: 'any' },
-  { text: 'get the look for less..', audience: 'any' },
-  { text: "the dupe you didn't know you needed", audience: 'any' },
-  { text: 'how to dress like you have money..', audience: 'any' },
-  { text: 'under $50 and nobody can tell the difference', audience: 'any' },
-];
-const DUPE_FLIP_WOMENS: Hook[] = [
-  { text: 'why are these so good??', audience: 'womens' },
-  { text: "found the dupe everyone's been asking about", audience: 'womens' },
-];
-
-const FIT_INSPO_NEUTRAL: Hook[] = [
-  { text: 'i found the cheaper version', audience: 'any' },
-  { text: 'this is the look i was going for', audience: 'any' },
-  { text: 'recreating this fit for way less', audience: 'any' },
-  { text: 'same vibe, fraction of the price', audience: 'any' },
-  { text: 'this is what i actually bought', audience: 'any' },
-  { text: 'how to get this look', audience: 'any' },
-];
-const FIT_INSPO_MENS: Hook[] = [
-  { text: 'how to dress like this without the price tag', audience: 'mens' },
-  { text: 'building this fit for under $100', audience: 'mens' },
-  { text: 'the fit inspo vs what i got', audience: 'mens' },
-];
-const FIT_INSPO_WOMENS: Hook[] = [
-  { text: 'obsessed with recreating this', audience: 'womens' },
-  { text: 'not me copying this exact fit', audience: 'womens' },
-];
 
 /**
  * The two v1 styles, hand-authored from real reference video (frame sampling
@@ -104,14 +55,83 @@ const BUILT_IN_STYLES: { name: string; description: string; config: StyleConfig 
       // someone else's script — so those lines are kept for the creators they
       // fit rather than deleted, and a creator who has not set an audience is
       // only ever offered the neutral ones.
-      // Assembled from the shared groups rather than restated: the same hook
-      // used to live in three files and drift in all of them.
       hookStyleLibrary: [
-        ...FIT_INSPO_NEUTRAL,
+        { text: "wasn't expecting this quality", audience: 'any' },
+        { text: 'why does this feel so expensive', audience: 'any' },
+        { text: "i'm keeping this", audience: 'any' },
+        { text: 'never taking this off', audience: 'any' },
+        { text: 'this is actually worth it', audience: 'any' },
+        { text: 'okay these kinda ate', audience: 'womens' },
+        { text: 'obsessed.', audience: 'womens' },
+        { text: 'this is your sign', audience: 'womens' },
+        { text: 'not me buying another one', audience: 'womens' },
+        // Assembled from the shared groups rather than restated: the same hook
+        // used to live in three files and drift in all of them.
+        ...MENS_FIT,
+        ...MENS_PRODUCT,
+        ...MENS_PICKUP,
+        ...MENS_SEASONAL,
+        ...MENS_SHORT,
+      ],
+      sizingPlacement: 'bottom-right',
+      variesClipOrder: false,
+      usesInspirationOverlay: false,
+      usesFitInspoIntro: false,
+    },
+  },
+  {
+    name: 'Dupe Flip',
+    description: 'Fast-cut b-roll into try-on, bold caption, sizing bottom-left, optional inspiration photo.',
+    config: {
+      cutMinSeconds: 2,
+      cutMaxSeconds: 5,
+      // Price-shock/declarative, per creator direction: short punchy price
+      // callouts mixed with the dupe genre's established bold statements.
+      // Price-shock lines carry no gendered cadence, so most sit either side.
+      hookStyleLibrary: [
+        { text: 'crazy cheap', audience: 'any' },
+        { text: 'expensive looking >>', audience: 'any' },
+        { text: 'these look way more expensive', audience: 'any' },
+        { text: '$20?? no way', audience: 'any' },
+        { text: 'get the look for less..', audience: 'any' },
+        { text: "the dupe you didn't know you needed", audience: 'any' },
+        { text: 'how to dress like you have money..', audience: 'any' },
+        { text: 'under $50 and nobody can tell the difference', audience: 'any' },
+        { text: 'why are these so good??', audience: 'womens' },
+        { text: "found the dupe everyone's been asking about", audience: 'womens' },
+        // Folded in because this style had no men's-tagged hooks at all,
+        // leaving a menswear creator with only the neutral handful.
+        ...MENS_VALUE,
+      ],
+      sizingPlacement: 'bottom-left',
+      variesClipOrder: true,
+      usesInspirationOverlay: true,
+      usesFitInspoIntro: false,
+    },
+  },
+  {
+    name: 'Fit Inspo',
+    description:
+      'Opens on reference fits stacking up over your footage while the hook is on screen, then clears into quick cuts of the product.',
+    config: {
+      cutMinSeconds: 1.5,
+      cutMaxSeconds: 4,
+      // The format is "here is the look, here is what I actually got", so the
+      // register is comparison and payoff rather than plain reaction.
+      hookStyleLibrary: [
+        { text: 'i found the cheaper version', audience: 'any' },
+        { text: 'this is the look i was going for', audience: 'any' },
+        { text: 'recreating this fit for way less', audience: 'any' },
+        { text: 'same vibe, fraction of the price', audience: 'any' },
+        { text: 'this is what i actually bought', audience: 'any' },
+        { text: 'how to get this look', audience: 'any' },
+        { text: 'how to dress like this without the price tag', audience: 'mens' },
+        { text: 'building this fit for under $100', audience: 'mens' },
+        { text: 'the fit inspo vs what i got', audience: 'mens' },
+        { text: 'obsessed with recreating this', audience: 'womens' },
+        { text: 'not me copying this exact fit', audience: 'womens' },
         ...MENS_FIT,
         ...MENS_CURIOSITY,
-        ...FIT_INSPO_MENS,
-        ...FIT_INSPO_WOMENS,
       ],
       sizingPlacement: 'bottom-right',
       variesClipOrder: false,

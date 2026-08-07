@@ -8,7 +8,11 @@ import { FIT_INSPO } from '@/lib/render/fitInspo';
 import { getEnvWithDefault } from '@/lib/env';
 import { getGeminiClient } from '@/lib/gemini/client';
 import { StyleConfigSchema, type StyleConfig } from '@/lib/styles';
-import { hooksForAudience, type HookAudience } from '@/lib/pipeline/hookLibrary';
+import {
+  hooksForAudience,
+  hooksWithoutItemSlot,
+  type HookAudience,
+} from '@/lib/pipeline/hookLibrary';
 import { describeCause, MAX_CAUSE_LENGTH } from '@/lib/pipeline/errors';
 import { withTransientRetry, type TransientRetryOptions } from '@/lib/pipeline/retry';
 
@@ -397,7 +401,10 @@ function resolvePreset(
     return {
       ideal: { min: style.config.cutMinSeconds, max: style.config.cutMaxSeconds },
       label: `the "${style.name}" style`,
-      hookStyleLibrary: hooksForCreator(style.config.hookStyleLibrary, audience),
+      hookStyleLibrary: withItemSlotIfNamed(
+        hooksForCreator(style.config.hookStyleLibrary, audience),
+        job
+      ),
       sizingPlacementOverride: style.config.sizingPlacement ?? null,
       variesClipOrder: style.config.variesClipOrder,
       opensOnIntro: style.config.usesFitInspoIntro,
@@ -406,7 +413,7 @@ function resolvePreset(
   return {
     ideal: PACING_PRESET_SECONDS[job.pacing!],
     label: `"${job.pacing}" pacing`,
-    hookStyleLibrary: hooksForAudience(audience),
+    hookStyleLibrary: withItemSlotIfNamed(hooksForAudience(audience), job),
     /*
      * Pinned, not left to the model.
      *
@@ -513,6 +520,17 @@ function orderingRuleText(pattern: OrderPattern): string {
  * example of the right shape — not as a token to substitute, which is the
  * failure mode bracket placeholders caused.
  */
+/**
+ * Offers the `[item]` lines only when there is a product name to fill them.
+ *
+ * Job creation requires one, so this should never strip anything; it is the
+ * guarantee stated where the placeholder is used rather than trusted from a
+ * validator in another file.
+ */
+function withItemSlotIfNamed(hooks: string[], job: Job): string[] {
+  return job.productName?.trim() ? hooks : hooksWithoutItemSlot(hooks);
+}
+
 function shortProductNoun(productName: string): string {
   const words = productName.trim().split(/\s+/).filter(Boolean);
   return (words[words.length - 1] ?? productName).toLowerCase();
@@ -939,6 +957,19 @@ function buildValidator(context: ValidationContext) {
       // body stats on a real creator's published video. Unlike the overlay
       // check this is unconditional — the hook is rendered whether or not the
       // job enabled the sizing overlay.
+      // A leaked placeholder would be burned into the video as the literal
+      // characters "[item]". Cheap to catch here, impossible to fix after the
+      // render.
+      if (/\[item\]/i.test(variation.hookText)) {
+        ctx.addIssue({
+          code: 'custom',
+          path: [...variationPath, 'hookText'],
+          message:
+            'hookText still contains the literal placeholder "[item]" - replace it with the short ' +
+            'product word, not the full product name',
+        });
+      }
+
       if (FABRICATED_MEASUREMENT.test(variation.hookText)) {
         ctx.addIssue({
           code: 'custom',
@@ -1327,10 +1358,11 @@ ${JSON.stringify(preset.hookStyleLibrary)}
 Write hookText as ONE short on-screen line, under ${MAX_HOOK_LENGTH} characters. It must never contain a
 height, weight or size measurement - you do not know the creator's real numbers, and inventing them
 would print made-up body stats on a real person's published video.
-If the hook names the product at all, use the SHORTEST natural word for it, normally one word - the
-product is "${job.productName}", so write something like "${shortProductNoun(job.productName)}". Never
-write the full product name into a hook: these are captions someone speaks over, and a full retail
-title reads like an ad instead of a person talking.
+Some library lines contain [item]. Replace it with the SHORTEST natural word for this product, normally
+one word - the product is "${job.productName}", so [item] becomes "${shortProductNoun(job.productName)}".
+Never write the full product name into a hook, and never leave the literal text "[item]" in your answer:
+these are captions someone speaks over, and a full retail title reads like an ad instead of a person
+talking.
 
 ${sizingInstruction}
 ${correctionNote ? `\nYour previous response was invalid: ${correctionNote}\nPlease fix it.\n` : ''}
