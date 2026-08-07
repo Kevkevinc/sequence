@@ -15,12 +15,14 @@ type Style = {
   usesFitInspoIntro: boolean;
 };
 
-/** One Fit Inspo upload, with the guess the server made about what it is. */
+/**
+ * One Fit Inspo upload.
+ *
+ * Model shots only for now, per creator direction, so there is nothing to
+ * classify or confirm — every upload is a person whose background gets removed.
+ */
 type FitPic = {
   file: File;
-  kind: 'person' | 'listing';
-  /** Below this the guess is shown as needing a look rather than stated. */
-  confidence: number;
   previewUrl: string;
 };
 
@@ -81,37 +83,11 @@ export default function NewJobPage() {
   const selectedStyle = styles.find((s) => s.id === selectedStyleId) ?? null;
   const errorFor = (field: string) => errors.find((e) => e.field === field)?.message;
 
-  /**
-   * Adds Fit Inspo images and asks the server what each one is.
-   *
-   * Classification failing is not an error worth showing: the fallback is
-   * `person`, which is the common case, and the creator can flip it.
-   */
-  async function addFitPics(files: File[]) {
-    const added: FitPic[] = files.map((file) => ({
-      file,
-      kind: 'person',
-      confidence: 0,
-      previewUrl: URL.createObjectURL(file),
-    }));
-    setFitPics((current) => [...current, ...added].slice(0, 4));
-
-    for (const pic of added) {
-      try {
-        const body = new FormData();
-        body.append('file', pic.file);
-        const res = await fetch('/api/inspiration/classify', { method: 'POST', body });
-        if (!res.ok) continue;
-        const guess = await res.json();
-        setFitPics((current) =>
-          current.map((p) =>
-            p.file === pic.file ? { ...p, kind: guess.kind, confidence: guess.confidence } : p
-          )
-        );
-      } catch {
-        /* keeps the `person` default */
-      }
-    }
+  /** Adds Fit Inspo images, capped at what the intro can show legibly. */
+  function addFitPics(files: File[]) {
+    setFitPics((current) =>
+      [...current, ...files.map((file) => ({ file, previewUrl: URL.createObjectURL(file) }))].slice(0, 4)
+    );
   }
 
   const uploadPercent =
@@ -213,11 +189,11 @@ export default function NewJobPage() {
       );
 
       // Fit Inspo images ride the same presigned-upload path as the clips.
-      const inspirationImages: { storageKey: string; kind: 'person' | 'listing' }[] = [];
+      const inspirationImages: { storageKey: string; kind: 'person' }[] = [];
       if (mode === 'style' && selectedStyle?.usesFitInspoIntro) {
         for (const pic of fitPics) {
           const uploaded = await uploadFile(pic.file);
-          inspirationImages.push({ storageKey: uploaded.storageKey, kind: pic.kind });
+          inspirationImages.push({ storageKey: uploaded.storageKey, kind: 'person' });
         }
       }
 
@@ -490,7 +466,7 @@ export default function NewJobPage() {
                           <span className="styleDesc" style={{ display: 'block' }}>
                             {fitPics.length > 0
                               ? `${fitPics.length} added — up to 4`
-                              : 'Fit pics or listing screenshots shown over the first seconds'}
+                              : 'Photos of people wearing the fit, shown over the opening seconds'}
                           </span>
                         </span>
                         <input
@@ -502,13 +478,6 @@ export default function NewJobPage() {
                         />
                       </label>
 
-                      {/*
-                        The confirm step. The guess is right most of the time and
-                        wrong occasionally, and cutting the background out of a
-                        listing screenshot destroys the price and the card — so it
-                        is shown as a choice already made, not a decision taken
-                        silently.
-                      */}
                       {fitPics.length > 0 && (
                         <div className="fitPicList">
                           {fitPics.map((pic, index) => (
@@ -516,31 +485,11 @@ export default function NewJobPage() {
                               {/* eslint-disable-next-line @next/next/no-img-element */}
                               <img src={pic.previewUrl} alt="" className="fitPicThumb" />
                               <div style={{ minWidth: 0, flex: 1 }}>
-                                <div className="segmented" style={{ maxWidth: 260 }}>
-                                  {(['person', 'listing'] as const).map((kind) => (
-                                    <button
-                                      key={kind}
-                                      type="button"
-                                      className="segment"
-                                      data-active={pic.kind === kind}
-                                      onClick={() =>
-                                        setFitPics((current) =>
-                                          current.map((p, i) => (i === index ? { ...p, kind } : p))
-                                        )
-                                      }
-                                    >
-                                      {kind === 'person' ? 'Person' : 'Listing'}
-                                    </button>
-                                  ))}
+                                <div className="jobTitle" style={{ fontSize: 13.5 }}>
+                                  {pic.file.name}
                                 </div>
-                                <p className="helper" style={{ marginTop: 5 }}>
-                                  {pic.confidence === 0
-                                    ? 'Checking…'
-                                    : pic.confidence < 0.7
-                                      ? 'Not sure — check this one'
-                                      : pic.kind === 'person'
-                                        ? 'Background will be removed'
-                                        : 'Kept exactly as uploaded'}
+                                <p className="helper" style={{ marginTop: 3 }}>
+                                  Background removed, shown {(1.5 + index * 0.35).toFixed(2)}s-4s
                                 </p>
                               </div>
                               <button

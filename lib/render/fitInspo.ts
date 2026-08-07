@@ -26,8 +26,14 @@ export const FIT_INSPO = {
   staggerSeconds: 0.35,
   /** They all clear together here, and the hook goes with them. */
   clearsAtSeconds: 4,
-  /** Fraction of frame height each image occupies. */
-  heightRatio: 0.34,
+  /**
+   * Fraction of frame height each image occupies, by how many there are.
+   *
+   * Fewer images should fill the space rather than leave the frame looking
+   * empty: one on its own reads as a deliberate reference shot at half the
+   * height, where three at that size would be a pile.
+   */
+  heightRatioFor: { 1: 0.52, 2: 0.42, 3: 0.34, 4: 0.3 } as Record<number, number>,
   /**
    * Ceiling on width, as a fraction of the frame.
    *
@@ -40,12 +46,26 @@ export const FIT_INSPO = {
   marginRatio: 0.03,
   /** More than this on screen is mush; extras are ignored. */
   maxImages: 4,
+  /**
+   * When the sizing block may start.
+   *
+   * It has to wait for the intro to clear: appearing at the usual post-hook
+   * moment puts it under the stack while the stack is still up.
+   */
+  sizingStartsAtSeconds: 4,
 };
 
 export type FitInspoSource = {
   /** Local path to the uploaded image. */
   path: string;
-  /** `person` gets its background removed; `listing` is composited as-is. */
+  /**
+   * `person` gets its background removed; `listing` is composited untouched.
+   *
+   * Only `person` is reachable today — per creator direction the intro is
+   * model shots only for now. The branch stays because the reference videos
+   * mix in product-listing screenshots and that is a likely near-term return,
+   * and because the column already records it.
+   */
   kind: 'person' | 'listing';
 };
 
@@ -123,7 +143,7 @@ export async function prepareFitInspoLayers(
       }
     }
 
-    const { width, height } = await scaledSize(file);
+    const { width, height } = await scaledSize(file, used.length);
     const { x, y } = placementFor(index, used.length, width, height);
 
     layers.push({
@@ -146,11 +166,15 @@ export async function prepareFitInspoLayers(
  * Measured from the file rather than assumed: a cutout's aspect ratio is not
  * the upload's, since removing the background does not crop to the subject.
  */
-async function scaledSize(file: string): Promise<{ width: number; height: number }> {
+async function scaledSize(
+  file: string,
+  count: number
+): Promise<{ width: number; height: number }> {
   const { loadImage } = await import('@napi-rs/canvas');
   const image = await loadImage(await readFile(file));
   const aspect = image.width / image.height;
-  let height = Math.round(HEIGHT * FIT_INSPO.heightRatio);
+  const ratio = FIT_INSPO.heightRatioFor[count] ?? FIT_INSPO.heightRatioFor[4];
+  let height = Math.round(HEIGHT * ratio);
   let width = Math.round(aspect * height);
 
   const maxWidth = Math.round(WIDTH * FIT_INSPO.maxWidthRatio);

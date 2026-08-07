@@ -279,12 +279,24 @@ export async function overlayText(input: {
   const imageLayers: { file: string; from: number; to: number }[] = [];
 
   try {
+    /*
+     * The hook holds until the Fit Inspo intro clears, rather than its usual
+     * 3s. The stack runs to 4s, so the default left a second of cutouts on
+     * screen with no caption over them — the hook and the intro are one beat
+     * and should end together.
+     */
+    const introEndsAt = (input.fitInspoLayers ?? []).reduce(
+      (latest, layer) => Math.max(latest, layer.to),
+      0
+    );
+    const hookEndsAt = Math.max(HOOK.seconds, introEndsAt);
+
     // Each layer is recorded *before* it is written, so the cleanup below also
     // removes a PNG whose write failed halfway through.
     if (input.hookText.trim()) {
       const png = renderHookLayer(input.hookText, { textColor: input.textColor }).png;
       const file = path.join(input.tempDir, `hook-${unique}.png`);
-      layers.push({ file, from: 0, to: HOOK.seconds });
+      layers.push({ file, from: 0, to: hookEndsAt });
       await writeFile(file, png);
     }
 
@@ -292,10 +304,16 @@ export async function overlayText(input: {
       const png = renderSizingLayer(input.sizing.text, input.sizing.placement, {
         textColor: input.textColor,
       }).png;
-      // Starts the instant the hook's own window ends, per creator direction,
-      // rather than overlapping it or waiting an arbitrary further delay, and
-      // then stays up for the rest of the video rather than a fixed window.
-      const from = input.hookText.trim() ? HOOK.seconds : 0;
+      /*
+       * Starts the instant the hook's own window ends, per creator direction,
+       * rather than overlapping it or waiting an arbitrary further delay, and
+       * then stays up for the rest of the video rather than a fixed window.
+       *
+       * Except when a Fit Inspo intro is running: the stack is still on screen
+       * at the hook's usual end, so the sizing block would appear underneath it.
+       * It waits for the intro to clear instead.
+       */
+      const from = input.hookText.trim() ? hookEndsAt : Math.max(0, introEndsAt);
       const file = path.join(input.tempDir, `sizing-${unique}.png`);
       layers.push({ file, from, to: EFFECTIVELY_FOREVER_SECONDS });
       await writeFile(file, png);
