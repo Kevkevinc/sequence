@@ -13,6 +13,13 @@ const nextConfig: NextConfig = {
   env: {
     NEXT_PUBLIC_APP_VERSION: version,
   },
+
+  /*
+   * @napi-rs/canvas is a native addon, not JavaScript the bundler can place in
+   * an ESM chunk — the image classifier's API route fails to build without
+   * this. Left to Node to require at runtime instead of being bundled.
+   */
+  serverExternalPackages: ['@napi-rs/canvas'],
 };
 
 export default nextConfig;
