@@ -371,14 +371,14 @@ describe('tagClip', () => {
       const result = await tagClip(rawClipId);
 
       expect(result.success).toBe(false);
-      expect(mockGenerateContent).toHaveBeenCalledTimes(3);
+      expect(mockGenerateContent).toHaveBeenCalledTimes(5);
       if (!result.success) {
-        expect(result.error).toContain('still failed after 3 attempts');
+        expect(result.error).toContain('still failed after 5 attempts');
         // The original cause has to survive for the failure to be diagnosable.
         expect(result.error).toContain('high demand');
       }
       const saved = await db.select().from(segments).where(eq(segments.rawClipId, rawClipId));
       expect(saved).toHaveLength(0);
-    });
+    }, 30_000); // 5 attempts back off to ~15s of real waiting
   });
 });
