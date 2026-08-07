@@ -12,7 +12,15 @@ import {
   uploadRenderedVideo,
   type LocalClip,
 } from '@/lib/storage';
-import { getInspirationImageForJob } from '@/db/repositories/jobInspirationImages';
+import {
+  getInspirationImageForJob,
+  listInspirationImagesForJob,
+} from '@/db/repositories/jobInspirationImages';
+import {
+  prepareFitInspoLayers,
+  type FitInspoLayer,
+  type FitInspoSource,
+} from '@/lib/render/fitInspo';
 import { normaliseCut } from '@/lib/render/normalise';
 import { concatCuts } from '@/lib/render/concat';
 import { overlayText } from '@/lib/render/text';
@@ -68,6 +76,11 @@ export async function renderPlan(editPlanId: string): Promise<RenderPlanResult> 
 
     let textColor: string | undefined;
     let inspirationImageClip: LocalClip | undefined;
+    let fitInspoLayers: FitInspoLayer[] = [];
+    // Collected here, turned into cutouts further down: generating them needs
+    // the render's temp directory, which does not exist until the clips are
+    // about to be cut.
+    const fitInspoSources: FitInspoSource[] = [];
     if (job.styleId) {
       const [styleRow] = await db.select().from(styles).where(eq(styles.id, job.styleId));
       // Unlike the director (a dangling/malformed style there is a hard
@@ -93,6 +106,14 @@ export async function renderPlan(editPlanId: string): Promise<RenderPlanResult> 
             if (inspirationImage) {
               inspirationImageClip = await downloadClipToTempFile(inspirationImage.storageKey);
               downloadedClips.push(inspirationImageClip); // reuses the existing cleanup loop
+            }
+          }
+
+          if (parsed.data.usesFitInspoIntro) {
+            for (const image of await listInspirationImagesForJob(plan.jobId)) {
+              const clip = await downloadClipToTempFile(image.storageKey);
+              downloadedClips.push(clip); // reuses the existing cleanup loop
+              fitInspoSources.push({ path: clip.path, kind: image.kind });
             }
           }
         }
@@ -125,6 +146,20 @@ export async function renderPlan(editPlanId: string): Promise<RenderPlanResult> 
     }
 
     tempDir = await mkdtemp(path.join(tmpdir(), 'ugc-render-'));
+    if (fitInspoSources.length > 0) {
+      // Cutting backgrounds out is the slowest single step in a render (~3s an
+      // image). Best effort, like everything else derived from the style here:
+      // a failure costs the intro, not the whole video.
+      try {
+        fitInspoLayers = await prepareFitInspoLayers(fitInspoSources, tempDir);
+      } catch (error) {
+        console.warn(
+          `Render ${plan.id}: Fit Inspo intro failed, rendering without it: ` +
+            `${error instanceof Error ? error.message : error}`
+        );
+      }
+    }
+
     const cutsDir = path.join(tempDir, 'cuts');
     await mkdir(cutsDir);
 
@@ -177,6 +212,7 @@ export async function renderPlan(editPlanId: string): Promise<RenderPlanResult> 
       tempDir,
       textColor,
       inspirationImagePath: inspirationImageClip?.path,
+      fitInspoLayers,
     });
     if (!textResult.success) {
       return { success: false, error: `Failed to add on-screen text: ${textResult.error}` };

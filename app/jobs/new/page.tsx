@@ -12,6 +12,16 @@ type Style = {
   name: string;
   description: string;
   usesInspirationOverlay: boolean;
+  usesFitInspoIntro: boolean;
+};
+
+/** One Fit Inspo upload, with the guess the server made about what it is. */
+type FitPic = {
+  file: File;
+  kind: 'person' | 'listing';
+  /** Below this the guess is shown as needing a look rather than stated. */
+  confidence: number;
+  previewUrl: string;
 };
 
 
@@ -34,6 +44,7 @@ export default function NewJobPage() {
   const [styles, setStyles] = useState<Style[]>([]);
   const [selectedStyleId, setSelectedStyleId] = useState<string | null>(null);
   const [inspirationFile, setInspirationFile] = useState<File | null>(null);
+  const [fitPics, setFitPics] = useState<FitPic[]>([]);
 
   const [files, setFiles] = useState<File[]>([]);
   const [productName, setProductName] = useState('');
@@ -69,6 +80,39 @@ export default function NewJobPage() {
 
   const selectedStyle = styles.find((s) => s.id === selectedStyleId) ?? null;
   const errorFor = (field: string) => errors.find((e) => e.field === field)?.message;
+
+  /**
+   * Adds Fit Inspo images and asks the server what each one is.
+   *
+   * Classification failing is not an error worth showing: the fallback is
+   * `person`, which is the common case, and the creator can flip it.
+   */
+  async function addFitPics(files: File[]) {
+    const added: FitPic[] = files.map((file) => ({
+      file,
+      kind: 'person',
+      confidence: 0,
+      previewUrl: URL.createObjectURL(file),
+    }));
+    setFitPics((current) => [...current, ...added].slice(0, 4));
+
+    for (const pic of added) {
+      try {
+        const body = new FormData();
+        body.append('file', pic.file);
+        const res = await fetch('/api/inspiration/classify', { method: 'POST', body });
+        if (!res.ok) continue;
+        const guess = await res.json();
+        setFitPics((current) =>
+          current.map((p) =>
+            p.file === pic.file ? { ...p, kind: guess.kind, confidence: guess.confidence } : p
+          )
+        );
+      } catch {
+        /* keeps the `person` default */
+      }
+    }
+  }
 
   const uploadPercent =
     totalUploadBytes > 0 ? Math.min(100, Math.round((uploadedBytes / totalUploadBytes) * 100)) : 0;
@@ -168,6 +212,15 @@ export default function NewJobPage() {
         setUploadedBytes(perFile.reduce((a, b) => a + b, 0))
       );
 
+      // Fit Inspo images ride the same presigned-upload path as the clips.
+      const inspirationImages: { storageKey: string; kind: 'person' | 'listing' }[] = [];
+      if (mode === 'style' && selectedStyle?.usesFitInspoIntro) {
+        for (const pic of fitPics) {
+          const uploaded = await uploadFile(pic.file);
+          inspirationImages.push({ storageKey: uploaded.storageKey, kind: pic.kind });
+        }
+      }
+
       let inspirationImage: { storageKey: string } | undefined;
       if (mode === 'style' && selectedStyle?.usesInspirationOverlay && inspirationFile) {
         const uploaded = await uploadFile(inspirationFile);
@@ -189,6 +242,7 @@ export default function NewJobPage() {
           variationCount,
           clips,
           inspirationImage,
+          inspirationImages,
         }),
       });
 
@@ -423,6 +477,86 @@ export default function NewJobPage() {
                         style={{ display: 'none' }}
                       />
                     </label>
+                  )}
+
+                  {selectedStyle?.usesFitInspoIntro && (
+                    <div style={{ marginTop: 4 }}>
+                      <label className="styleCard" style={{ cursor: 'pointer', alignItems: 'center' }}>
+                        <span className="styleRadio" style={{ border: 'none', background: 'none' }}>
+                          <IconImage size={18} />
+                        </span>
+                        <span style={{ minWidth: 0 }}>
+                          <span className="styleName">Fit inspo images</span>
+                          <span className="styleDesc" style={{ display: 'block' }}>
+                            {fitPics.length > 0
+                              ? `${fitPics.length} added — up to 4`
+                              : 'Fit pics or listing screenshots shown over the first seconds'}
+                          </span>
+                        </span>
+                        <input
+                          type="file"
+                          accept="image/*"
+                          multiple
+                          onChange={(e) => addFitPics(Array.from(e.target.files ?? []))}
+                          style={{ display: 'none' }}
+                        />
+                      </label>
+
+                      {/*
+                        The confirm step. The guess is right most of the time and
+                        wrong occasionally, and cutting the background out of a
+                        listing screenshot destroys the price and the card — so it
+                        is shown as a choice already made, not a decision taken
+                        silently.
+                      */}
+                      {fitPics.length > 0 && (
+                        <div className="fitPicList">
+                          {fitPics.map((pic, index) => (
+                            <div className="fitPicRow" key={`${pic.file.name}-${index}`}>
+                              {/* eslint-disable-next-line @next/next/no-img-element */}
+                              <img src={pic.previewUrl} alt="" className="fitPicThumb" />
+                              <div style={{ minWidth: 0, flex: 1 }}>
+                                <div className="segmented" style={{ maxWidth: 260 }}>
+                                  {(['person', 'listing'] as const).map((kind) => (
+                                    <button
+                                      key={kind}
+                                      type="button"
+                                      className="segment"
+                                      data-active={pic.kind === kind}
+                                      onClick={() =>
+                                        setFitPics((current) =>
+                                          current.map((p, i) => (i === index ? { ...p, kind } : p))
+                                        )
+                                      }
+                                    >
+                                      {kind === 'person' ? 'Person' : 'Listing'}
+                                    </button>
+                                  ))}
+                                </div>
+                                <p className="helper" style={{ marginTop: 5 }}>
+                                  {pic.confidence === 0
+                                    ? 'Checking…'
+                                    : pic.confidence < 0.7
+                                      ? 'Not sure — check this one'
+                                      : pic.kind === 'person'
+                                        ? 'Background will be removed'
+                                        : 'Kept exactly as uploaded'}
+                                </p>
+                              </div>
+                              <button
+                                type="button"
+                                className="btn btnGhost"
+                                onClick={() =>
+                                  setFitPics((current) => current.filter((_, i) => i !== index))
+                                }
+                              >
+                                Remove
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
                   )}
 
                   {errorFor('inspirationImage') && (

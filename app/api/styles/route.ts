@@ -15,6 +15,7 @@ export async function GET() {
         name: style.name,
         description: style.description,
         usesInspirationOverlay: parsed.success ? parsed.data.usesInspirationOverlay : false,
+        usesFitInspoIntro: parsed.success ? parsed.data.usesFitInspoIntro : false,
       };
     })
   );

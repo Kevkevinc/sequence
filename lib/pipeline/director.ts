@@ -4,6 +4,7 @@ import { eq, inArray } from 'drizzle-orm';
 import { db } from '@/db/client';
 import { jobs, rawClips, segments, editPlans, creators, styles } from '@/db/schema';
 import { OVERLAY_PLACEMENTS } from '@/lib/editPlan';
+import { FIT_INSPO } from '@/lib/render/fitInspo';
 import { getEnvWithDefault } from '@/lib/env';
 import { getGeminiClient } from '@/lib/gemini/client';
 import { StyleConfigSchema, type StyleConfig } from '@/lib/styles';
@@ -123,6 +124,9 @@ const PACING_PRESET_SECONDS: Record<NonNullable<Job['pacing']>, { min: number; m
  * enough that the live run's 14s and 16s opening shots are rejected outright.
  */
 const PACING_TOLERANCE = 0.25;
+
+/** How long the Fit Inspo intro covers the frame, mirrored from the renderer. */
+const FIT_INSPO_INTRO_SECONDS = FIT_INSPO.clearsAtSeconds;
 
 /**
  * The last cut of a variation may fall this far below the band's floor.
@@ -367,6 +371,14 @@ type EffectivePreset = {
   /** Non-null when the style pins one corner for every variation. */
   sizingPlacementOverride: (typeof OVERLAY_PLACEMENTS)[number] | null;
   variesClipOrder: boolean;
+  /**
+   * Whether the render opens on the Fit Inspo intro.
+   *
+   * The director needs to know because the first seconds are spent with
+   * reference images stacked over the footage: whatever cut is playing then is
+   * background, so the strongest moment should not be spent there.
+   */
+  opensOnIntro: boolean;
 };
 
 /**
@@ -388,6 +400,7 @@ function resolvePreset(
       hookStyleLibrary: hooksForCreator(style.config.hookStyleLibrary, audience),
       sizingPlacementOverride: style.config.sizingPlacement ?? null,
       variesClipOrder: style.config.variesClipOrder,
+      opensOnIntro: style.config.usesFitInspoIntro,
     };
   }
   return {
@@ -407,6 +420,7 @@ function resolvePreset(
      */
     sizingPlacementOverride: 'bottom-right',
     variesClipOrder: false,
+    opensOnIntro: false,
   };
 }
 
@@ -1253,9 +1267,25 @@ ${orderPatterns.map((pattern, i) => `- Variation ${i + 1}: ${orderingRuleText(pa
 Segments tagged "b-roll" or "try-on" are the ones this rule constrains; segments tagged "whole-clip" or "other" may appear anywhere.`
     : '';
 
+  /*
+   * Fit Inspo spends its first four seconds with reference images stacked over
+   * the footage and the hook on top, so whatever is playing underneath is
+   * barely visible. Telling the model this stops it spending the best shot
+   * there — the opening cut is background, and the payoff belongs after it.
+   */
+  const introInstruction = preset.opensOnIntro
+    ? `
+THIS STYLE OPENS ON AN INTRO. For the first ${FIT_INSPO_INTRO_SECONDS} seconds the frame is ` +
+      `covered by reference images and the hook, so the footage underneath is mostly hidden. Open on ` +
+      `an ordinary establishing moment, never the best one, and put the strongest footage after the ` +
+      `${FIT_INSPO_INTRO_SECONDS}s mark where it can actually be seen.
+`
+    : '';
+
   return `You are editing a short-form UGC ad video for the product "${job.productName}".
 Target length: ${job.lengthSeconds} seconds. Editing style: ${preset.label}.
 Produce exactly ${job.variationCount} distinct variations.
+${introInstruction}
 
 Available segments (choose from these only, by rawClipId):
 ${JSON.stringify(segmentPool)}

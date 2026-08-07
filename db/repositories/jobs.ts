@@ -13,6 +13,12 @@ export type CreateJobInput = {
   variationCount: number;
   clips: { storageKey: string; originalFilename: string }[];
   inspirationImage?: { storageKey: string };
+  /**
+   * Fit Inspo intro images, in the order they should appear. Separate from
+   * `inspirationImage` because the two styles treat their uploads differently
+   * and a job only ever uses one of them.
+   */
+  inspirationImages?: { storageKey: string; kind: 'person' | 'listing' }[];
 };
 
 export async function createJob(input: CreateJobInput) {
@@ -46,6 +52,19 @@ export async function createJob(input: CreateJobInput) {
         jobId: job.id,
         storageKey: input.inspirationImage.storageKey,
       });
+    }
+
+    if (input.inspirationImages?.length) {
+      // `position` is the array order: the creator arranged them, and the
+      // intro plays them in that order.
+      await tx.insert(jobInspirationImages).values(
+        input.inspirationImages.map((image, index) => ({
+          jobId: job.id,
+          storageKey: image.storageKey,
+          kind: image.kind,
+          position: index,
+        }))
+      );
     }
 
     return job;

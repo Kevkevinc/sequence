@@ -69,6 +69,26 @@ export async function POST(req: Request) {
     }
   }
 
+  /*
+   * Fit Inspo uploads. Validated rather than trusted: `kind` decides whether
+   * the renderer cuts the background out, and a bad value there would either
+   * crash the render or quietly destroy a listing screenshot.
+   */
+  const fitInspoImages: { storageKey: string; kind: 'person' | 'listing' }[] = Array.isArray(
+    body.inspirationImages
+  )
+    ? body.inspirationImages
+        .filter(
+          (image: any) =>
+            image && typeof image.storageKey === 'string' && image.storageKey.trim()
+        )
+        .slice(0, 4)
+        .map((image: any) => ({
+          storageKey: image.storageKey,
+          kind: image.kind === 'listing' ? ('listing' as const) : ('person' as const),
+        }))
+    : [];
+
   const inspirationImage = body.inspirationImage;
   const hasInspirationImage = Boolean(
     inspirationImage &&
@@ -100,6 +120,7 @@ export async function POST(req: Request) {
     variationCount: body.variationCount,
     clips: body.clips,
     inspirationImage: hasInspirationImage ? { storageKey: inspirationImage.storageKey } : undefined,
+    inspirationImages: fitInspoImages,
   });
 
   return Response.json(job, { status: 201 });
