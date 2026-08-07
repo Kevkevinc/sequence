@@ -4,6 +4,20 @@
  */
 export const MIN_LENGTH_SECONDS = 10;
 export const MAX_LENGTH_SECONDS = 60;
+
+/**
+ * Raw footage (in seconds) a job should have to make its variations comfortably.
+ *
+ * The first variation needs roughly the full target length of usable footage;
+ * each additional variation wants about half a length of *fresh* material, or
+ * they end up drawn from the same moments and read as reshuffles of each other.
+ * A heuristic, not a hard law -- footage reuse across variations is allowed --
+ * but it catches the real failure ("41s of footage, 10 variations of 30s") the
+ * moment the creator picks their settings, before they upload and wait.
+ */
+export function recommendedFootageSeconds(lengthSeconds: number, variationCount: number): number {
+  return Math.round(lengthSeconds * (1 + 0.5 * Math.max(0, variationCount - 1)));
+}
 export const ALLOWED_PACINGS = ['slow', 'medium', 'fast'] as const;
 export const MAX_VARIATION_COUNT = 20;
 

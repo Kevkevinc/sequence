@@ -5,7 +5,7 @@ import { useRouter } from 'next/navigation';
 import { AppShell } from '@/components/AppShell';
 import { VideoTile } from '@/components/ui';
 import { IconCheck, IconImage, IconUpload } from '@/components/icons';
-import { MAX_LENGTH_SECONDS, MIN_LENGTH_SECONDS } from '@/lib/validation/job';
+import { MAX_LENGTH_SECONDS, MIN_LENGTH_SECONDS, recommendedFootageSeconds } from '@/lib/validation/job';
 
 type Style = {
   id: string;
@@ -40,6 +40,28 @@ const PACING_HELP: Record<(typeof PACINGS)[number], string> = {
   fast: 'Each cut holds 1–2 seconds.',
 };
 
+/**
+ * The playing length of a video File, read via a throwaway <video> element.
+ * Resolves 0 on anything the browser can't decode, so a weird file never blocks
+ * the footage hint.
+ */
+function readVideoDuration(file: File): Promise<number> {
+  return new Promise((resolve) => {
+    const url = URL.createObjectURL(file);
+    const video = document.createElement('video');
+    video.preload = 'metadata';
+    video.onloadedmetadata = () => {
+      URL.revokeObjectURL(url);
+      resolve(Number.isFinite(video.duration) ? video.duration : 0);
+    };
+    video.onerror = () => {
+      URL.revokeObjectURL(url);
+      resolve(0);
+    };
+    video.src = url;
+  });
+}
+
 export default function NewJobPage() {
   const router = useRouter();
   const [mode, setMode] = useState<'custom' | 'style'>('custom');
@@ -49,6 +71,8 @@ export default function NewJobPage() {
   const [fitPics, setFitPics] = useState<FitPic[]>([]);
 
   const [files, setFiles] = useState<File[]>([]);
+  /** Total seconds of raw footage selected, read from the files in the browser. */
+  const [footageSeconds, setFootageSeconds] = useState(0);
   const [productName, setProductName] = useState('');
   const [sizingOn, setSizingOn] = useState(false);
   const [sizeWorn, setSizeWorn] = useState('');
@@ -89,6 +113,21 @@ export default function NewJobPage() {
       [...current, ...files.map((file) => ({ file, previewUrl: URL.createObjectURL(file) }))].slice(0, 4)
     );
   }
+
+  /**
+   * Sets the clips and measures their combined duration in the browser, so the
+   * "enough footage?" hint is instant and no upload is wasted on a job that
+   * cannot make its variations.
+   */
+  function selectClips(selected: File[]) {
+    setFiles(selected);
+    Promise.all(selected.map(readVideoDuration)).then((durations) =>
+      setFootageSeconds(durations.reduce((sum, d) => sum + d, 0))
+    );
+  }
+
+  const recommendedSeconds = recommendedFootageSeconds(lengthSeconds, variationCount);
+  const footageShort = files.length > 0 && footageSeconds > 0 && footageSeconds < recommendedSeconds;
 
   const uploadPercent =
     totalUploadBytes > 0 ? Math.min(100, Math.round((uploadedBytes / totalUploadBytes) * 100)) : 0;
@@ -261,13 +300,23 @@ export default function NewJobPage() {
               <span className="pill" style={{ marginTop: 4 }}>
                 <IconCheck size={13} />
                 {files.length} clip{files.length === 1 ? '' : 's'} ready
+                {footageSeconds > 0 ? ` · ${Math.round(footageSeconds)}s` : ''}
+              </span>
+            )}
+            {footageShort && (
+              <span
+                className="pill"
+                style={{ marginTop: 4, color: 'var(--status-queued)', borderColor: 'var(--status-queued)' }}
+              >
+                Add more footage — about {recommendedSeconds}s recommended for {variationCount} good
+                variation{variationCount === 1 ? '' : 's'} at {lengthSeconds}s
               </span>
             )}
             <input
               type="file"
               multiple
               accept="video/*"
-              onChange={(e) => setFiles(Array.from(e.target.files ?? []))}
+              onChange={(e) => selectClips(Array.from(e.target.files ?? []))}
               style={{ display: 'none' }}
             />
           </label>
