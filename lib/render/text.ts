@@ -5,8 +5,7 @@ import { OVERLAY_PLACEMENTS, type OverlayPlacement } from '@/lib/editPlan';
 import { getEnvWithDefault } from '@/lib/env';
 import { runFfmpeg } from '@/lib/render/ffmpeg';
 
-const WIDTH = 1080;
-const HEIGHT = 1920;
+import { HEIGHT, WIDTH, scaled as scaleToFrame } from '@/lib/render/frame';
 
 /**
  * The placements the director may choose, and the only ones renderable here.
@@ -25,10 +24,10 @@ const FONT_FAMILY = 'UgcHookFont';
 const DEFAULT_FONT_FILE = path.join(process.cwd(), 'assets', 'fonts', 'Roboto-Bold.ttf');
 
 const HOOK = {
-  fontSize: 42,
+  fontSize: scaleToFrame(42),
   lineHeightRatio: 1.18,
   /** Leaves 60px of breathing room each side for the outline and the frame. */
-  maxWidth: WIDTH - 120,
+  maxWidth: WIDTH - scaleToFrame(120),
   /**
    * Fraction of frame height where the block's vertical CENTER lands, not
    * its top — a little higher than dead centre (0.5), per creator direction.
@@ -39,9 +38,9 @@ const HOOK = {
 };
 
 const SIZING = {
-  fontSize: 40,
+  fontSize: scaleToFrame(40),
   lineHeightRatio: 1.2,
-  maxWidth: WIDTH - 120,
+  maxWidth: WIDTH - scaleToFrame(120),
 };
 
 /**
@@ -237,9 +236,9 @@ type PreparedLayer = { file: string; from: number; to: number };
 export const INSPIRATION_IMAGE = {
   seconds: 4,
   /** Fixed thumbnail box in the upper-left, clear of the frame edge. */
-  width: 320,
-  height: 480,
-  margin: 40,
+  width: scaleToFrame(320),
+  height: scaleToFrame(480),
+  margin: scaleToFrame(40),
 };
 
 /**

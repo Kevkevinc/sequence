@@ -1,9 +1,7 @@
 import { rm } from 'fs/promises';
 import { probeMedia, type MediaInfo, runFfmpeg } from '@/lib/render/ffmpeg';
 
-const WIDTH = 1080;
-const HEIGHT = 1920;
-const FPS = 30;
+import { FPS, HEIGHT, WIDTH } from '@/lib/render/frame';
 
 /**
  * Crop-to-fill rather than letterbox: black bars read as amateur in short-form
