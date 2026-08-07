@@ -134,11 +134,11 @@ function estimateRemainingSeconds(job: JobDetail, now: number): number | null {
   return Math.round(aiRemaining + renderTotal);
 }
 
-/** "about 4 minutes left" — deliberately coarse, because the estimate is. */
+/** "~4 min left" — deliberately coarse, because the estimate is. */
 function formatRemaining(seconds: number): string {
   if (seconds < 45) return 'less than a minute left';
   const minutes = Math.round(seconds / 60);
-  return `about ${minutes} minute${minutes === 1 ? '' : 's'} left`;
+  return `~${minutes} min left`;
 }
 
 /** Elapsed time in a shape a person reads at a glance: "4m 12s", not "252s". */
