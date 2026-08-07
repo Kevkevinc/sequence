@@ -3,15 +3,18 @@
  * on-screen opening line of each variation.
  *
  * Deliberately no `[product]`/`[item]` bracket placeholder anywhere in this
- * list. A literal fill-in-the-blank token invites literal fill-in-the-blank
+ * file. A literal fill-in-the-blank token invites literal fill-in-the-blank
  * behavior: the model was observed substituting the job's raw productName
  * text directly into `[item]`, which produced a nonsense hook when that
  * name was not phrase-shaped ("...the voiceover reset everyone is talking
- * about"). These entries are complete, natural sentences instead — short,
- * understated "genuine reaction" lines (per creator direction, this
- * register outperforms obvious ad-copy hooks like "you need this" because it
- * reads as organic content, not sponsored) rather than clothing-specific, so
- * they fit any product category Custom mode might be used for.
+ * about"). Lines the creator supplied with a bracket -- "crazy [item]",
+ * "can't believe these are [price]" -- are dropped outright rather than
+ * paraphrased into "crazy piece": the paraphrase is vaguer than the original
+ * and the register is already covered by lines that never needed one.
+ *
+ * The product name still reaches a hook when the model chooses to name it; the
+ * director prompt handles that separately by asking for the shortest natural
+ * noun ("zip-up", not "Black Streetwear Zip-up").
  */
 
 /** Who a line reads as being written by, judged on register rather than topic. */
@@ -19,45 +22,195 @@ export type HookAudience = 'mens' | 'womens' | 'any';
 
 export type Hook = { text: string; audience: HookAudience };
 
+const mens = (...lines: string[]): Hook[] => lines.map((text) => ({ text, audience: 'mens' }));
+const neutral = (...lines: string[]): Hook[] => lines.map((text) => ({ text, audience: 'any' }));
+const womens = (...lines: string[]): Hook[] => lines.map((text) => ({ text, audience: 'womens' }));
+
+/* --------------------------------------------------------- men's groups --- */
+/*
+ * Grouped by what the line is *about*, because styles draw different groups:
+ * a price-comparison style wants VALUE, a fit-focused one wants FIT. Kept as
+ * named exports so a style's library is assembled from these rather than
+ * copy-pasted, which is how the same hook ended up in three places before.
+ */
+
+export const MENS_FIT = mens(
+  'the fit on this >',
+  'this fit is insane',
+  'holy fit',
+  'crazy fits >',
+  'clean fit >',
+  'this fit >>',
+  'the fit is actually crazy',
+  'this fit though…',
+  "tell me this fit isn't clean",
+  'this might be my cleanest fit',
+  'the way this fits >',
+  'the silhouette on this >',
+  'the fit is everything',
+  'nah this fit is crazy',
+  'this might be the one',
+  'actually obsessed with this fit',
+  'instant fit upgrade',
+  'this changed the whole fit',
+  'one piece changed the whole outfit'
+);
+
+export const MENS_PRODUCT = mens(
+  'these might be my new fav',
+  'these are actually so clean',
+  'okay these are tough',
+  'nah these are hard',
+  'these are a NEED',
+  'instant cop',
+  'adding this to the rotation',
+  'this is staying in the rotation'
+);
+
+export const MENS_PICKUP = mens(
+  'new pickups >',
+  "today's pickups",
+  'new addition to the wardrobe',
+  'just got these in',
+  'just found my new favorite',
+  'found these and had to cop',
+  'new wardrobe addition',
+  'adding these to the rotation',
+  'my latest pickup',
+  'new pickup goes crazy',
+  'just discovered these',
+  'been looking for something like this',
+  'probably my best pickup lately',
+  'sleeper pickup',
+  'lowkey a crazy pickup'
+);
+
+export const MENS_VALUE = mens(
+  'these for HOW much?',
+  'no way these are this cheap',
+  "affordable but doesn't look cheap"
+);
+
+export const MENS_SEASONAL = mens(
+  'cold weather fits >',
+  'summer fits >',
+  'fall fits >',
+  'winter rotation >',
+  'these are perfect for fall',
+  'summer wardrobe essential',
+  'my go-to for colder days',
+  'this is gonna be on repeat',
+  'everyday fits >',
+  'casual fits >',
+  'going-out fits >',
+  'airport fits >',
+  'date night fits >',
+  'weekend fits >',
+  'gym-to-street fits >',
+  "this is what i'm wearing all fall",
+  'this is about to be my daily'
+);
+
+export const MENS_CURIOSITY = mens(
+  'wait for the fit',
+  'you NEED to see these',
+  'why does this fit so well',
+  'nah, they cooked with these',
+  'they did NOT miss with these',
+  'whoever designed these knew what they were doing',
+  "i've been gatekeeping these",
+  "this one's a sleeper",
+  "you're gonna want these",
+  'adding this to your cart immediately'
+);
+
+/** The very short overlay style, closest to what the reference videos use. */
+export const MENS_SHORT = mens(
+  'the fit on these >',
+  'the wash on these >',
+  'the details on this >',
+  'the material on this >',
+  'the color on these >',
+  'the oversized fit >',
+  'the baggy fit >',
+  'the layering on this >',
+  'these hit different',
+  'this one is tough',
+  'actually so clean',
+  'crazy quality',
+  'crazy fit',
+  'crazy piece',
+  'clean pickup',
+  'new rotation',
+  'new wardrobe staple',
+  'easy cop',
+  'daily uniform',
+  'wardrobe upgrade',
+  'fit upgrade',
+  'sleeper piece'
+);
+
+/* ------------------------------------------------------------- neutral --- */
+/*
+ * Lines with no coded cadence *and* no clothing assumption. Custom mode can be
+ * pointed at any product category, so a hook about "the fit" would be nonsense
+ * on a candle — these are the ones that survive that.
+ */
+export const NEUTRAL_HOOKS = neutral(
+  'okay hear me out…',
+  'just trust me on this',
+  "i wasn't expecting this",
+  "i wasn't expecting these to be this good",
+  "didn't think i'd like these this much",
+  'wasn’t expecting the quality to be this good',
+  'how is this actually this good',
+  "don't sleep on these",
+  'hidden gem',
+  'absolute steal',
+  'the quality on this >',
+  'the quality for the price >',
+  'looks expensive, costs way less',
+  'these look way more expensive',
+  'easily worth the price',
+  'the price on these >',
+  'found these for a steal',
+  'this was a VERY good purchase',
+  'i finally found it',
+  'new favorite unlocked',
+  'instant favorite',
+  'my new go-to',
+  'need this',
+  'need these',
+  'these >>>',
+  'this >>>',
+  'i get it now',
+  'this is so underrated',
+  'no notes'
+);
+
+/** The coded cadences, kept for the creators they actually fit. */
+export const WOMENS_HOOKS = womens(
+  'not me buying another one',
+  'currently obsessed',
+  'no because why is this so good',
+  'actually speechless',
+  'this is your sign'
+);
+
 /**
- * Register, not subject matter.
+ * Custom mode's library.
  *
- * Certain TikTok cadences are strongly coded — "not me buying...", "no because
- * why is this...", "obsessed", "ate" read as women's content, and a menswear
- * creator using them sounds like he is reading someone else's script. That
- * mismatch is what the creator flagged, so each line is tagged with the
- * audience it sounds native to and `any` is reserved for lines that genuinely
- * sit either side.
- *
- * Nothing here is about the product. A hoodie is a hoodie; what changes is the
- * voice the caption is written in.
+ * Deliberately excludes the clothing-specific men's groups (FIT, SEASONAL,
+ * PICKUP): Custom mode is the mode for any product, and "the fit on this >" is
+ * meaningless on a kitchen gadget. The clothing styles pull those groups
+ * directly.
  */
 export const HOOK_LIBRARY: readonly Hook[] = [
-  // Neutral: plain reactions with no coded cadence.
-  { text: "i wasn't expecting this", audience: 'any' },
-  { text: 'i get it now', audience: 'any' },
-  { text: 'this is so underrated', audience: 'any' },
-  { text: 'okay hear me out', audience: 'any' },
-  { text: 'this is actually worth it', audience: 'any' },
-  { text: 'better than i expected', audience: 'any' },
-  { text: 'no notes', audience: 'any' },
-  { text: 'this one is staying', audience: 'any' },
-
-  // Men's: flatter, more understated, no intensifier stacking.
-  { text: 'this is actually solid', audience: 'mens' },
-  { text: 'one of the best pickups this year', audience: 'mens' },
-  { text: 'the fit is actually crazy', audience: 'mens' },
-  { text: 'been wearing this nonstop', audience: 'mens' },
-  { text: 'this hits different in person', audience: 'mens' },
-  { text: 'quality is not what i expected', audience: 'mens' },
-  { text: 'my go to now', audience: 'mens' },
-
-  // Women's: the coded cadences, kept for creators they actually fit.
-  { text: 'not me buying another one', audience: 'womens' },
-  { text: 'currently obsessed', audience: 'womens' },
-  { text: 'no because why is this so good', audience: 'womens' },
-  { text: 'actually speechless', audience: 'womens' },
-  { text: 'this is your sign', audience: 'womens' },
+  ...NEUTRAL_HOOKS,
+  ...MENS_PRODUCT,
+  ...MENS_VALUE,
+  ...MENS_CURIOSITY,
+  ...WOMENS_HOOKS,
 ];
 
 /**
@@ -65,7 +218,7 @@ export const HOOK_LIBRARY: readonly Hook[] = [
  *
  * A creator who has not said who they make for gets the `any` set only: a
  * neutral line never sounds wrong, whereas guessing wrong is exactly the
- * failure being fixed here.
+ * failure this exists to prevent.
  */
 export function hooksForAudience(audience: HookAudience): string[] {
   return HOOK_LIBRARY.filter(

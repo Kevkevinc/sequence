@@ -503,6 +503,21 @@ function orderingRuleText(pattern: OrderPattern): string {
 }
 
 /** Trims float noise so messages read as "3.5s", never "3.4999999999999996s". */
+/**
+ * The one-word noun a person would actually say for a product.
+ *
+ * "Black Streetwear Zip-up" is a retail title; nobody says it out loud, and a
+ * hook containing it reads as an ad rather than someone talking. The last word
+ * is almost always the noun ("zip-up", "hoodie", "jeans") with everything
+ * before it a modifier, so this takes that and gives it to the model as an
+ * example of the right shape — not as a token to substitute, which is the
+ * failure mode bracket placeholders caused.
+ */
+function shortProductNoun(productName: string): string {
+  const words = productName.trim().split(/\s+/).filter(Boolean);
+  return (words[words.length - 1] ?? productName).toLowerCase();
+}
+
 function round2(seconds: number): number {
   return Math.round(seconds * 100) / 100;
 }
@@ -1312,6 +1327,10 @@ ${JSON.stringify(preset.hookStyleLibrary)}
 Write hookText as ONE short on-screen line, under ${MAX_HOOK_LENGTH} characters. It must never contain a
 height, weight or size measurement - you do not know the creator's real numbers, and inventing them
 would print made-up body stats on a real person's published video.
+If the hook names the product at all, use the SHORTEST natural word for it, normally one word - the
+product is "${job.productName}", so write something like "${shortProductNoun(job.productName)}". Never
+write the full product name into a hook: these are captions someone speaks over, and a full retail
+title reads like an ad instead of a person talking.
 
 ${sizingInstruction}
 ${correctionNote ? `\nYour previous response was invalid: ${correctionNote}\nPlease fix it.\n` : ''}
