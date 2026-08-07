@@ -34,6 +34,17 @@ export const StyleConfigSchema = z.object({
   variesClipOrder: z.boolean(),
   /** Whether job creation asks for one inspiration photo, composited early in the render. */
   usesInspirationOverlay: z.boolean(),
+  /**
+   * Whether this style opens on the Fit Inspo intro: several reference images
+   * stacking up over the first seconds of footage, behind the hook, then all
+   * clearing at once.
+   *
+   * Distinct from `usesInspirationOverlay`, which is Dupe Flip's single
+   * bordered thumbnail. Both take uploaded images; they place, time and treat
+   * them differently, so a style opts into one or the other rather than a
+   * shared flag deciding by context.
+   */
+  usesFitInspoIntro: z.boolean().optional().default(false),
 });
 
 export type StyleConfig = z.infer<typeof StyleConfigSchema>;

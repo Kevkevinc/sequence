@@ -67,6 +67,7 @@ const BUILT_IN_STYLES: { name: string; description: string; config: StyleConfig 
       sizingPlacement: 'bottom-right',
       variesClipOrder: false,
       usesInspirationOverlay: false,
+      usesFitInspoIntro: false,
     },
   },
   {
@@ -94,6 +95,35 @@ const BUILT_IN_STYLES: { name: string; description: string; config: StyleConfig 
       sizingPlacement: 'bottom-left',
       variesClipOrder: true,
       usesInspirationOverlay: true,
+      usesFitInspoIntro: false,
+    },
+  },
+  {
+    name: 'Fit Inspo',
+    description:
+      'Opens on reference fits stacking up over your footage while the hook is on screen, then clears into quick cuts of the product.',
+    config: {
+      cutMinSeconds: 1.5,
+      cutMaxSeconds: 4,
+      // The format is "here is the look, here is what I actually got", so the
+      // register is comparison and payoff rather than plain reaction.
+      hookStyleLibrary: [
+        { text: 'i found the cheaper version', audience: 'any' },
+        { text: 'this is the look i was going for', audience: 'any' },
+        { text: 'recreating this fit for way less', audience: 'any' },
+        { text: 'same vibe, fraction of the price', audience: 'any' },
+        { text: 'this is what i actually bought', audience: 'any' },
+        { text: 'how to get this look', audience: 'any' },
+        { text: 'how to dress like this without the price tag', audience: 'mens' },
+        { text: 'building this fit for under $100', audience: 'mens' },
+        { text: 'the fit inspo vs what i got', audience: 'mens' },
+        { text: 'obsessed with recreating this', audience: 'womens' },
+        { text: 'not me copying this exact fit', audience: 'womens' },
+      ],
+      sizingPlacement: 'bottom-right',
+      variesClipOrder: false,
+      usesInspirationOverlay: false,
+      usesFitInspoIntro: true,
     },
   },
 ];

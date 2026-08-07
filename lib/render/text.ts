@@ -4,6 +4,7 @@ import { createCanvas, GlobalFonts, type SKRSContext2D } from '@napi-rs/canvas';
 import { OVERLAY_PLACEMENTS, type OverlayPlacement } from '@/lib/editPlan';
 import { getEnvWithDefault } from '@/lib/env';
 import { runFfmpeg } from '@/lib/render/ffmpeg';
+import type { FitInspoLayer } from '@/lib/render/fitInspo';
 
 import { HEIGHT, WIDTH, scaled as scaleToFrame } from '@/lib/render/frame';
 
@@ -266,6 +267,12 @@ export async function overlayText(input: {
   tempDir: string;
   textColor?: string;
   inspirationImagePath?: string;
+  /**
+   * Fit Inspo intro images, already cut out and positioned. Composited
+   * *beneath* the hook, unlike {@link inspirationImagePath}: the hook has to
+   * stay readable while the stack builds up behind it.
+   */
+  fitInspoLayers?: FitInspoLayer[];
 }): Promise<{ success: true } | { success: false; error: string }> {
   const layers: PreparedLayer[] = [];
   const unique = `${path.basename(input.outputPath, path.extname(input.outputPath))}-${process.pid}`;
@@ -311,7 +318,9 @@ export async function overlayText(input: {
     // Nothing to draw: copy the video stream rather than spend a re-encode,
     // and a lossless one at that. `-an` strips audio regardless of what the
     // source happens to carry — v1 never keeps audio, on any code path here.
-    if (layers.length === 0 && imageLayers.length === 0) {
+    const fitInspoLayers = input.fitInspoLayers ?? [];
+
+    if (layers.length === 0 && imageLayers.length === 0 && fitInspoLayers.length === 0) {
       const copied = await runFfmpeg([
         '-i', input.sourcePath,
         '-c', 'copy',
@@ -333,12 +342,32 @@ export async function overlayText(input: {
     // overlaid in the upper-left corner — a different position and a different
     // input type, but the same "extra input, same enable-window overlay" chain
     // the text layers already use.
-    const allInputs = [...layers.map((l) => l.file), ...imageLayers.map((l) => l.file)];
+    // Fit Inspo images come first so they composite *under* the text: the
+    // chain is built in input order, and whatever overlays last sits on top.
+    const allInputs = [
+      ...fitInspoLayers.map((l) => l.file),
+      ...layers.map((l) => l.file),
+      ...imageLayers.map((l) => l.file),
+    ];
     const inputs = allInputs.flatMap((file) => ['-i', file]);
 
     const filters: string[] = [];
     let current = '[0:v]';
     let inputIndex = 1;
+
+    for (const layer of fitInspoLayers) {
+      const sized = `[fit${inputIndex}]`;
+      // Scaled here rather than on disk so one cutout could be reused at
+      // different sizes, and so the numbers stay visible in the filter graph.
+      filters.push(`[${inputIndex}:v]scale=${layer.width}:${layer.height}${sized}`);
+      const label = `[t${inputIndex}]`;
+      const window = `between(t,${formatSeconds(layer.from)},${formatSeconds(layer.to)})`;
+      filters.push(
+        `${current}${sized}overlay=${layer.x}:${layer.y}:enable='${window}'${label}`
+      );
+      current = label;
+      inputIndex += 1;
+    }
 
     for (const layer of layers) {
       const label = `[t${inputIndex}]`;
