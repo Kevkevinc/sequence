@@ -23,7 +23,7 @@ const spaceMono = Space_Mono({
 });
 
 export const metadata: Metadata = {
-  title: 'Cutloop — UGC AI Editor',
+  title: 'Sequence — UGC AI Editor',
   description: 'Upload your raw footage. The AI picks the cuts, writes the hook, and burns it in.',
 };
 

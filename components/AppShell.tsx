@@ -82,9 +82,9 @@ export function AppShell({
 
         <aside className="sidebar">
           <div className="brand">
-            <span className="brandMark">C</span>
+            <span className="brandMark">S</span>
             <div style={{ minWidth: 0 }}>
-              <div className="brandName">Cutloop</div>
+              <div className="brandName">Sequence</div>
               <div className="brandSub">UGC AI Editor</div>
             </div>
           </div>

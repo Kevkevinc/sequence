@@ -202,7 +202,7 @@ export default function ProfilePage() {
                 color: 'var(--text-faint)',
               }}
             >
-              Cutloop v{process.env.NEXT_PUBLIC_APP_VERSION}
+              Sequence v{process.env.NEXT_PUBLIC_APP_VERSION}
             </div>
           </>
         )}

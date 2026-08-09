@@ -60,7 +60,7 @@ export default function JobsPage() {
             No videos yet
           </h2>
           <p style={{ fontSize: 14, color: 'var(--text-3)', maxWidth: 330, lineHeight: 1.55 }}>
-            Upload a clip and Cutloop sends back a few cuts ready to post.
+            Upload a clip and Sequence sends back a few cuts ready to post.
           </p>
           <Link href="/jobs/new" className="btn btnAccent" style={{ marginTop: 4 }}>
             Create your first video

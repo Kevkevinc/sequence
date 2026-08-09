@@ -151,9 +151,9 @@ function SignedOutLanding() {
               marginBottom: 22,
             }}
           >
-            <span className="brandMark">C</span>
+            <span className="brandMark">S</span>
             <div style={{ textAlign: 'left' }}>
-              <div className="brandName">Cutloop</div>
+              <div className="brandName">Sequence</div>
               <div className="brandSub">UGC AI Editor</div>
             </div>
           </div>
