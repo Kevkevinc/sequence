@@ -447,11 +447,14 @@ export async function overlayText(input: {
        * default arrives there already soft. 18 is the usual
        * visually-transparent mark and 15 sits deliberately below it, buying
        * headroom for TikTok'''s re-encode rather than for the eye here.
-       * `slow` spends real time to hold that quality without the file size
-       * running away; per creator direction, render time is the cheaper thing
-       * to spend.
+       * `veryfast`, not `slow`: at a fixed CRF the preset barely changes visual
+       * quality -- it trades encode time and file size, not fidelity. `slow`
+       * OOM-killed the render on the deployed container (memory spiked past the
+       * limit and it restarted mid-encode). `veryfast` uses a fraction of the
+       * memory and finishes faster at the same CRF 15; the only cost is a
+       * larger file.
        */
-      '-c:v', 'libx264', '-preset', 'slow', '-crf', '15',
+      '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '15',
       '-pix_fmt', 'yuv420p',
       // This is the file the creator downloads and the browser streams, so the
       // index belongs at the front.
