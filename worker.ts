@@ -1,4 +1,4 @@
-import { and, eq, like, notExists, sql } from 'drizzle-orm';
+import { and, eq, inArray, isNull, like, notExists, sql } from 'drizzle-orm';
 import { db } from '@/db/client';
 import { jobs, rawClips, editPlans, renders, creators, jobStatusEnum } from '@/db/schema';
 import { tagClip } from '@/lib/pipeline/tagging';
@@ -489,9 +489,51 @@ function requestShutdown(signal: NodeJS.Signals) {
   wakeFromPoll?.();
 }
 
+/**
+ * Recovers jobs orphaned in `rendering` by a worker that died mid-render.
+ *
+ * A render that is interrupted -- an OOM kill, a Railway redeploy, a crash --
+ * leaves the job stuck in `rendering` with a half-written render row and
+ * nothing to resume it: the poll loop only ever claims `planned` jobs, so a
+ * `rendering` job is invisible to it forever. This runs once at startup, before
+ * the loop, and puts those jobs back on the render queue.
+ *
+ * Deleting the incomplete render rows first (rendering + no file) means the
+ * re-render starts clean; any variation that DID finish keeps its `done` row
+ * and its uploaded video, so the work already paid for is not redone.
+ *
+ * Safe because this worker is single-instance: nothing else is rendering when
+ * it boots, so a `rendering` job at startup is always an orphan, never one in
+ * flight elsewhere.
+ */
+async function reclaimOrphanedRenders(): Promise<void> {
+  const orphaned = await db.select({ id: jobs.id }).from(jobs).where(eq(jobs.status, 'rendering'));
+  if (orphaned.length === 0) return;
+
+  for (const { id } of orphaned) {
+    const plans = await db.select({ id: editPlans.id }).from(editPlans).where(eq(editPlans.jobId, id));
+    if (plans.length > 0) {
+      await db
+        .delete(renders)
+        .where(
+          and(
+            inArray(renders.editPlanId, plans.map((p) => p.id)),
+            eq(renders.status, 'rendering'),
+            isNull(renders.storageKey)
+          )
+        );
+    }
+    await db.update(jobs).set({ status: 'planned' }).where(eq(jobs.id, id));
+  }
+  log(`Recovered ${orphaned.length} job(s) orphaned mid-render, requeued for rendering`);
+}
+
 async function main() {
   process.on('SIGTERM', requestShutdown);
   process.on('SIGINT', requestShutdown);
+
+  await reclaimOrphanedRenders();
+
 
   console.log(
     `Worker started, polling for pending jobs every ${POLL_INTERVAL_MS / 1000} seconds...`
