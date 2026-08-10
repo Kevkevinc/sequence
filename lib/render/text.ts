@@ -25,7 +25,7 @@ const FONT_FAMILY = 'UgcHookFont';
 const DEFAULT_FONT_FILE = path.join(process.cwd(), 'assets', 'fonts', 'Roboto-Bold.ttf');
 
 const HOOK = {
-  fontSize: scaleToFrame(42),
+  fontSize: scaleToFrame(36),
   lineHeightRatio: 1.18,
   /** Leaves 60px of breathing room each side for the outline and the frame. */
   maxWidth: WIDTH - scaleToFrame(120),
@@ -39,7 +39,7 @@ const HOOK = {
 };
 
 const SIZING = {
-  fontSize: scaleToFrame(40),
+  fontSize: scaleToFrame(34),
   lineHeightRatio: 1.2,
   maxWidth: WIDTH - scaleToFrame(120),
 };
