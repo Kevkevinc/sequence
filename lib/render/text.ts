@@ -134,11 +134,33 @@ type LayerOptions = {
 };
 
 /**
- * Draws one text block onto a transparent 1080x1920 canvas.
+ * Width of the dark outline behind the text, as a fraction of the font size.
  *
- * White fill over a heavy dark stroke: the footage underneath is arbitrary, and
+ * Was 0.22, which is very heavy — a stroke is centred on the glyph path, so a
+ * fifth of the font size means about a tenth of it eating *inward* from every
+ * edge. At the current type size that visibly thickened the strokes and filled
+ * in the counters of letters like e, a and o, which reads as blurry text even
+ * though nothing is actually out of focus.
+ *
+ * Confirmed against the encoder rather than assumed: the same hook composited
+ * with and without an H.264 pass is indistinguishable, so compression was never
+ * softening the captions — the outline was. See
+ * `local-videos/Test 11 …/text-diagnosis.png`.
+ *
+ * 0.12 keeps a clearly visible dark edge for legibility over light footage,
+ * which is the whole reason the stroke exists, while leaving the letterforms
+ * open.
+ */
+const STROKE_RATIO = 0.12;
+
+/**
+ * Draws one text block onto a transparent full-frame canvas.
+ *
+ * White fill over a dark stroke: the footage underneath is arbitrary, and
  * white-on-white is the failure mode that makes a hook unreadable. `lineJoin:
- * round` keeps the stroke from growing spikes at sharp glyph corners.
+ * round` keeps the stroke from growing spikes at sharp glyph corners. Stroke is
+ * drawn before the fill so the fill covers the stroke's inner half rather than
+ * the stroke biting into the glyph.
  */
 function renderLayer(options: LayerOptions): TextLayer {
   registerFont();
@@ -151,7 +173,7 @@ function renderLayer(options: LayerOptions): TextLayer {
   ctx.lineJoin = 'round';
   ctx.miterLimit = 2;
   ctx.strokeStyle = 'rgba(0,0,0,0.92)';
-  ctx.lineWidth = Math.round(options.fontSize * 0.22);
+  ctx.lineWidth = Math.round(options.fontSize * STROKE_RATIO);
   ctx.fillStyle = options.textColor;
 
   const lines = wrap(ctx, options.text, options.maxWidth);
