@@ -510,7 +510,16 @@ async function reclaimOrphanedRenders(): Promise<void> {
   const orphaned = await db.select({ id: jobs.id }).from(jobs).where(eq(jobs.status, 'rendering'));
   if (orphaned.length === 0) return;
 
+  let requeued = 0;
   for (const { id } of orphaned) {
+    const [job] = await db.select({ attempts: jobs.attempts }).from(jobs).where(eq(jobs.id, id));
+    // Cap it: a render that dies every time -- an OOM, a container too small --
+    // must not be requeued forever. Past the cap it fails cleanly instead of
+    // spinning the worker on a job it can never finish.
+    if ((job?.attempts ?? 0) >= MAX_JOB_ATTEMPTS) {
+      await failJob(id, 'The render could not be completed after several attempts.');
+      continue;
+    }
     const plans = await db.select({ id: editPlans.id }).from(editPlans).where(eq(editPlans.jobId, id));
     if (plans.length > 0) {
       await db
@@ -523,9 +532,10 @@ async function reclaimOrphanedRenders(): Promise<void> {
           )
         );
     }
-    await db.update(jobs).set({ status: 'planned' }).where(eq(jobs.id, id));
+    await db.update(jobs).set({ status: 'planned', attempts: (job?.attempts ?? 0) + 1 }).where(eq(jobs.id, id));
+    requeued += 1;
   }
-  log(`Recovered ${orphaned.length} job(s) orphaned mid-render, requeued for rendering`);
+  if (requeued > 0) log(`Recovered ${requeued} job(s) orphaned mid-render, requeued for rendering`);
 }
 
 async function main() {
