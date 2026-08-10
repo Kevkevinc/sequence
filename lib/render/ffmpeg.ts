@@ -55,7 +55,7 @@ function keepTail(text: string): string {
 
 /** Pulls the useful text out of a failed execFile, preferring the tool's own stderr. */
 function describeProcessFailure(error: unknown, tool: string, timeoutMs: number): string {
-  const details = (error ?? {}) as { stderr?: unknown; killed?: unknown };
+  const details = (error ?? {}) as { stderr?: unknown; killed?: unknown; signal?: unknown };
   // ffmpeg reports the real problem on stderr; the thrown Error's message is
   // usually just the exit code, so prefer stderr when present.
   const stderr = details.stderr === undefined ? '' : String(details.stderr);
@@ -68,6 +68,14 @@ function describeProcessFailure(error: unknown, tool: string, timeoutMs: number)
   // than rejected. Say so explicitly.
   if (details.killed === true) {
     return `${tool} timed out after ${Math.round(timeoutMs / 1000)}s: ${detail}`;
+  }
+  // Killed by a signal with nothing on stderr is almost always the kernel's
+  // OOM killer taking the process -- the single most useful thing to know when
+  // a render fails on a memory-constrained host, and invisible without this.
+  const signal = typeof details.signal === 'string' ? details.signal : '';
+  if (signal && !stderr.trim()) {
+    const oom = signal === 'SIGKILL' ? ' (likely out of memory)' : '';
+    return `${tool} was killed by ${signal}${oom}: ${detail}`;
   }
   return detail;
 }
@@ -89,7 +97,7 @@ export async function runFfmpeg(
 ): Promise<{ success: true } | { success: false; error: string }> {
   const timeout = options.timeoutMs ?? FFMPEG_TIMEOUT_MS;
   try {
-    await execFileAsync(ffmpegBinary(), ['-hide_banner', '-loglevel', 'error', '-y', ...args], {
+    await execFileAsync(ffmpegBinary(), ['-hide_banner', '-loglevel', 'warning', '-y', ...args], {
       timeout,
       maxBuffer: OUTPUT_BUFFER_BYTES,
       // Console applications spawned on Windows can flash a window; a worker

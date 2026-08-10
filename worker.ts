@@ -417,11 +417,19 @@ export async function renderJob(jobId: string): Promise<void> {
 
     const outcomes: RenderOutcome[] = [];
     for (const plan of plans) {
-      outcomes.push(
-        await timed(`Rendering variation ${plan.variationNumber} of ${plans.length}`, () =>
-          renderVariation(jobId, plan)
-        )
+      // Not wrapped in timed(): renderVariation returns failure instead of
+      // throwing, and timed() would log "finished" either way -- which made a
+      // run of ten fast FAILURES read like ten fast successes. Log the actual
+      // outcome instead.
+      const startedAt = Date.now();
+      log(`  Rendering variation ${plan.variationNumber} of ${plans.length}...`);
+      const outcome = await renderVariation(jobId, plan);
+      log(
+        outcome.success
+          ? `  Variation ${plan.variationNumber} done in ${since(startedAt)}`
+          : `  Variation ${plan.variationNumber} FAILED in ${since(startedAt)}: ${outcome.error}`
       );
+      outcomes.push(outcome);
     }
 
     const succeeded = outcomes.filter((o) => o.success).length;
