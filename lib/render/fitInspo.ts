@@ -117,6 +117,24 @@ function placementFor(index: number, count: number, width: number, height: numbe
  * original rather than dropping out of the video: a rectangular fit pic is a
  * worse look than a cutout, but no worse than a missing one.
  */
+/**
+ * Removes a background, but never hangs the whole render doing it.
+ *
+ * The library downloads an ONNX model on first use and runs inference on it --
+ * on a small or cold container that can take a long time or stall entirely, and
+ * a render with no ceiling on it just sits in `rendering` forever (a tester's
+ * job hung 18 minutes on exactly this). Bounded to `timeoutMs`; on timeout the
+ * caller falls back to the original image, same as it already does on error.
+ */
+async function removeBackgroundBounded(url: string, timeoutMs: number): Promise<Blob> {
+  return Promise.race([
+    removeBackground(url),
+    new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error(`background removal timed out after ${timeoutMs}ms`)), timeoutMs)
+    ),
+  ]);
+}
+
 export async function prepareFitInspoLayers(
   sources: FitInspoSource[],
   workingDir: string
@@ -131,7 +149,10 @@ export async function prepareFitInspoLayers(
       try {
         // A file:// URL, not a bare path: on Windows the library reads "C:" as
         // an unsupported protocol.
-        const cutout = await removeBackground(pathToFileURL(source.path).href);
+        // 90s ceiling: comfortably longer than a real cutout (~3s) plus a
+        // one-time model download, short enough that a stall fails the intro
+        // rather than the whole render.
+        const cutout = await removeBackgroundBounded(pathToFileURL(source.path).href, 90_000);
         file = path.join(workingDir, `fit-inspo-${index}.png`);
         await writeFile(file, Buffer.from(await cutout.arrayBuffer()));
       } catch (error) {
