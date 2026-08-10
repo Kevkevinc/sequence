@@ -342,6 +342,21 @@ type RenderOutcome = { variationNumber: number; success: boolean; error?: string
  * variation, rather than aborting every variation still to come — which is
  * the isolation this function exists to provide in the first place.
  */
+/**
+ * Ceiling on one variation, end to end.
+ *
+ * Every individual step has its own timeout now, but "every step I thought of"
+ * is not the same as "every step": a deployed render sat in `rendering` for 75
+ * minutes because a stalled R2 download was outside all of them. This is the
+ * backstop -- whatever hangs, the variation fails and the job moves on instead
+ * of the whole thing stranding forever.
+ *
+ * Generous on purpose. A real variation is ~2-3 minutes on the deployed worker,
+ * so 20 leaves room for a slow container and a big download without ever
+ * tripping on healthy work.
+ */
+const VARIATION_TIMEOUT_MS = 20 * 60 * 1000;
+
 async function renderVariation(jobId: string, plan: typeof editPlans.$inferSelect): Promise<RenderOutcome> {
   let renderRowId: string | undefined;
   try {
@@ -351,7 +366,15 @@ async function renderVariation(jobId: string, plan: typeof editPlans.$inferSelec
       .returning({ id: renders.id });
     renderRowId = renderRow.id;
 
-    const result = await renderPlan(plan.id);
+    const result = await Promise.race([
+      renderPlan(plan.id),
+      new Promise<never>((_, reject) =>
+        setTimeout(
+          () => reject(new Error(`Rendering this variation exceeded ${VARIATION_TIMEOUT_MS / 60000} minutes and was abandoned.`)),
+          VARIATION_TIMEOUT_MS
+        )
+      ),
+    ]);
 
     if (result.success) {
       await db

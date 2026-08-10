@@ -16,6 +16,19 @@ const client = new S3Client({
     accessKeyId: getRequiredEnv('R2_ACCESS_KEY_ID'),
     secretAccessKey: getRequiredEnv('R2_SECRET_ACCESS_KEY'),
   },
+  /*
+   * Without these the SDK waits forever. A clip download is ~100MB streamed
+   * from R2, and if that connection half-drops mid-stream nothing breaks the
+   * wait -- a deployed render sat in `rendering` for 75 minutes on exactly
+   * this, with ffmpeg never even starting.
+   *
+   * socketTimeout is per-chunk idle time, not total transfer time, so a big
+   * clip on a slow link is fine; only a genuinely stalled socket trips it.
+   * Retries then give a dropped connection a second chance instead of failing
+   * the whole variation.
+   */
+  requestHandler: { connectionTimeout: 10_000, socketTimeout: 120_000 },
+  maxAttempts: 3,
 });
 
 export async function createUploadUrl(originalFilename: string, contentType: string) {
