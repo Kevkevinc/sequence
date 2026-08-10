@@ -351,11 +351,12 @@ type RenderOutcome = { variationNumber: number; success: boolean; error?: string
  * backstop -- whatever hangs, the variation fails and the job moves on instead
  * of the whole thing stranding forever.
  *
- * Generous on purpose. A real variation is ~2-3 minutes on the deployed worker,
- * so 20 leaves room for a slow container and a big download without ever
- * tripping on healthy work.
+ * Generous on purpose, and raised alongside the move to a 4K output frame,
+ * which costs roughly 3-4x the encode time of the 1080p frame this number was
+ * first chosen for. It has to sit clear above the slowest *healthy* variation
+ * or it stops being a backstop and starts being the thing that fails renders.
  */
-const VARIATION_TIMEOUT_MS = 20 * 60 * 1000;
+const VARIATION_TIMEOUT_MS = 45 * 60 * 1000;
 
 async function renderVariation(jobId: string, plan: typeof editPlans.$inferSelect): Promise<RenderOutcome> {
   let renderRowId: string | undefined;

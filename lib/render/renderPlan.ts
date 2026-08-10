@@ -41,6 +41,16 @@ const StoredSegmentSchema = z.object({
 });
 const StoredSegmentsSchema = z.array(StoredSegmentSchema).min(1);
 
+/**
+ * Size of the still frame stored beside each render.
+ *
+ * Deliberately not the video's own size. The frame is 4K, and a poster the UI
+ * displays a few hundred pixels wide gains nothing from a multi-megabyte JPEG
+ * every list view then has to download and shrink. Exported so the test asserts
+ * against this rather than restating the numbers.
+ */
+export const THUMBNAIL = { width: 540, height: 960 };
+
 export type RenderPlanResult =
   | { success: true; storageKey: string; durationSeconds: number }
   | { success: false; error: string };
@@ -198,6 +208,14 @@ export async function renderPlan(editPlanId: string): Promise<RenderPlanResult> 
       return { success: false, error: `Failed to join cuts: ${concatResult.error}` };
     }
 
+    // Every cut of the variation is on disk simultaneously, and at 4K that is
+    // hundreds of megabytes that concat has just finished copying into a single
+    // file. Nothing reads them again, so dropping them here roughly halves the
+    // render's peak disk instead of holding both copies until the `finally`
+    // block. Best effort: the temp directory is removed either way, so a
+    // failure here costs space, not correctness.
+    await rm(cutsDir, { recursive: true, force: true }).catch(() => {});
+
     const finalPath = path.join(tempDir, 'final.mp4');
     const textResult = await overlayText({
       sourcePath: concatPath,
@@ -235,6 +253,7 @@ export async function renderPlan(editPlanId: string): Promise<RenderPlanResult> 
       '-ss', '0.6',
       '-i', finalPath,
       '-frames:v', '1',
+      '-vf', `scale=${THUMBNAIL.width}:${THUMBNAIL.height}:flags=lanczos`,
       '-q:v', '4',
       '-update', '1',
       thumbnailPath,

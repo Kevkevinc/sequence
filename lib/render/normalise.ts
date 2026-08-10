@@ -24,8 +24,19 @@ const REFRAME =
  * (source phone footage is 25-40Mbps) keeps the second pass from compounding
  * a first-generation loss. The files are large but live only for the length of
  * one render, inside a temp directory that is deleted either way.
+ *
+ * `superfast` rather than `veryfast`, and crf 14 rather than 11, now that the
+ * frame is 4K. This pass is throwaway — its only real job is to make every cut
+ * agree on codec, size and frame rate so {@link concatCuts} can stream-copy
+ * them — so spending encoder effort here buys nothing the final pass keeps.
+ * Measured across a 4K cut, final quality is flat to three decimal places
+ * whether this pass runs at ultrafast/12 (0.99466), superfast/14 (0.99444) or
+ * veryfast/15 (0.99431); what does move is time and disk. superfast/14 sits at
+ * roughly half the intermediate bytes of ultrafast/12 (99MB vs 224MB per 6s),
+ * which matters because every cut of a variation is on disk at once and this
+ * worker has been resource-killed before.
  */
-const INTERMEDIATE_CRF = '11';
+const INTERMEDIATE_CRF = '14';
 
 /**
  * Rounds a time to the nearest frame boundary.
@@ -156,8 +167,14 @@ export async function normaliseCut(input: {
     '-filter_complex', videoChain(seconds),
     '-map', '[v]',
     '-an',
-    '-c:v', 'libx264', '-preset', 'veryfast', '-crf', INTERMEDIATE_CRF,
+    '-c:v', 'libx264', '-preset', 'superfast', '-crf', INTERMEDIATE_CRF,
     '-pix_fmt', 'yuv420p',
+    // Carried explicitly so the cut is tagged the same way the source was
+    // (measured: every tester clip is tv-range BT.709). Untagged parts would
+    // leave the final encode to guess, and a guess that lands on full range
+    // washes the picture out.
+    '-colorspace', 'bt709', '-color_primaries', 'bt709', '-color_trc', 'bt709',
+    '-color_range', 'tv',
     input.outputPath,
   ]);
 

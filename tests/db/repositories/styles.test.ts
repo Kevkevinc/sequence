@@ -55,7 +55,9 @@ describe('seedBuiltInStyles', () => {
     expect(all.filter((s) => s.name === 'Dupe Flip')).toHaveLength(1);
 
     expect(mixedCuts?.config).toMatchObject({
-      cutMinSeconds: 2.5,
+      // 1.5-4s is the agreed Mixed Cuts band. This assertion still carried the
+      // 2.5s floor from before that spec and had been failing since.
+      cutMinSeconds: 1.5,
       cutMaxSeconds: 4,
       sizingPlacement: 'bottom-right',
       variesClipOrder: false,

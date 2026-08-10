@@ -40,7 +40,8 @@ import { db } from '@/db/client';
 import { rawClips, editPlans, styles, jobs } from '@/db/schema';
 import { createCreatorIfNotExists } from '@/db/repositories/creators';
 import { createJob } from '@/db/repositories/jobs';
-import { renderPlan } from '@/lib/render/renderPlan';
+import { renderPlan, THUMBNAIL } from '@/lib/render/renderPlan';
+import { WIDTH, HEIGHT } from '@/lib/render/frame';
 import { probeDuration, probeMedia } from '@/lib/render/ffmpeg';
 import { cleanUpCreatorJobs, deleteStylesByName } from '../../helpers/db-cleanup';
 
@@ -222,19 +223,20 @@ describe('renderPlan', () => {
     expect(mockUpload).toHaveBeenCalledTimes(1);
     const rendered = uploadedVideoProperties[0];
     expect(rendered).toEqual({
-      width: 1080,
-      height: 1920,
+      width: WIDTH,
+      height: HEIGHT,
       durationSeconds: expect.any(Number),
       hookPixel: expect.anything(),
     });
 
-    // A real still frame goes up alongside the video, at the video's own
-    // dimensions and under the derived key the UI presigns to find it.
+    // A real still frame goes up alongside the video, under the derived key the
+    // UI presigns to find it. Downscaled rather than kept at the video's own
+    // size — see THUMBNAIL.
     expect(mockUploadThumbnail).toHaveBeenCalledTimes(1);
     expect(uploadedThumbnails[0]).toEqual({
       storageKey: result.success ? result.storageKey : '',
-      width: 1080,
-      height: 1920,
+      width: THUMBNAIL.width,
+      height: THUMBNAIL.height,
     });
 
     const planned = 4 + 4 + 4; // three 4s cuts

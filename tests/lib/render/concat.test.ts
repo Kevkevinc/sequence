@@ -6,6 +6,7 @@ import path from 'path';
 import { runFfmpeg, probeDimensions, probeDuration } from '@/lib/render/ffmpeg';
 import { normaliseCut } from '@/lib/render/normalise';
 import { concatCuts } from '@/lib/render/concat';
+import { WIDTH, HEIGHT } from '@/lib/render/frame';
 
 const FRAME_SECONDS = 1 / 30;
 
@@ -99,7 +100,7 @@ describe('concatCuts', () => {
     // A stream copy should not lose or invent time: a frame of slack across the
     // whole join, not a frame per splice.
     expect(Math.abs((await probeDuration(out)) - expected)).toBeLessThan(FRAME_SECONDS);
-    expect(await probeDimensions(out)).toEqual({ width: 1080, height: 1920 });
+    expect(await probeDimensions(out)).toEqual({ width: WIDTH, height: HEIGHT });
   }, 120_000);
 
   it('preserves the order of the parts', async () => {

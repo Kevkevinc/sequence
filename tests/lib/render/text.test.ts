@@ -14,8 +14,10 @@ import {
   type SizingPlacement,
 } from '@/lib/render/text';
 
-const WIDTH = 1080;
-const HEIGHT = 1920;
+// Imported rather than restated. These were hardcoded to 1080x1920, which
+// silently became a second source of truth the day the output frame changed —
+// the assertions still passed against numbers the renderer no longer used.
+import { WIDTH, HEIGHT } from '@/lib/render/frame';
 
 type Ink = {
   width: number;
@@ -88,7 +90,7 @@ async function frameInk(video: string, seconds: number, dir: string): Promise<In
 const AWKWARD_HOOK = 'POV: it\'s the "best" one, isn\'t it?';
 
 describe('renderHookLayer', () => {
-  it('renders a transparent 1080x1920 layer', () => {
+  it('renders a transparent full-frame layer', () => {
     const { png } = renderHookLayer('anything');
     expect(png.subarray(1, 4).toString('ascii')).toBe('PNG');
     return expect(inkOf(png)).resolves.toMatchObject({ width: WIDTH, height: HEIGHT });
@@ -104,7 +106,7 @@ describe('renderHookLayer', () => {
     expect(blank.count).toBe(0);
     expect(full.count).toBeGreaterThan(1000);
     expect(full.count).toBeGreaterThan(truncatedAtColon.count * 4);
-  });
+  }, 60_000);
 
   it('draws apostrophes and quotes rather than dropping them', async () => {
     // drawtext dropped apostrophes even when escaped. Stripping the punctuation
@@ -113,7 +115,7 @@ describe('renderHookLayer', () => {
     const stripped = await inkOf(renderHookLayer(AWKWARD_HOOK.replace(/['"?]/g, '')).png);
 
     expect(withPunctuation.count).toBeGreaterThan(stripped.count);
-  });
+  }, 60_000);
 
   it('wraps a long hook onto more lines than a short one', async () => {
     const short = renderHookLayer('POV');
@@ -135,7 +137,7 @@ describe('renderHookLayer', () => {
       expect(ink.box.right).toBeLessThan(WIDTH - 1);
       expect(ink.box.bottom).toBeLessThan(HEIGHT / 2);
     }
-  });
+  }, 60_000);
 
   it('keeps a hook of unbroken characters inside the frame', async () => {
     // No spaces to wrap on: a naive wrapper emits one line wider than the frame.
@@ -242,7 +244,7 @@ describe('overlayText', () => {
     // that same open-ended window — so a frame's ink identifies which block
     // is on screen.
     const made = await runFfmpeg([
-      '-f', 'lavfi', '-i', 'color=c=black:s=1080x1920:r=30:d=12',
+      '-f', 'lavfi', '-i', `color=c=black:s=${WIDTH}x${HEIGHT}:r=30:d=12`,
       '-f', 'lavfi', '-i', 'sine=frequency=440:duration=12',
       '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-shortest', source,
     ]);
@@ -323,7 +325,7 @@ describe('overlayText', () => {
   it('keeps a video-only source working', async () => {
     const silent = path.join(dir, 'silent.mp4');
     expect((await runFfmpeg([
-      '-f', 'lavfi', '-i', 'color=c=black:s=1080x1920:r=30:d=6',
+      '-f', 'lavfi', '-i', `color=c=black:s=${WIDTH}x${HEIGHT}:r=30:d=6`,
       '-c:v', 'libx264', '-pix_fmt', 'yuv420p', silent,
     ])).success).toBe(true);
 

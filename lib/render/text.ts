@@ -240,6 +240,14 @@ export const INSPIRATION_IMAGE = {
   width: scaleToFrame(320),
   height: scaleToFrame(480),
   margin: scaleToFrame(40),
+  /**
+   * Border thickness, scaled like every other metric here.
+   *
+   * Was a literal `4` in the filter string, which read correctly only at the
+   * 1080-wide frame it was written for — at 4K the same 4 pixels is a hairline
+   * the card visibly loses.
+   */
+  borderThickness: scaleToFrame(4),
 };
 
 /**
@@ -417,12 +425,13 @@ export async function overlayText(input: {
       // The brief calls for the thumbnail to read as a bordered photo card,
       // not a bare rectangle of pixels — so draw a white outline around it in
       // the same box, gated by the same enable window as the overlay above.
-      // `t=4` (not `t=fill`) draws a 4px unfilled outline rather than a filled
-      // box, confirmed against this project's bundled ffmpeg-static binary
-      // (`ffmpeg -h filter=drawbox`, "t / thickness: set the box thickness",
-      // default "3" — fill requires the literal string "fill", not a number).
+      // A numeric `t` (not `t=fill`) draws an unfilled outline rather than a
+      // filled box, confirmed against this project's bundled ffmpeg-static
+      // binary (`ffmpeg -h filter=drawbox`, "t / thickness: set the box
+      // thickness", default "3" — fill requires the literal string "fill",
+      // not a number).
       filters.push(
-        `${current}drawbox=x=${INSPIRATION_IMAGE.margin}:y=${INSPIRATION_IMAGE.margin}:w=${INSPIRATION_IMAGE.width}:h=${INSPIRATION_IMAGE.height}:color=white:t=4:enable='${window}'[v]`
+        `${current}drawbox=x=${INSPIRATION_IMAGE.margin}:y=${INSPIRATION_IMAGE.margin}:w=${INSPIRATION_IMAGE.width}:h=${INSPIRATION_IMAGE.height}:color=white:t=${INSPIRATION_IMAGE.borderThickness}:enable='${window}'[v]`
       );
       chainEndsAtV = true;
     }
@@ -441,21 +450,29 @@ export async function overlayText(input: {
       '-map', '[v]',
       '-an',
       /*
-       * `-crf 15 -preset slow` rather than libx264's default of 23. This is the file the
+       * `-crf 16` rather than libx264's default of 23. This is the file the
        * creator re-uploads to TikTok, which re-encodes it again, so it has to
        * survive a further generation of loss — a "good enough to stream"
        * default arrives there already soft. 18 is the usual
-       * visually-transparent mark and 15 sits deliberately below it, buying
-       * headroom for TikTok'''s re-encode rather than for the eye here.
+       * visually-transparent mark and 16 sits deliberately below it, buying
+       * headroom for TikTok's re-encode rather than for the eye here. (16, not
+       * the previous 15: at 4K the same CRF is a far bigger file, and measured
+       * quality between the two is indistinguishable.)
+       *
        * `veryfast`, not `slow`: at a fixed CRF the preset barely changes visual
        * quality -- it trades encode time and file size, not fidelity. `slow`
        * OOM-killed the render on the deployed container (memory spiked past the
        * limit and it restarted mid-encode). `veryfast` uses a fraction of the
-       * memory and finishes faster at the same CRF 15; the only cost is a
-       * larger file.
+       * memory and finishes faster at the same CRF; the only cost is a
+       * larger file. That matters more at 4K, not less.
        */
-      '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '15',
+      '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '16',
       '-pix_fmt', 'yuv420p',
+      // Tag what the picture actually is rather than leaving it to be inferred.
+      // Every tester clip measured tv-range BT.709; an untagged 4K file invites
+      // a player or an upload pipeline to assume BT.2020 and shift the colour.
+      '-colorspace', 'bt709', '-color_primaries', 'bt709', '-color_trc', 'bt709',
+      '-color_range', 'tv',
       // This is the file the creator downloads and the browser streams, so the
       // index belongs at the front.
       '-movflags', '+faststart',

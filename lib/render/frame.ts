@@ -13,18 +13,30 @@
  * bitrate at 1080p closed the gap. Matching the source resolution hands TikTok
  * the same thing his own workflow does.
  *
- * Held at 1080p for now regardless, per creator direction to take the fastest
- * option. Measured on one real edit plan so the trade is a known quantity
- * rather than a guess:
+ * 2160x3840 matches what testers actually upload. Every raw clip measured from
+ * the live bucket is 3840x2160 with a -90 display matrix — i.e. exactly
+ * 2160x3840 once ffmpeg autorotates — so `scale` here is now a no-op and the
+ * footage reaches the encoder without being resampled at all.
  *
- *   1080x1920   crf 15 / slow     36.7 Mbps   135MB   160s per variation
- *   2160x3840   crf 18 / medium   60.8 Mbps   224MB   303s per variation
+ * Measured on a real 4K tester clip, each candidate downscaled back to 1080p
+ * and compared (SSIM) against a high-precision downscale of the source, which
+ * is the best any pipeline could deliver:
+ *
+ *   1080x1920   0.9875   1.0x render time   (previous setting)
+ *   1440x2560   0.9910   1.7x
+ *   2160x3840   0.9944   3.7x
+ *
+ * The 1080p loss is visible, not just numeric: on canvas or knit the weave
+ * dissolves into a smooth smear, which is the "blurry / staticy" a tester
+ * reported. Note the scaler was never the problem — lanczos measured best of
+ * five tested (bicubic .9891, spline .9902, area .9886, bilinear .9771).
  *
  * Changing the two constants below is the whole change; every caption metric
- * scales from them.
+ * scales from them. Dropping to 1440x2560 buys back roughly half the render
+ * time for a third of the quality gain if throughput ever matters more.
  */
-export const WIDTH = 1080;
-export const HEIGHT = 1920;
+export const WIDTH = 2160;
+export const HEIGHT = 3840;
 
 export const FPS = 30;
 

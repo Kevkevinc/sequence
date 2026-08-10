@@ -10,6 +10,7 @@ import {
   probeHasAudio,
   probeRotation,
 } from '@/lib/render/ffmpeg';
+import { WIDTH, HEIGHT } from '@/lib/render/frame';
 import { normaliseCut } from '@/lib/render/normalise';
 
 /**
@@ -63,7 +64,7 @@ describe('normaliseCut', () => {
     await rm(dir, { recursive: true, force: true });
   });
 
-  it('trims to the requested range and reframes to 1080x1920', async () => {
+  it('trims to the requested range and reframes to the output frame', async () => {
     const out = path.join(dir, 'cut.mp4');
     const result = await normaliseCut({
       sourcePath: source, startSeconds: 2, endSeconds: 5, outputPath: out,
@@ -72,7 +73,7 @@ describe('normaliseCut', () => {
     expect(result.success).toBe(true);
     expect(existsSync(out)).toBe(true);
 
-    expect(await probeDimensions(out)).toEqual({ width: 1080, height: 1920 });
+    expect(await probeDimensions(out)).toEqual({ width: WIDTH, height: HEIGHT });
     // Allow a frame of slack; ffmpeg cuts on frame boundaries.
     expect(await probeDuration(out)).toBeCloseTo(3, 1);
   }, 60_000);
@@ -131,12 +132,16 @@ describe('normaliseCut', () => {
     });
     expect(result.success).toBe(true);
 
-    expect(await probeDimensions(out)).toEqual({ width: 1080, height: 1920 });
+    expect(await probeDimensions(out)).toEqual({ width: WIDTH, height: HEIGHT });
     // Upright: blue across the top, the red band along the bottom. Ignoring the
     // rotation would instead crop the middle of the landscape frame, leaving
     // blue at both sample points.
-    expect(isBlue(await samplePixel(out, 540, 192, dir))).toBe(true);
-    expect(isRed(await samplePixel(out, 540, 1728, dir))).toBe(true);
+    // Sampled as fractions of the frame, not the pixel coordinates of the
+    // 1080x1920 output this was written against — otherwise the two probes
+    // wander off the intended bands the moment the frame size changes.
+    const midX = Math.round(WIDTH / 2);
+    expect(isBlue(await samplePixel(out, midX, Math.round(HEIGHT * 0.1), dir))).toBe(true);
+    expect(isRed(await samplePixel(out, midX, Math.round(HEIGHT * 0.9), dir))).toBe(true);
 
     // The output is physically upright, so it must not also carry a rotation
     // tag — a player would rotate it a second time.
