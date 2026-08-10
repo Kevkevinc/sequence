@@ -13,30 +13,40 @@
  * bitrate at 1080p closed the gap. Matching the source resolution hands TikTok
  * the same thing his own workflow does.
  *
- * 2160x3840 matches what testers actually upload. Every raw clip measured from
- * the live bucket is 3840x2160 with a -90 display matrix — i.e. exactly
- * 2160x3840 once ffmpeg autorotates — so `scale` here is now a no-op and the
- * footage reaches the encoder without being resampled at all.
+ * Held at 1080x1920, which is also what TikTok delivers. Raising it was
+ * investigated at length after a tester reported the output looking soft and
+ * "staticy" beside videos he cuts by hand, and the investigation landed
+ * somewhere other than where it started — worth recording so it isn't redone.
  *
- * Measured on a real 4K tester clip, each candidate downscaled back to 1080p
- * and compared (SSIM) against a high-precision downscale of the source, which
- * is the best any pipeline could deliver:
+ * Sources are 3840x2160 with a -90 display matrix (2160x3840 once ffmpeg
+ * autorotates), so this frame does discard three quarters of the incoming
+ * pixels. Measured end-to-end in the shape this pipeline actually runs (cut
+ * pass, then text pass), against the 4K source, on a deliberately hard clip —
+ * handheld, textured fabric and stucco. Error is 1-SSIM, lower is better:
  *
- *   1080x1920   0.9875   1.0x render time   (previous setting)
- *   1440x2560   0.9910   1.7x
- *   2160x3840   0.9944   3.7x
+ *   1080x1920  crf 11/15   1.0x   149MB/30s   0.0249   (what testers saw)
+ *   1440x2560  crf 11/13   1.5x   295MB/30s   0.0135
+ *   2160x3840  crf 14/16   4.1x   336MB/30s   0.0107
+ *   2160x3840  crf 12/14   5.2x   427MB/30s   0.0083
  *
- * The 1080p loss is visible, not just numeric: on canvas or knit the weave
- * dissolves into a smooth smear, which is the "blurry / staticy" a tester
- * reported. Note the scaler was never the problem — lanczos measured best of
- * five tested (bicubic .9891, spline .9902, area .9886, bilinear .9771).
+ * Raising the frame looks like the fix in that table, but most of that gap is
+ * not the frame size. Holding resolution at 1080 and only moving the final
+ * pass from crf 15 to 13 recovers most of the visible texture on its own, and
+ * a mild {@link DOWNSCALE_SHARPEN} restores the rest — see the strip in
+ * `local-videos/Test 11 …/sharpen-test.png`, where 1080p tuned that way is
+ * hard to tell from 1440p at 1:1. Since delivery is 1080p regardless, detail
+ * that only exists above it buys nothing but render time and upload size.
+ *
+ * Two things that are *not* the lever, recorded so nobody re-derives them:
+ * the scaler (lanczos measured best of five — spline .9902, bicubic .9891,
+ * area .9886, bilinear .9771), and bitrate on its own (1080p at 294Mbps
+ * lossless still trails a tuned 1440p at 84Mbps).
  *
  * Changing the two constants below is the whole change; every caption metric
- * scales from them. Dropping to 1440x2560 buys back roughly half the render
- * time for a third of the quality gain if throughput ever matters more.
+ * scales from them.
  */
-export const WIDTH = 2160;
-export const HEIGHT = 3840;
+export const WIDTH = 1080;
+export const HEIGHT = 1920;
 
 export const FPS = 30;
 

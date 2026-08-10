@@ -12,9 +12,26 @@ import { FPS, HEIGHT, WIDTH } from '@/lib/render/frame';
  * stored landscape with a 90-degree display matrix reaches this chain already
  * upright, and the re-encode drops the tag so nothing rotates it twice.
  */
+/**
+ * Mild unsharp mask, applied immediately after the downscale.
+ *
+ * Shrinking 4K phone footage to 1080p necessarily softens it — four pixels of
+ * fabric weave average into one — and that softness is most of what a tester
+ * meant by the output looking worse than his own edits. Sharpening after the
+ * scale puts the apparent detail back.
+ *
+ * 0.8 is deliberately restrained. It was chosen against a stack of strengths
+ * on textured fabric: at 1.4 the same clip stops reading as detailed and
+ * starts reading as gritty, because an unsharp mask amplifies sensor noise
+ * along with real texture — which would re-create the exact "staticy"
+ * complaint this is meant to fix. Luma only (the trailing `0.0`); sharpening
+ * chroma on 4:2:0 footage buys nothing and invites colour fringing.
+ */
+const DOWNSCALE_SHARPEN = 'unsharp=5:5:0.8:5:5:0.0';
+
 const REFRAME =
   `scale=${WIDTH}:${HEIGHT}:force_original_aspect_ratio=increase:flags=lanczos,` +
-  `crop=${WIDTH}:${HEIGHT},setsar=1,fps=${FPS}`;
+  `crop=${WIDTH}:${HEIGHT},${DOWNSCALE_SHARPEN},setsar=1,fps=${FPS}`;
 
 /**
  * Quality of the per-cut intermediate.
@@ -25,18 +42,12 @@ const REFRAME =
  * a first-generation loss. The files are large but live only for the length of
  * one render, inside a temp directory that is deleted either way.
  *
- * `superfast` rather than `veryfast`, and crf 14 rather than 11, now that the
- * frame is 4K. This pass is throwaway — its only real job is to make every cut
- * agree on codec, size and frame rate so {@link concatCuts} can stream-copy
- * them — so spending encoder effort here buys nothing the final pass keeps.
- * Measured across a 4K cut, final quality is flat to three decimal places
- * whether this pass runs at ultrafast/12 (0.99466), superfast/14 (0.99444) or
- * veryfast/15 (0.99431); what does move is time and disk. superfast/14 sits at
- * roughly half the intermediate bytes of ultrafast/12 (99MB vs 224MB per 6s),
- * which matters because every cut of a variation is on disk at once and this
- * worker has been resource-killed before.
+ * `superfast` rather than `veryfast`: this pass is throwaway — its only real
+ * job is to make every cut agree on codec, size and frame rate so
+ * {@link concatCuts} can stream-copy them — so encoder effort here buys
+ * nothing the final pass keeps, and the faster preset costs only disk.
  */
-const INTERMEDIATE_CRF = '14';
+const INTERMEDIATE_CRF = '11';
 
 /**
  * Rounds a time to the nearest frame boundary.

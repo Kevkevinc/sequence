@@ -6,16 +6,8 @@ import { getEnvWithDefault } from '@/lib/env';
 
 const execFileAsync = promisify(execFile);
 
-/**
- * Longest any single ffmpeg invocation may run before being killed.
- *
- * Raised from 10 minutes when the output frame went to 4K. The text pass
- * re-encodes the whole video in one invocation, and the ceiling has to clear
- * the worst legitimate case — a 60-second edit (the length slider's maximum)
- * on a container several times slower than a desktop — or the timeout starts
- * killing renders that were merely slow rather than stuck.
- */
-const FFMPEG_TIMEOUT_MS = 20 * 60 * 1000;
+/** Longest any single ffmpeg invocation may run before being killed. */
+const FFMPEG_TIMEOUT_MS = 10 * 60 * 1000;
 
 /** ffprobe only reads headers, so it has no business taking longer than this. */
 const FFPROBE_TIMEOUT_MS = 60 * 1000;

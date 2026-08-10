@@ -450,23 +450,27 @@ export async function overlayText(input: {
       '-map', '[v]',
       '-an',
       /*
-       * `-crf 16` rather than libx264's default of 23. This is the file the
+       * `-crf 13`, well below libx264's default of 23. This is the file the
        * creator re-uploads to TikTok, which re-encodes it again, so it has to
        * survive a further generation of loss — a "good enough to stream"
-       * default arrives there already soft. 18 is the usual
-       * visually-transparent mark and 16 sits deliberately below it, buying
-       * headroom for TikTok's re-encode rather than for the eye here. (16, not
-       * the previous 15: at 4K the same CRF is a far bigger file, and measured
-       * quality between the two is indistinguishable.)
+       * default arrives there already soft.
+       *
+       * 13 rather than the 15 this shipped with, because 15 turned out to be a
+       * real part of why testers saw soft footage. CRF sacrifices fine
+       * high-frequency detail first, and downscaled 4K footage is almost
+       * entirely fine high-frequency detail; on textured fabric the difference
+       * between 15 and 13 at the same resolution is plainly visible. 18 is the
+       * usual visually-transparent mark, so this sits well under it, buying
+       * headroom for TikTok's re-encode rather than for the eye here.
        *
        * `veryfast`, not `slow`: at a fixed CRF the preset barely changes visual
        * quality -- it trades encode time and file size, not fidelity. `slow`
        * OOM-killed the render on the deployed container (memory spiked past the
        * limit and it restarted mid-encode). `veryfast` uses a fraction of the
        * memory and finishes faster at the same CRF; the only cost is a
-       * larger file. That matters more at 4K, not less.
+       * larger file.
        */
-      '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '16',
+      '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '13',
       '-pix_fmt', 'yuv420p',
       // Tag what the picture actually is rather than leaving it to be inferred.
       // Every tester clip measured tv-range BT.709; an untagged 4K file invites
