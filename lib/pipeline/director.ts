@@ -569,9 +569,70 @@ function round2(seconds: number): number {
  * the validator to reject in the normal way — this widens the set of plans that
  * pass, and can never let a bad one through.
  */
+/**
+ * Candidate replacements for a colliding cut, in order of least disruption.
+ *
+ * Sliding the cut while preserving its duration comes first, because the
+ * video's total length is the sum of its cut lengths and a pure slide cannot
+ * disturb it. Only when the clip has no room to slide — a 2-second clip
+ * holding a 2-second cut has exactly one legal position — does this fall back
+ * to trimming an end, which changes the total slightly but is absorbed by the
+ * duration tolerance and is the only thing that can distinguish two cuts from
+ * a clip that short.
+ */
+function* replacementCuts(
+  cut: Cut,
+  footageEnd: number,
+  band: PacingBand
+): Generator<{ startSeconds: number; endSeconds: number }> {
+  const duration = cutDuration(cut);
+  const STEP = 0.1;
+  const MAX_STEPS = 30;
+
+  // 1. Slide, keeping the length exactly.
+  for (let step = 1; step <= MAX_STEPS; step++) {
+    for (const direction of [1, -1]) {
+      const startSeconds = round2(cut.startSeconds + direction * step * STEP);
+      const endSeconds = round2(startSeconds + duration);
+      if (startSeconds >= 0 && endSeconds <= footageEnd) yield { startSeconds, endSeconds };
+    }
+  }
+
+  // 2. Trim the end, then the start, staying inside the pacing band.
+  for (let step = 1; step <= MAX_STEPS; step++) {
+    const shorter = round2(duration - step * STEP);
+    if (shorter < band.min) break;
+
+    const trimmedEnd = round2(cut.startSeconds + shorter);
+    if (cut.startSeconds >= 0 && trimmedEnd <= footageEnd) {
+      yield { startSeconds: round2(cut.startSeconds), endSeconds: trimmedEnd };
+    }
+
+    const trimmedStart = round2(cut.endSeconds - shorter);
+    if (trimmedStart >= 0 && cut.endSeconds <= footageEnd) {
+      yield { startSeconds: trimmedStart, endSeconds: round2(cut.endSeconds) };
+    }
+  }
+}
+
+/**
+ * Nudges cuts that are byte-identical across variations until they are not.
+ *
+ * The validator forbids two variations sharing the exact same frames, and the
+ * model cannot reliably satisfy that: with a hundred cuts drawn from one pool
+ * of tagged moments, collisions are close to inevitable, and several live jobs
+ * died on it having burned three model calls each. The error message told the
+ * model to "shift its start and end so it shows a different moment" — which is
+ * a mechanical adjustment, so this performs it rather than asking again.
+ *
+ * Best-effort by design. Anything it cannot place is left exactly as it was for
+ * the validator to reject in the normal way — this widens the set of plans that
+ * pass and can never let a bad one through.
+ */
 export function dedupeIdenticalCuts(
   variations: Array<{ segments: Cut[] }>,
-  footageEndByClipId: Map<string, number>
+  footageEndByClipId: Map<string, number>,
+  band: PacingBand
 ): void {
   /*
    * Variations that are a wholesale copy of an earlier one are skipped, and
@@ -582,11 +643,6 @@ export function dedupeIdenticalCuts(
    * technically distinct while leaving the creator with two videos they cannot
    * tell apart. That rule is about the deliverable, not about frame
    * fingerprints, and only a genuinely different edit fixes it.
-   *
-   * Skipping *per variation* rather than abandoning the whole pass matters: a
-   * first attempt at this disabled the repair entirely whenever any duplicate
-   * pair existed anywhere in the plan, which is why a live job failed a second
-   * time on exactly the collision this is meant to absorb.
    */
   const seenSequences = new Set<string>();
   const isWholesaleCopy = variations.map((variation) => {
@@ -605,15 +661,6 @@ export function dedupeIdenticalCuts(
   let skippedAsCopy = 0;
   const unplaceable: string[] = [];
 
-  // Alternating and widening, so the first thing tried is the smallest change
-  // that could work and the search stays centred on the moment the model chose.
-  // Ranges out to three seconds because a ten-variation plan draws ~100 cuts
-  // from a few dozen tagged moments, and the popular ones get crowded.
-  const offsets: number[] = [];
-  for (let step = 1; step <= 30; step++) {
-    offsets.push(step * 0.1, -step * 0.1);
-  }
-
   variations.forEach((variation, index) => {
     for (const cut of variation.segments) {
       const key = segmentKey(cut);
@@ -630,7 +677,6 @@ export function dedupeIdenticalCuts(
       }
 
       collisions++;
-      const duration = cutDuration(cut);
       const footageEnd = footageEndByClipId.get(cut.rawClipId);
       if (footageEnd === undefined) {
         unplaceable.push(`${cut.rawClipId} (no footage length known)`);
@@ -638,16 +684,12 @@ export function dedupeIdenticalCuts(
       }
 
       let placed = false;
-      for (const offset of offsets) {
-        const startSeconds = round2(cut.startSeconds + offset);
-        const endSeconds = round2(startSeconds + duration);
-        if (startSeconds < 0 || endSeconds > footageEnd) continue;
-
-        const candidateKey = segmentKey({ ...cut, startSeconds, endSeconds });
+      for (const candidate of replacementCuts(cut, footageEnd, band)) {
+        const candidateKey = segmentKey({ ...cut, ...candidate });
         if (firstUse.has(candidateKey)) continue;
 
-        cut.startSeconds = startSeconds;
-        cut.endSeconds = endSeconds;
+        cut.startSeconds = candidate.startSeconds;
+        cut.endSeconds = candidate.endSeconds;
         firstUse.set(candidateKey, index);
         placed = true;
         break;
@@ -1695,7 +1737,7 @@ export async function planJob(
         // decides whether the plan is acceptable — repairing before validating
         // can widen what passes but never let something invalid through.
         const raw = DirectorResponseSchema.parse(parseFirstJsonValue(response.text ?? ''));
-        dedupeIdenticalCuts(raw.variations, footageEndByClipId);
+        dedupeIdenticalCuts(raw.variations, footageEndByClipId, band);
         parsed = validator.parse(raw);
         break;
       } catch (validationError) {

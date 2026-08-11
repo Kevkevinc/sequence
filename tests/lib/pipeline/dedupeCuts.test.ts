@@ -4,6 +4,9 @@ import { dedupeIdenticalCuts } from '@/lib/pipeline/director';
 const CLIP = '11111111-1111-4111-8111-111111111111';
 const OTHER = '22222222-2222-4222-8222-222222222222';
 
+/** Fit Inspo's band, which is what the failing live jobs ran under. */
+const BAND = { min: 1.5, max: 4 };
+
 function cut(rawClipId: string, startSeconds: number, endSeconds: number) {
   return { rawClipId, startSeconds, endSeconds };
 }
@@ -34,13 +37,13 @@ describe('dedupeIdenticalCuts', () => {
       { segments: [cut(CLIP, 8, 10)] },
     ];
     const before = JSON.stringify(variations);
-    dedupeIdenticalCuts(variations, new Map([[CLIP, 30]]));
+    dedupeIdenticalCuts(variations, new Map([[CLIP, 30]]), BAND);
     expect(JSON.stringify(variations)).toBe(before);
   });
 
   it('shifts a cut shared by two otherwise-different variations', () => {
     const variations = collidingPlan(2, cut(CLIP, 0.2, 1.7));
-    dedupeIdenticalCuts(variations, new Map([[CLIP, 30]]));
+    dedupeIdenticalCuts(variations, new Map([[CLIP, 30]]), BAND);
 
     const all = keys(variations);
     expect(new Set(all).size).toBe(all.length);
@@ -50,7 +53,7 @@ describe('dedupeIdenticalCuts', () => {
 
   it('preserves each cut’s duration exactly, so pacing and total length are untouched', () => {
     const variations = collidingPlan(3, cut(CLIP, 1, 3.5));
-    dedupeIdenticalCuts(variations, new Map([[CLIP, 40]]));
+    dedupeIdenticalCuts(variations, new Map([[CLIP, 40]]), BAND);
 
     for (const variation of variations) {
       expect(variation.segments[0].endSeconds - variation.segments[0].startSeconds).toBeCloseTo(2.5, 6);
@@ -66,7 +69,7 @@ describe('dedupeIdenticalCuts', () => {
       { segments: [cut(CLIP, 8, 10), cut(CLIP, 0, 2)] },
       { segments: [cut(CLIP, 8, 10), cut(CLIP, 3, 5)] },
     ];
-    dedupeIdenticalCuts(variations, new Map([[CLIP, 10]]));
+    dedupeIdenticalCuts(variations, new Map([[CLIP, 10]]), BAND);
 
     for (const variation of variations) {
       for (const segment of variation.segments) {
@@ -78,16 +81,38 @@ describe('dedupeIdenticalCuts', () => {
     expect(new Set(all).size).toBe(all.length);
   });
 
-  it('leaves a cut alone when its clip has no room to move it', () => {
-    // Footage exactly as long as the shared cut: every shift leaves the clip,
-    // so the repair must decline and let the validator reject in the normal way
-    // rather than emit a cut running past the end of the video.
+  it('trims a cut that fills its whole clip, since it cannot slide', () => {
+    /*
+     * The live failure this was written for: a 2-second clip holding a
+     * 2-second cut has exactly one legal position, so no slide exists and the
+     * job died. Shortening it slightly is the only way two variations can show
+     * different frames of a clip that short, and a tenth of a second is
+     * absorbed by the duration tolerance.
+     */
     const variations = [
-      { segments: [cut(CLIP, 0, 10), cut(OTHER, 0, 2)] },
-      { segments: [cut(CLIP, 0, 10), cut(OTHER, 4, 6)] },
+      { segments: [cut(CLIP, 0, 2), cut(OTHER, 0, 2)] },
+      { segments: [cut(CLIP, 0, 2), cut(OTHER, 4, 6)] },
     ];
-    dedupeIdenticalCuts(variations, new Map([[CLIP, 10], [OTHER, 30]]));
-    expect(variations[1].segments[0]).toEqual(cut(CLIP, 0, 10));
+    dedupeIdenticalCuts(variations, new Map([[CLIP, 2], [OTHER, 30]]), BAND);
+
+    const moved = variations[1].segments[0];
+    expect(moved).not.toEqual(cut(CLIP, 0, 2));
+    expect(moved.startSeconds).toBeGreaterThanOrEqual(0);
+    expect(moved.endSeconds).toBeLessThanOrEqual(2);
+    // Still a legal cut: never shorter than the pacing band allows.
+    expect(moved.endSeconds - moved.startSeconds).toBeGreaterThanOrEqual(BAND.min);
+  });
+
+  it('still declines when even trimming cannot make a distinct cut', () => {
+    // A clip exactly as long as the band's minimum has one legal cut and no
+    // shorter one, so the repair must leave it for the validator rather than
+    // emit something unrenderable.
+    const variations = [
+      { segments: [cut(CLIP, 0, 1.5), cut(OTHER, 0, 2)] },
+      { segments: [cut(CLIP, 0, 1.5), cut(OTHER, 4, 6)] },
+    ];
+    dedupeIdenticalCuts(variations, new Map([[CLIP, 1.5], [OTHER, 30]]), BAND);
+    expect(variations[1].segments[0]).toEqual(cut(CLIP, 0, 1.5));
   });
 
   it('treats the same timestamps on different clips as already distinct', () => {
@@ -95,7 +120,7 @@ describe('dedupeIdenticalCuts', () => {
       { segments: [cut(CLIP, 0, 2), cut(CLIP, 6, 8)] },
       { segments: [cut(OTHER, 0, 2), cut(CLIP, 9, 11)] },
     ];
-    dedupeIdenticalCuts(variations, new Map([[CLIP, 30], [OTHER, 30]]));
+    dedupeIdenticalCuts(variations, new Map([[CLIP, 30], [OTHER, 30]]), BAND);
     expect(variations[1].segments[0]).toEqual(cut(OTHER, 0, 2));
   });
 
@@ -106,7 +131,7 @@ describe('dedupeIdenticalCuts', () => {
       { segments: [cut(CLIP, 0, 2), cut(CLIP, 0, 2)] },
       { segments: [cut(CLIP, 9, 11)] },
     ];
-    dedupeIdenticalCuts(variations, new Map([[CLIP, 30]]));
+    dedupeIdenticalCuts(variations, new Map([[CLIP, 30]]), BAND);
     expect(variations[0].segments[1]).toEqual(cut(CLIP, 0, 2));
   });
 
@@ -115,7 +140,7 @@ describe('dedupeIdenticalCuts', () => {
     // times over, is what three real jobs died on after burning three model
     // calls each.
     const variations = collidingPlan(10, cut(CLIP, 0.2, 1.7));
-    dedupeIdenticalCuts(variations, new Map([[CLIP, 40]]));
+    dedupeIdenticalCuts(variations, new Map([[CLIP, 40]]), BAND);
 
     const all = keys(variations);
     expect(new Set(all).size).toBe(all.length);
@@ -132,14 +157,14 @@ describe('dedupeIdenticalCuts and wholesale duplicates', () => {
       { segments: [cut(CLIP, 0, 2), cut(CLIP, 4, 6)] },
     ];
     const before = JSON.stringify(variations);
-    dedupeIdenticalCuts(variations, new Map([[CLIP, 30]]));
+    dedupeIdenticalCuts(variations, new Map([[CLIP, 30]]), BAND);
     expect(JSON.stringify(variations)).toBe(before);
   });
 
   it('treats two single-cut variations on the same cut as a duplicate, not a collision', () => {
     const variations = [{ segments: [cut(CLIP, 0, 2)] }, { segments: [cut(CLIP, 0, 2)] }];
     const before = JSON.stringify(variations);
-    dedupeIdenticalCuts(variations, new Map([[CLIP, 30]]));
+    dedupeIdenticalCuts(variations, new Map([[CLIP, 30]]), BAND);
     expect(JSON.stringify(variations)).toBe(before);
   });
 
@@ -148,7 +173,7 @@ describe('dedupeIdenticalCuts and wholesale duplicates', () => {
       { segments: [cut(CLIP, 0, 2), cut(CLIP, 4, 6)] },
       { segments: [cut(CLIP, 0, 2), cut(CLIP, 10, 12)] },
     ];
-    dedupeIdenticalCuts(variations, new Map([[CLIP, 30]]));
+    dedupeIdenticalCuts(variations, new Map([[CLIP, 30]]), BAND);
 
     const all = keys(variations);
     expect(new Set(all).size).toBe(all.length);
@@ -167,7 +192,7 @@ describe('dedupeIdenticalCuts under crowding', () => {
       { segments: [cut(CLIP, 0.2, 1.6), cut(CLIP, 5, 7)] }, // wholesale copy of #1
       { segments: [cut(CLIP, 0.2, 1.6), cut(CLIP, 12, 14)] }, // ordinary collision
     ];
-    dedupeIdenticalCuts(variations, new Map([[CLIP, 40]]));
+    dedupeIdenticalCuts(variations, new Map([[CLIP, 40]]), BAND);
 
     // The copy is left for the validator to reject...
     expect(variations[1].segments).toEqual([cut(CLIP, 0.2, 1.6), cut(CLIP, 5, 7)]);
@@ -185,7 +210,7 @@ describe('dedupeIdenticalCuts under crowding', () => {
     const variations = Array.from({ length: 10 }, (_, index) => ({
       segments: [cut(CLIP, 0.2, 1.6), cut(CLIP, 20 + index, 22 + index)],
     }));
-    dedupeIdenticalCuts(variations, new Map([[CLIP, 40]]));
+    dedupeIdenticalCuts(variations, new Map([[CLIP, 40]]), BAND);
 
     const openings = variations.map((v) => `${v.segments[0].startSeconds}-${v.segments[0].endSeconds}`);
     expect(new Set(openings).size).toBe(10);
