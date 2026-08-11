@@ -36,6 +36,14 @@ export const creators = pgTable('creators', {
   cohort: creatorCohortEnum('cohort').notNull().default('beta'),
   audience: creatorAudienceEnum('audience').notNull().default('any'),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  /**
+   * The creator's own caption look, used as the starting point in Custom mode.
+   *
+   * Style mode takes its defaults from the style instead — a style is a look,
+   * and picking one should bring its captions with it. This is the personal
+   * default for jobs that are not following a style.
+   */
+  captionSettings: jsonb('caption_settings'),
 });
 
 // Declared before `jobs` so `jobs.styleId` can reference it directly.
@@ -70,6 +78,16 @@ export const jobs = pgTable('jobs', {
   attempts: integer('attempts').notNull().default(0),
   failureReason: text('failure_reason'),
   warning: text('warning'),
+  /**
+   * Caption look and position chosen for this job specifically.
+   *
+   * Null means "whatever the style or the creator's profile says", which is the
+   * normal case — this only holds a value when the creator tweaked something on
+   * the preview screen for this one video. Stored as jsonb and re-validated on
+   * read (see lib/render/captionSettings.ts): the shape will grow, and a job
+   * written before a field existed must keep rendering.
+   */
+  captionSettings: jsonb('caption_settings'),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 });
 

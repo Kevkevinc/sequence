@@ -18,6 +18,24 @@ import {
 // silently became a second source of truth the day the output frame changed —
 // the assertions still passed against numbers the renderer no longer used.
 import { WIDTH, HEIGHT } from '@/lib/render/frame';
+import {
+  DEFAULT_CAPTION_SETTINGS,
+  positionForPlacement,
+  type CaptionSettings,
+} from '@/lib/render/captionSettings';
+
+/**
+ * The settings a legacy placement name means.
+ *
+ * Placements are no longer passed to the renderer directly — they are
+ * translated to fractional coordinates first, so the director's choice and a
+ * creator's dragged position are the same thing by the time anything draws.
+ * These tests still assert per placement, because that is still the contract
+ * the director works in.
+ */
+function atPlacement(placement: SizingPlacement): CaptionSettings {
+  return { ...DEFAULT_CAPTION_SETTINGS, ...positionForPlacement(placement) };
+}
 
 type Ink = {
   width: number;
@@ -175,12 +193,12 @@ describe('renderSizingLayer', () => {
   const SIZING_TEXT = '5\'6", 140 lb, size L';
 
   it('draws the measurement text, quotes and all', async () => {
-    const drawn = await inkOf(renderSizingLayer(SIZING_TEXT, 'bottom-left').png);
+    const drawn = await inkOf(renderSizingLayer(SIZING_TEXT, atPlacement('bottom-left')).png);
     expect(drawn.count).toBeGreaterThan(500);
   });
 
   it.each(SIZING_PLACEMENTS)('puts the block in the %s region', async (placement) => {
-    const ink = await inkOf(renderSizingLayer(SIZING_TEXT, placement as SizingPlacement).png);
+    const ink = await inkOf(renderSizingLayer(SIZING_TEXT, atPlacement(placement as SizingPlacement)).png);
     expect(ink.box).not.toBeNull();
     if (!ink.box) return;
 
@@ -203,7 +221,7 @@ describe('renderSizingLayer', () => {
 
   it('is smaller than the hook', async () => {
     const hook = renderHookLayer('Fit check');
-    const sizing = renderSizingLayer('Fit check', 'bottom-left');
+    const sizing = renderSizingLayer('Fit check', atPlacement('bottom-left'));
     expect(sizing.blockHeight).toBeLessThan(hook.blockHeight);
   });
 });
@@ -211,7 +229,10 @@ describe('renderSizingLayer', () => {
 describe('textColor', () => {
   it('draws in the requested color instead of the default white', async () => {
     const white = await inkOf(renderHookLayer('Fit check').png);
-    const coloredLayer = renderHookLayer('Fit check', { textColor: '#00ff00' });
+    const coloredLayer = renderHookLayer('Fit check', {
+      ...DEFAULT_CAPTION_SETTINGS,
+      textColor: '#00ff00',
+    });
     const colored = await inkOf(coloredLayer.png);
 
     expect(colored.count).toBeGreaterThan(0);

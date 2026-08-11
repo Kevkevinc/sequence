@@ -7,6 +7,13 @@ import { runFfmpeg } from '@/lib/render/ffmpeg';
 import type { FitInspoLayer } from '@/lib/render/fitInspo';
 
 import { HEIGHT, WIDTH, scaled as scaleToFrame } from '@/lib/render/frame';
+import { captionFont } from '@/lib/render/fonts';
+import {
+  DEFAULT_CAPTION_SETTINGS,
+  positionForPlacement,
+  type CaptionSettings,
+} from '@/lib/render/captionSettings';
+import { anchorBlock, blockWidth, layoutTextBlock } from '@/lib/render/textLayout';
 
 /**
  * The placements the director may choose, and the only ones renderable here.
@@ -55,7 +62,7 @@ const EFFECTIVELY_FOREVER_SECONDS = 3600;
 export type TextLayer = { png: Buffer; blockHeight: number };
 
 /** The font file already loaded, so repeat renders do not re-read it. */
-let registeredFrom: string | null = null;
+const registeredFamilies = new Map<string, string>();
 
 /**
  * Loads the committed font by path, under our own family name.
@@ -66,55 +73,26 @@ let registeredFrom: string | null = null;
  * meant a serif. Registering by path makes the rendering identical everywhere,
  * and a missing file is a loud failure rather than a wrong-looking video.
  */
-function registerFont(): void {
-  const fontPath = getEnvWithDefault('RENDER_FONT_PATH', DEFAULT_FONT_FILE);
-  if (registeredFrom === fontPath) return;
-  if (GlobalFonts.registerFromPath(fontPath, FONT_FAMILY) === null) {
-    throw new Error(`Could not load the overlay font from ${fontPath}`);
-  }
-  registeredFrom = fontPath;
-}
+function registerFont(fontId?: string): string {
+  // RENDER_FONT_PATH still wins when set, so the existing escape hatch for
+  // pointing the renderer at an arbitrary TTF keeps working.
+  const override = process.env.RENDER_FONT_PATH;
+  const chosen = captionFont(fontId);
+  const fontPath = override && override.trim()
+    ? override
+    : path.join(process.cwd(), 'assets', 'fonts', chosen.file);
 
-/**
- * Breaks text into lines that fit `maxWidth`, measuring the real glyphs.
- *
- * ffmpeg's drawtext cannot wrap at all, which is one of several reasons it is
- * not used here: a 73-character hook would run off both edges of the frame.
- *
- * A `\n` in the input is a forced break (e.g. the sizing block's "Height /
- * Weight / Size" lines) — each segment between them is wrapped
- * independently, so a deliberate line never gets merged back into the one
- * before it.
- */
-function wrap(ctx: SKRSContext2D, text: string, maxWidth: number): string[] {
-  return text.split('\n').flatMap((segment) => wrapSegment(ctx, segment, maxWidth));
-}
-
-function wrapSegment(ctx: SKRSContext2D, text: string, maxWidth: number): string[] {
-  const lines: string[] = [];
-  let line = '';
-
-  for (const word of text.split(/\s+/).filter(Boolean)) {
-    const candidate = line ? `${line} ${word}` : word;
-    if (ctx.measureText(candidate).width <= maxWidth) {
-      line = candidate;
-      continue;
+  // Each family is registered under its own name and cached by path, so
+  // switching fonts between renders does not re-read a file already loaded and
+  // two families never collide under one name.
+  const family = `UgcFont-${chosen.id}`;
+  if (registeredFamilies.get(family) !== fontPath) {
+    if (GlobalFonts.registerFromPath(fontPath, family) === null) {
+      throw new Error(`Could not load the overlay font from ${fontPath}`);
     }
-    if (line) lines.push(line);
-    // A single word wider than the frame (a URL, or a wall of one character)
-    // has no space to break on, so break it mid-word rather than let it run off
-    // the edge.
-    line = word;
-    while (ctx.measureText(line).width > maxWidth && line.length > 1) {
-      let fitted = line.length - 1;
-      while (fitted > 1 && ctx.measureText(line.slice(0, fitted)).width > maxWidth) fitted -= 1;
-      lines.push(line.slice(0, fitted));
-      line = line.slice(fitted);
-    }
+    registeredFamilies.set(family, fontPath);
   }
-
-  if (line) lines.push(line);
-  return lines;
+  return family;
 }
 
 /** Default when a style does not specify its own color. */
@@ -122,35 +100,16 @@ const DEFAULT_TEXT_COLOR = '#ffffff';
 
 type LayerOptions = {
   text: string;
+  fontId: string;
   fontSize: number;
   lineHeightRatio: number;
   maxWidth: number;
-  align: 'left' | 'center' | 'right';
-  /** Horizontal anchor, interpreted according to `align`. */
-  x: number;
-  /** Top of the block, or a function of its height for bottom-anchored blocks. */
-  y: number | ((blockHeight: number) => number);
+  /** Centre of the block as a fraction of the frame, 0-1 on each axis. */
+  centreXFraction: number;
+  centreYFraction: number;
   textColor: string;
 };
 
-/**
- * Width of the dark outline behind the text, as a fraction of the font size.
- *
- * Was 0.22, which is very heavy — a stroke is centred on the glyph path, so a
- * fifth of the font size means about a tenth of it eating *inward* from every
- * edge. At the current type size that visibly thickened the strokes and filled
- * in the counters of letters like e, a and o, which reads as blurry text even
- * though nothing is actually out of focus.
- *
- * Confirmed against the encoder rather than assumed: the same hook composited
- * with and without an H.264 pass is indistinguishable, so compression was never
- * softening the captions — the outline was. See
- * `local-videos/Test 11 …/text-diagnosis.png`.
- *
- * 0.12 keeps a clearly visible dark edge for legibility over light footage,
- * which is the whole reason the stroke exists, while leaving the letterforms
- * open.
- */
 const STROKE_RATIO = 0.12;
 
 /**
@@ -163,12 +122,12 @@ const STROKE_RATIO = 0.12;
  * the stroke biting into the glyph.
  */
 function renderLayer(options: LayerOptions): TextLayer {
-  registerFont();
+  const family = registerFont(options.fontId);
 
   const canvas = createCanvas(WIDTH, HEIGHT);
   const ctx = canvas.getContext('2d');
-  ctx.font = `${options.fontSize}px "${FONT_FAMILY}"`;
-  ctx.textAlign = options.align;
+  ctx.font = `${options.fontSize}px "${family}"`;
+  ctx.textAlign = 'center';
   ctx.textBaseline = 'top';
   ctx.lineJoin = 'round';
   ctx.miterLimit = 2;
@@ -176,66 +135,81 @@ function renderLayer(options: LayerOptions): TextLayer {
   ctx.lineWidth = Math.round(options.fontSize * STROKE_RATIO);
   ctx.fillStyle = options.textColor;
 
-  const lines = wrap(ctx, options.text, options.maxWidth);
-  const lineHeight = Math.round(options.fontSize * options.lineHeightRatio);
-  const blockHeight = lines.length * lineHeight;
-  const top = typeof options.y === 'number' ? options.y : options.y(blockHeight);
+  // Measured through the same functions the preview uses, so the browser and
+  // the renderer break lines in the same places rather than merely similar ones.
+  const measure = (text: string) => ctx.measureText(text).width;
+  const { lines, lineHeight, blockHeight } = layoutTextBlock({
+    text: options.text,
+    fontSize: options.fontSize,
+    lineHeightRatio: options.lineHeightRatio,
+    maxWidth: options.maxWidth,
+    measure,
+  });
+
+  const { x, top } = anchorBlock({
+    centreXFraction: options.centreXFraction,
+    centreYFraction: options.centreYFraction,
+    blockWidth: blockWidth(lines, measure),
+    blockHeight,
+    frameWidth: WIDTH,
+    frameHeight: HEIGHT,
+    marginPx: scaleToFrame(24),
+  });
 
   for (const [index, line] of lines.entries()) {
     const y = top + index * lineHeight;
-    ctx.strokeText(line, options.x, y);
-    ctx.fillText(line, options.x, y);
+    ctx.strokeText(line, x, y);
+    ctx.fillText(line, x, y);
   }
 
   return { png: canvas.toBuffer('image/png'), blockHeight };
 }
 
-/** The hook: large, centred, its block vertically centred a little above mid-frame. */
-export function renderHookLayer(text: string, options: { textColor?: string } = {}): TextLayer {
+/**
+ * The hook.
+ *
+ * Takes the whole {@link CaptionSettings} rather than a colour alone: font,
+ * size and position are all creator-controlled now, and passing them as one
+ * object is what keeps the preview and the render reading from the same shape.
+ * Defaults reproduce exactly what this drew before any of it was configurable.
+ */
+export function renderHookLayer(
+  text: string,
+  settings: CaptionSettings = DEFAULT_CAPTION_SETTINGS
+): TextLayer {
   return renderLayer({
     text,
-    fontSize: HOOK.fontSize,
+    fontId: settings.fontId,
+    fontSize: scaleToFrame(settings.hookFontSize),
     lineHeightRatio: HOOK.lineHeightRatio,
     maxWidth: HOOK.maxWidth,
-    align: 'center',
-    x: WIDTH / 2,
-    // Centred, not top-anchored: the block's top has to shift up as it grows
-    // to more lines, or a two-line hook would sit lower than a one-line one.
-    y: (blockHeight: number) => Math.round(HEIGHT * HOOK.centerAt - blockHeight / 2),
-    textColor: options.textColor ?? DEFAULT_TEXT_COLOR,
+    centreXFraction: settings.hookX,
+    centreYFraction: settings.hookY,
+    textColor: settings.textColor,
   });
 }
 
 /**
- * The sizing block: smaller, centred within whichever half/quadrant the
- * director chose — e.g. "bottom-right" lands at the centre of the bottom-
- * right quadrant, not hugging the corner of the frame.
+ * The sizing block.
+ *
+ * Positioned from the same fractional coordinates as the hook. The director
+ * still names a placement per variation and a style may still pin one; those
+ * are converted to coordinates by `positionForPlacement` before they reach
+ * here, so only one positioning model exists at this level.
  */
 export function renderSizingLayer(
   text: string,
-  placement: SizingPlacement,
-  options: { textColor?: string } = {}
+  settings: CaptionSettings = DEFAULT_CAPTION_SETTINGS
 ): TextLayer {
-  const known = SIZING_PLACEMENTS.includes(placement) ? placement : 'bottom-left';
-  const [vertical, horizontal] = known.split('-');
-
-  const xCenter =
-    horizontal === 'left' ? WIDTH / 4
-      : horizontal === 'right' ? (WIDTH * 3) / 4
-      : WIDTH / 2;
-  const yCenter = vertical === 'top' ? HEIGHT / 4 : (HEIGHT * 3) / 4;
-
   return renderLayer({
     text,
-    fontSize: SIZING.fontSize,
+    fontId: settings.fontId,
+    fontSize: scaleToFrame(settings.sizingFontSize),
     lineHeightRatio: SIZING.lineHeightRatio,
     maxWidth: SIZING.maxWidth,
-    align: 'center',
-    x: xCenter,
-    // Centred rather than corner-anchored: the block's top has to shift up
-    // as it grows to more lines to keep its centre fixed at yCenter.
-    y: (blockHeight: number) => Math.round(yCenter - blockHeight / 2),
-    textColor: options.textColor ?? DEFAULT_TEXT_COLOR,
+    centreXFraction: settings.sizingX,
+    centreYFraction: settings.sizingY,
+    textColor: settings.textColor,
   });
 }
 
@@ -295,7 +269,14 @@ export async function overlayText(input: {
   hookText: string;
   sizing?: { text: string; placement: SizingPlacement } | null;
   tempDir: string;
-  textColor?: string;
+  /**
+   * How the captions look and where they sit.
+   *
+   * Optional so callers that predate creator-controlled captions keep working:
+   * omitted means the built-in defaults, which are the exact values this
+   * renderer used before any of it was configurable.
+   */
+  captionSettings?: CaptionSettings;
   inspirationImagePath?: string;
   /**
    * Fit Inspo intro images, already cut out and positioned. Composited
@@ -315,6 +296,8 @@ export async function overlayText(input: {
      * screen with no caption over them — the hook and the intro are one beat
      * and should end together.
      */
+    const captions = input.captionSettings ?? DEFAULT_CAPTION_SETTINGS;
+
     const introEndsAt = (input.fitInspoLayers ?? []).reduce(
       (latest, layer) => Math.max(latest, layer.to),
       0
@@ -324,15 +307,21 @@ export async function overlayText(input: {
     // Each layer is recorded *before* it is written, so the cleanup below also
     // removes a PNG whose write failed halfway through.
     if (input.hookText.trim()) {
-      const png = renderHookLayer(input.hookText, { textColor: input.textColor }).png;
+      const png = renderHookLayer(input.hookText, captions).png;
       const file = path.join(input.tempDir, `hook-${unique}.png`);
       layers.push({ file, from: 0, to: hookEndsAt });
       await writeFile(file, png);
     }
 
     if (input.sizing?.text.trim()) {
-      const png = renderSizingLayer(input.sizing.text, input.sizing.placement, {
-        textColor: input.textColor,
+      // The director's per-variation placement still decides where the sizing
+      // block goes unless the creator has positioned it themselves, so it is
+      // folded in as a layer beneath their settings rather than ignored.
+      const png = renderSizingLayer(input.sizing.text, {
+        ...captions,
+        ...(input.captionSettings
+          ? {}
+          : positionForPlacement(input.sizing.placement)),
       }).png;
       /*
        * Starts the instant the hook's own window ends, per creator direction,

@@ -5,7 +5,7 @@ import path from 'path';
 import { z } from 'zod';
 import { inArray, eq } from 'drizzle-orm';
 import { db } from '@/db/client';
-import { editPlans, rawClips, jobs, styles } from '@/db/schema';
+import { editPlans, rawClips, jobs, styles, creators } from '@/db/schema';
 import {
   downloadClipToTempFile,
   uploadRenderThumbnail,
@@ -27,6 +27,7 @@ import { overlayText } from '@/lib/render/text';
 import { probeDuration, runFfmpeg } from '@/lib/render/ffmpeg';
 import type { OverlayPlacement } from '@/lib/editPlan';
 import { StyleConfigSchema } from '@/lib/styles';
+import { resolveCaptionSettings } from '@/lib/render/captionSettings';
 
 /**
  * The shape `editPlans.segments` was written in by the director step. The
@@ -84,7 +85,16 @@ export async function renderPlan(editPlanId: string): Promise<RenderPlanResult> 
       return { success: false, error: `Job ${plan.jobId} for edit plan ${editPlanId} was not found` };
     }
 
-    let textColor: string | undefined;
+    /*
+     * The look this job's captions start from.
+     *
+     * Layered rather than picked: the built-in defaults are the floor, then the
+     * style's own look (Style mode) or the creator's saved look (Custom mode),
+     * then anything the creator tweaked for this one video. Later layers win,
+     * which is the order of specificity a creator expects — see
+     * `resolveCaptionSettings`.
+     */
+    let styleCaptions: unknown;
     let inspirationImageClip: LocalClip | undefined;
     let fitInspoLayers: FitInspoLayer[] = [];
     // Collected here, turned into cutouts further down: generating them needs
@@ -110,7 +120,12 @@ export async function renderPlan(editPlanId: string): Promise<RenderPlanResult> 
           styleWarning =
             "This video's style has an invalid configuration, so it rendered with default text color and no inspiration photo.";
         } else {
-          textColor = parsed.data.textColor;
+          // `textColor` predates the caption-settings object; it is folded in
+          // so styles seeded with only a colour keep applying it.
+          styleCaptions = {
+            ...(parsed.data.captionSettings ?? {}),
+            ...(parsed.data.textColor ? { textColor: parsed.data.textColor } : {}),
+          };
           if (parsed.data.usesInspirationOverlay) {
             const inspirationImage = await getInspirationImageForJob(plan.jobId);
             if (inspirationImage) {
@@ -216,6 +231,20 @@ export async function renderPlan(editPlanId: string): Promise<RenderPlanResult> 
     // failure here costs space, not correctness.
     await rm(cutsDir, { recursive: true, force: true }).catch(() => {});
 
+    /*
+     * In Style mode the style supplies the look; in Custom mode the creator's
+     * own profile does. Either way a per-job tweak sits on top. Only the
+     * relevant one is read — a creator's personal look should not leak into a
+     * job that deliberately chose a style, and vice versa.
+     */
+    const [creator] = job.creatorId
+      ? await db.select().from(creators).where(eq(creators.id, job.creatorId))
+      : [];
+    const captionSettings = resolveCaptionSettings(
+      job.styleId ? styleCaptions : creator?.captionSettings,
+      job.captionSettings
+    );
+
     const finalPath = path.join(tempDir, 'final.mp4');
     const textResult = await overlayText({
       sourcePath: concatPath,
@@ -228,7 +257,7 @@ export async function renderPlan(editPlanId: string): Promise<RenderPlanResult> 
           }
         : null,
       tempDir,
-      textColor,
+      captionSettings,
       inspirationImagePath: inspirationImageClip?.path,
       fitInspoLayers,
     });

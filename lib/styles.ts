@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { OVERLAY_PLACEMENTS } from '@/lib/editPlan';
+import { CaptionSettingsSchema } from '@/lib/render/captionSettings';
 
 /**
  * A style's whole editing recipe, stored as `styles.config` (JSONB).
@@ -28,6 +29,15 @@ export const StyleConfigSchema = z.object({
     .min(1),
   /** Hex color for hook/sizing text. Unset = today's default (white fill, black outline). */
   textColor: z.string().optional(),
+  /**
+   * The caption look this style brings with it: font, sizes and positions.
+   *
+   * A style is a look, so picking one should bring its captions along. Partial
+   * and optional — a style that says nothing here renders with the built-in
+   * defaults, which is every style seeded before this existed. The creator can
+   * still override any of it for a single job from the preview screen.
+   */
+  captionSettings: CaptionSettingsSchema.partial().optional(),
   /** Pins sizing text to one corner for every variation of this style, instead of letting the director pick freely. */
   sizingPlacement: z.enum(OVERLAY_PLACEMENTS).optional(),
   /** Whether the director rotates each variation between b-roll-first / try-on-first / mixed clip ordering. */

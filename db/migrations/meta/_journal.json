@@ -71,6 +71,13 @@
       "when": 1786406716632,
       "tag": "0009_mature_living_tribunal",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1786434478283,
+      "tag": "0010_next_tyrannus",
+      "breakpoints": true
     }
   ]
 }
