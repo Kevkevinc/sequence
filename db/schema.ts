@@ -235,3 +235,29 @@ export const workerHeartbeats = pgTable('worker_heartbeats', {
   /** What the process is currently doing, for the dashboard's status line. */
   activity: text('activity'),
 });
+
+/**
+ * A phone (or browser) a creator has allowed notifications on.
+ *
+ * One row per device, not per creator: somebody who installs Sequence on a
+ * phone and a laptop expects "your videos are ready" on both, and the push
+ * service issues a separate endpoint for each.
+ *
+ * `endpoint` is the address the push service gave us and is unique per device,
+ * so re-subscribing the same phone updates its row rather than accumulating
+ * dead ones. Subscriptions expire and get revoked routinely — a phone that has
+ * been wiped, an app that was removed — so the sender deletes a row the moment
+ * the push service reports it gone, and nothing here is treated as permanent.
+ */
+export const pushSubscriptions = pgTable('push_subscriptions', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  creatorId: uuid('creator_id')
+    .notNull()
+    .references(() => creators.id),
+  endpoint: text('endpoint').notNull().unique(),
+  /** Public key of the device, used to encrypt the payload to it. */
+  p256dh: text('p256dh').notNull(),
+  /** Shared secret for the same encryption. */
+  auth: text('auth').notNull(),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+});

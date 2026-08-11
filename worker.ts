@@ -8,6 +8,7 @@ import { describeCause } from '@/lib/pipeline/errors';
 import { isTransientError } from '@/lib/pipeline/retry';
 import { renderPlan } from '@/lib/render/renderPlan';
 import { renderTalkingJob } from '@/lib/pipeline/talkingHead';
+import { jobFinishedMessage, notifyCreator } from '@/lib/push';
 
 const POLL_INTERVAL_MS = 5000;
 
@@ -556,10 +557,33 @@ async function renderTalkingHeadJob(jobId: string): Promise<void> {
     .where(eq(renders.id, render.id));
 
   await db.update(jobs).set({ status: 'done', failureReason: null }).where(eq(jobs.id, jobId));
+  await announceFinishedJob(jobId, 1);
   log(
     `  Talking edit done in ${since(startedAt)}: ${result.durationSeconds.toFixed(1)}s kept, ` +
       `${result.removedSeconds.toFixed(1)}s of pauses removed`
   );
+}
+
+/**
+ * Tells the creator their videos are ready, on whatever device they allowed.
+ *
+ * A render takes ten to fifteen minutes, so by the time it lands the creator
+ * has closed the app. This is the only channel that reaches them. Failures are
+ * swallowed inside `notifyCreator`: the videos already exist and are already
+ * stored, so a job must never be reported as failed because a phone could not
+ * be buzzed.
+ */
+async function announceFinishedJob(jobId: string, videoCount: number): Promise<void> {
+  try {
+    const [job] = await db.select().from(jobs).where(eq(jobs.id, jobId));
+    if (!job) return;
+    await notifyCreator(
+      job.creatorId,
+      jobFinishedMessage({ productName: job.productName, videoCount, jobId })
+    );
+  } catch (error) {
+    console.warn(`Job ${jobId}: could not send the finished notification: ${describeCause(error)}`);
+  }
 }
 
 export async function renderJob(jobId: string): Promise<void> {
@@ -612,6 +636,7 @@ export async function renderJob(jobId: string): Promise<void> {
 
     try {
       await db.update(jobs).set({ status: 'done', failureReason: null }).where(eq(jobs.id, jobId));
+      await announceFinishedJob(jobId, succeeded);
     } catch (error) {
       // Every render row is already correctly `done`/`failed` by this point —
       // only this last write failed. Falling through to the outer catch's

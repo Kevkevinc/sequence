@@ -20,6 +20,7 @@ import {
   IconError,
   IconWarning,
 } from '@/components/icons';
+import { NotifyWhenReady } from '@/components/NotifyWhenReady';
 
 type Variation = {
   variationNumber: number;
@@ -245,6 +246,12 @@ export default function JobDetailPage() {
             <div style={{ marginTop: 12 }}>
               <StatusBadge status={job.status} />
             </div>
+
+            {/* Offered only while the job is still running: this is the moment
+                the creator has an obvious reason to want to be told, and a
+                permission prompt shown without one is how a channel gets denied
+                permanently. */}
+            {stillInProgress(job) && <NotifyWhenReady />}
 
             <div className="jobMeta" style={{ marginTop: 12 }}>
               {jobMetaLine(job)}
