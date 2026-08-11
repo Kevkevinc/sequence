@@ -1,6 +1,7 @@
 import { ClerkProvider } from '@clerk/nextjs';
 import type { Metadata, Viewport } from 'next';
 import { Bricolage_Grotesque, Manrope, Space_Mono } from 'next/font/google';
+import { Analytics } from '@vercel/analytics/next';
 import { LiquidGlassDefs } from '@/components/LiquidGlassDefs';
 import './globals.css';
 
@@ -65,6 +66,7 @@ export default function RootLayout({
         */}
         <LiquidGlassDefs />
         <ClerkProvider>{children}</ClerkProvider>
+        <Analytics />
       </body>
     </html>
   );
