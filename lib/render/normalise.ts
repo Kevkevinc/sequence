@@ -74,6 +74,33 @@ function videoChain(seconds: string): string {
   return `[0:v:0]${REFRAME},trim=duration=${seconds},setpts=N/FRAME_RATE/TB[v]`;
 }
 
+/**
+ * Audio parameters every cut is forced to, so the parts can be stream-copied
+ * together. Concatenation by copy needs identical codec, rate and layout —
+ * exactly the same precondition the video side already satisfies.
+ */
+const AUDIO_RATE = 48_000;
+const AUDIO_CHANNELS = 2;
+const AUDIO_BITRATE = '192k';
+
+/**
+ * Trims the audio alongside the picture, keeping the two in step.
+ *
+ * `asetpts=N/SR/TB` restarts the timestamps at zero the way the video chain
+ * does, and `aresample=async=1` fills or drops samples to hold the audio
+ * against those timestamps rather than letting it slide. Without it a cut taken
+ * from the middle of a long recording can start a few tens of milliseconds out,
+ * and on a talking-head video that reads immediately as bad lip sync — the one
+ * defect this mode cannot ship with.
+ */
+function audioChain(seconds: string): string {
+  return (
+    `[0:a:0]atrim=duration=${seconds},asetpts=N/SR/TB,` +
+    `aresample=${AUDIO_RATE}:async=1:first_pts=0,` +
+    `aformat=sample_fmts=fltp:channel_layouts=stereo[a]`
+  );
+}
+
 /** Fixed-point seconds: ffmpeg cannot parse the exponent form of a small float. */
 function formatSeconds(value: number): string {
   return value.toFixed(6);
@@ -102,14 +129,13 @@ function usablePicture(media: MediaInfo): number | null {
 
 /**
  * Trims one cut out of a source clip and re-encodes it to the single format
- * every other cut shares: 1080x1920, 30fps, video-only.
+ * every other cut shares: 1080x1920, 30fps.
  *
- * No audio: this product does not use source audio in v1 — AI-driven audio
- * editing (voiceover, music, etc.) is a future feature, not something this
- * pipeline can honestly reproduce yet (re-sequencing cuts the way the director
- * already does would otherwise chop a source clip's own audio into
- * disjointed snippets). Dropping it here, once, is simpler and more honest
- * than carrying silence through every downstream step.
+ * Audio is dropped unless `keepAudio` asks for it. The silent modes re-sequence
+ * cuts freely, which would chop a clip's own audio into disjointed snippets, so
+ * carrying it would produce something worse than silence. Talking-head mode is
+ * the opposite: its cuts are chosen *from* the audio and must keep it, in sync,
+ * which is why this is a per-call decision rather than a property of the file.
  *
  * Uniformity is still the point for video — Task 3 joins the cuts with the
  * concat demuxer, which stream-copies and therefore only works when every
@@ -120,6 +146,8 @@ export async function normaliseCut(input: {
   startSeconds: number;
   endSeconds: number;
   outputPath: string;
+  /** Keep the source audio, trimmed in step with the picture. Talking-head mode. */
+  keepAudio?: boolean;
 }): Promise<{ success: true } | { success: false; error: string }> {
   const requested = input.endSeconds - input.startSeconds;
   if (!Number.isFinite(requested) || requested <= 0) {
@@ -172,12 +200,30 @@ export async function normaliseCut(input: {
   // errors (a garbage-but-present frame) rather than failing, so a corrupt
   // source would otherwise silently produce a broken-looking cut instead of
   // the clear failure this function promises callers.
+  /*
+   * Talking-head cuts keep their audio; every other mode strips it.
+   *
+   * Requested rather than inferred from the source, because "this clip happens
+   * to have an audio track" is not the same question as "this edit is built
+   * around what is being said". Product footage routinely carries room noise
+   * nobody wants under a voiceover.
+   */
+  const keepAudio = input.keepAudio === true && media.audio !== null;
+  if (input.keepAudio === true && media.audio === null) {
+    return {
+      success: false,
+      error: `This cut needs audio but ${input.sourcePath} has no audio track`,
+    };
+  }
+
   const result = await runFfmpeg([
     '-xerror',
     '-ss', formatSeconds(start), '-t', seconds, '-i', input.sourcePath,
-    '-filter_complex', videoChain(seconds),
+    '-filter_complex', keepAudio ? `${videoChain(seconds)};${audioChain(seconds)}` : videoChain(seconds),
     '-map', '[v]',
-    '-an',
+    ...(keepAudio
+      ? ['-map', '[a]', '-c:a', 'aac', '-b:a', AUDIO_BITRATE, '-ar', String(AUDIO_RATE), '-ac', String(AUDIO_CHANNELS)]
+      : ['-an']),
     '-c:v', 'libx264', '-preset', 'superfast', '-crf', INTERMEDIATE_CRF,
     '-pix_fmt', 'yuv420p',
     // Carried explicitly so the cut is tagged the same way the source was

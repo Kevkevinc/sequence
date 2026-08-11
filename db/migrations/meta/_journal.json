@@ -78,6 +78,20 @@
       "when": 1786434478283,
       "tag": "0010_next_tyrannus",
       "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1786440469593,
+      "tag": "0011_groovy_zarek",
+      "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1786440577966,
+      "tag": "0012_stormy_valeria_richards",
+      "breakpoints": true
     }
   ]
 }

@@ -124,6 +124,7 @@ export async function POST(req: Request) {
     // falls back to the inherited look rather than failing job creation over
     // something cosmetic.
     captionSettings: CaptionSettingsSchema.safeParse(body.captionSettings).data,
+    kind: body.kind === 'talking' ? 'talking' : 'cuts',
     clips: body.clips,
     inspirationImage: hasInspirationImage ? { storageKey: inspirationImage.storageKey } : undefined,
     inspirationImages: fitInspoImages,
@@ -155,7 +156,10 @@ export async function GET() {
     const finished = await db
       .select({ jobId: renders.jobId, storageKey: renders.storageKey })
       .from(renders)
-      .innerJoin(editPlans, eq(renders.editPlanId, editPlans.id))
+      // Left join, not inner: a talking-head render has no edit plan, and an
+      // inner join silently drops it — the job would show as finished with no
+      // video to play.
+      .leftJoin(editPlans, eq(renders.editPlanId, editPlans.id))
       .where(
         and(
           inArray(

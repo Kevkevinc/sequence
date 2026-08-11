@@ -123,6 +123,17 @@ function readVideoDuration(file: File): Promise<number> {
 export default function NewJobPage() {
   const router = useRouter();
   const [mode, setMode] = useState<'custom' | 'style'>('custom');
+  /*
+   * Which editor this job goes through.
+   *
+   * `cuts` re-sequences silent footage into several variations for the creator
+   * to voice over; `talking` tightens one take of them speaking, keeps the
+   * audio and burns captions. They share the upload and almost nothing else,
+   * which is why the form hides most of its controls in talking mode rather
+   * than offering settings that do not apply.
+   */
+  const [jobKind, setJobKind] = useState<'cuts' | 'talking'>('cuts');
+  const isTalking = jobKind === 'talking';
   const [styles, setStyles] = useState<Style[]>([]);
   const [selectedStyleId, setSelectedStyleId] = useState<string | null>(null);
   const [inspirationFile, setInspirationFile] = useState<File | null>(null);
@@ -226,7 +237,8 @@ export default function NewJobPage() {
   }
 
   const recommendedSeconds = recommendedFootageSeconds(lengthSeconds, variationCount);
-  const footageShort = files.length > 0 && footageSeconds > 0 && footageSeconds < recommendedSeconds;
+  const footageShort =
+    !isTalking && files.length > 0 && footageSeconds > 0 && footageSeconds < recommendedSeconds;
   /*
    * How many variations this upload can actually carry.
    *
@@ -362,11 +374,12 @@ export default function NewJobPage() {
           lengthSeconds,
           pacing: mode === 'custom' ? pacing : undefined,
           styleId: mode === 'style' ? selectedStyleId : undefined,
-          variationCount,
+          variationCount: isTalking ? 1 : variationCount,
           // Only sent when the creator actually changed something, so an
           // untouched job keeps inheriting from its style or profile later
           // rather than freezing today's defaults into the row.
           captionSettings: captionsTouched ? captions : undefined,
+          kind: jobKind,
           clips,
           inspirationImage,
           inspirationImages,
@@ -522,6 +535,37 @@ export default function NewJobPage() {
             </div>
 
             <div className="formSection">
+              <span className="label">What are you making?</span>
+              <div style={{ display: 'flex', gap: 12 }}>
+                <button
+                  type="button"
+                  className="modeTab"
+                  data-active={!isTalking}
+                  onClick={() => setJobKind('cuts')}
+                >
+                  <div className="modeTabTitle">Silent cuts</div>
+                  <div className="modeTabSub">You add a voiceover after</div>
+                </button>
+                <button
+                  type="button"
+                  className="modeTab"
+                  data-active={isTalking}
+                  onClick={() => setJobKind('talking')}
+                >
+                  <div className="modeTabTitle">Talking to camera</div>
+                  <div className="modeTabSub">Keeps your audio, adds captions</div>
+                </button>
+              </div>
+              {isTalking && (
+                <p className="helper" style={{ marginTop: 10 }}>
+                  Upload one take of yourself talking. Pauses and dead air get cut out, your
+                  audio stays in sync, and captions are burned on automatically. One clean
+                  edit — no variations, because the audio fixes the order of the cuts.
+                </p>
+              )}
+            </div>
+
+            <div className="formSection" style={{ display: isTalking ? 'none' : undefined }}>
               <span className="label">How do you want to edit this?</span>
               <div style={{ display: 'flex', gap: 12 }}>
                 <button
@@ -677,7 +721,9 @@ export default function NewJobPage() {
               )}
             </div>
 
-            <div className="formSection">
+            {/* One take, one edit: the audio fixes the order of the cuts, so a
+                second "variation" would be the same video or a broken one. */}
+            <div className="formSection" style={{ display: isTalking ? 'none' : undefined }}>
               <span className="label">Variations</span>
               <div style={{ display: 'flex', alignItems: 'center', gap: 18 }}>
                 <input
@@ -858,7 +904,10 @@ export default function NewJobPage() {
 
             <dl style={{ marginTop: 20, display: 'grid', gap: 10 }}>
               <SummaryRow label="Length" value={`${lengthSeconds}s`} />
-              <SummaryRow label="Mode" value={mode === 'custom' ? 'Custom' : 'Style'} />
+              <SummaryRow label="Editor" value={isTalking ? 'Talking to camera' : 'Silent cuts'} />
+              {!isTalking && (
+                <SummaryRow label="Mode" value={mode === 'custom' ? 'Custom' : 'Style'} />
+              )}
               <SummaryRow
                 label={mode === 'custom' ? 'Pacing' : 'Style'}
                 value={mode === 'custom' ? pacing : selectedStyle?.name ?? 'none picked'}

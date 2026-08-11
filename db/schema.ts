@@ -7,6 +7,20 @@ export const jobStatusEnum = pgEnum('job_status', [
 export const renderStatusEnum = pgEnum('render_status', ['rendering', 'done', 'failed']);
 
 /**
+ * Which editor a job goes through.
+ *
+ * `cuts` is the original silent pipeline: footage is tagged, re-sequenced into
+ * several variations and delivered without audio for the creator to voice over.
+ * `talking` is the opposite discipline — one recording of somebody speaking to
+ * camera, tightened by removing the pauses, audio kept in sync, captions burned
+ * on, and exactly one result because the audio pins the order of the cuts.
+ *
+ * A column rather than an inferred property: the two share uploads and storage
+ * but almost nothing else, and every stage needs to know which it is running.
+ */
+export const jobKindEnum = pgEnum('job_kind', ['cuts', 'talking']);
+
+/**
  * Which intake a creator arrived through. Recorded once, at sign-up, and never
  * rewritten: someone who joined during the beta stays a beta tester after the
  * doors open, which is the whole point of knowing.
@@ -88,6 +102,13 @@ export const jobs = pgTable('jobs', {
    * written before a field existed must keep rendering.
    */
   captionSettings: jsonb('caption_settings'),
+  /**
+   * Defaulted so every job written before talking mode existed reads as `cuts`,
+   * which is what they are.
+   */
+  kind: jobKindEnum('kind').notNull().default('cuts'),
+  /** What was said, stored once so a re-render never re-pays for transcription. */
+  transcript: text('transcript'),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 });
 
@@ -145,7 +166,16 @@ export const editPlans = pgTable('edit_plans', {
 
 export const renders = pgTable('renders', {
   id: uuid('id').primaryKey().defaultRandom(),
-  editPlanId: uuid('edit_plan_id').notNull().references(() => editPlans.id),
+  /**
+   * Nullable since talking mode.
+   *
+   * A talking-head render has no edit plan to point at: its cuts come from
+   * measuring the audio rather than from a plan the director wrote, and there
+   * is only ever one result. Everything else about the row — status, storage
+   * key, duration, failure reason — means exactly what it does for a variation,
+   * which is what lets both editors deliver through the same list.
+   */
+  editPlanId: uuid('edit_plan_id').references(() => editPlans.id),
   jobId: uuid('job_id').notNull().references(() => jobs.id),
   storageKey: text('storage_key'),
   durationSeconds: numeric('duration_seconds'),

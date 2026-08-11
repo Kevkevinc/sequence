@@ -1,5 +1,5 @@
 import { auth } from '@clerk/nextjs/server';
-import { inArray, eq } from 'drizzle-orm';
+import { inArray, eq, desc } from 'drizzle-orm';
 import { db } from '@/db/client';
 import { editPlans, rawClips, renders } from '@/db/schema';
 import { createCreatorIfNotExists } from '@/db/repositories/creators';
@@ -36,6 +36,63 @@ export async function GET(request: Request, context: { params: Promise<{ jobId: 
   // exist is not this route's business to reveal to a creator who doesn't own them.
   if (!job) return new Response('Not found', { status: 404 });
 
+  /*
+   * A talking job has no edit plans — its cuts come from the audio — so its one
+   * finished video is read straight off the renders table and presented as a
+   * single "variation". The client renders both editors' results from one
+   * shape, which is the point: the delivery surface should not care which
+   * pipeline produced a video.
+   */
+  if (job.kind === 'talking') {
+    const [render] = await db
+      .select()
+      .from(renders)
+      .where(eq(renders.jobId, job.id))
+      .orderBy(desc(renders.createdAt))
+      .limit(1);
+
+    const variation: VariationResponse = render
+      ? {
+          variationNumber: 1,
+          hookText: '',
+          status: render.status,
+          durationSeconds:
+            render.status === 'done' && render.durationSeconds !== null
+              ? Number(render.durationSeconds)
+              : null,
+          playbackUrl:
+            render.status === 'done' && render.storageKey
+              ? await createDownloadUrl(render.storageKey)
+              : null,
+          downloadUrl:
+            render.status === 'done' && render.storageKey
+              ? await createDownloadUrl(render.storageKey, { downloadAs: job.productName })
+              : null,
+          thumbnailUrl:
+            render.status === 'done' && render.storageKey
+              ? await createDownloadUrl(thumbnailKeyFor(render.storageKey))
+              : null,
+          failureReason: render.status === 'failed' ? render.failureReason : null,
+        }
+      : {
+          variationNumber: 1,
+          hookText: '',
+          status: 'pending',
+          durationSeconds: null,
+          playbackUrl: null,
+          downloadUrl: null,
+          thumbnailUrl: null,
+          failureReason: null,
+        };
+
+    return Response.json({
+      ...job,
+      styleName: null,
+      clipCount: (await db.select().from(rawClips).where(eq(rawClips.jobId, job.id))).length,
+      variations: [variation],
+    });
+  }
+
   const plans = await db
     .select()
     .from(editPlans)
@@ -55,6 +112,10 @@ export async function GET(request: Request, context: { params: Promise<{ jobId: 
   // only the most recent per plan rather than trusting that invariant.
   const latestRenderByPlanId = new Map<string, (typeof renderRows)[number]>();
   for (const row of renderRows) {
+    // `editPlanId` is nullable since talking mode, but this loop only ever sees
+    // rows fetched by plan id, so a null here would be a row that cannot be
+    // attributed to a variation — skipped rather than keyed under "null".
+    if (!row.editPlanId) continue;
     const existing = latestRenderByPlanId.get(row.editPlanId);
     if (!existing || row.createdAt > existing.createdAt) {
       latestRenderByPlanId.set(row.editPlanId, row);

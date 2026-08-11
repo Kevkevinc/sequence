@@ -1,0 +1,1 @@
+ALTER TABLE "renders" ALTER COLUMN "edit_plan_id" DROP NOT NULL;

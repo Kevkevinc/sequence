@@ -21,6 +21,8 @@ export type CreateJobInput = {
    * later changes.
    */
   captionSettings?: CaptionSettings;
+  /** Which editor runs this job. Defaults to the original silent pipeline. */
+  kind?: 'cuts' | 'talking';
   clips: { storageKey: string; originalFilename: string }[];
   inspirationImage?: { storageKey: string };
   /**
@@ -45,6 +47,7 @@ export async function createJob(input: CreateJobInput) {
         styleId: input.styleId,
         variationCount: input.variationCount,
         captionSettings: input.captionSettings ?? null,
+        kind: input.kind ?? 'cuts',
       })
       .returning();
 

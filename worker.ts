@@ -7,6 +7,7 @@ import { planJob } from '@/lib/pipeline/director';
 import { describeCause } from '@/lib/pipeline/errors';
 import { isTransientError } from '@/lib/pipeline/retry';
 import { renderPlan } from '@/lib/render/renderPlan';
+import { renderTalkingJob } from '@/lib/pipeline/talkingHead';
 
 const POLL_INTERVAL_MS = 5000;
 
@@ -324,6 +325,25 @@ export async function processJob(jobId: string): Promise<boolean> {
       return false;
     }
 
+    /*
+     * Talking jobs skip both AI stages of the silent pipeline.
+     *
+     * There is nothing to tag — the cuts come from measuring the audio, not
+     * from a model looking at pixels — and nothing to plan, because the audio
+     * fixes the order and there is only ever one result. The job goes straight
+     * to `planned` so the render stage picks it up on the next poll, which
+     * keeps one queue and one set of statuses rather than a parallel pipeline.
+     */
+    const [talkingJob] = await db.select().from(jobs).where(eq(jobs.id, jobId));
+    if (talkingJob?.kind === 'talking') {
+      await db
+        .update(jobs)
+        .set({ status: 'planned', failureReason: null })
+        .where(eq(jobs.id, jobId));
+      log('  Talking mode: cuts come from the audio, so tagging and planning are skipped');
+      return true;
+    }
+
     const tagResults = await timed(`Tagging ${clips.length} clips`, () =>
       mapWithConcurrency(clips, TAG_CONCURRENCY, (clip) => tagClip(clip.id))
     );
@@ -498,8 +518,58 @@ function describeFailedVariations(outcomes: RenderOutcome[]): string {
  * the only way to reach here without a final status write is the initial
  * `editPlans` lookup failing — a real but narrow case, handled below.
  */
+/**
+ * Renders a talking-head job: one recording, one tightened video.
+ *
+ * Writes a single `renders` row so the finished video reaches the creator
+ * through exactly the same list, thumbnail and download path as every other
+ * result — the delivery surface should not know which editor produced a video.
+ */
+async function renderTalkingHeadJob(jobId: string): Promise<void> {
+  const startedAt = Date.now();
+  log('  Talking edit: measuring speech, transcribing and cutting...');
+
+  const [render] = await db
+    .insert(renders)
+    .values({ jobId, editPlanId: null, status: 'rendering' })
+    .returning();
+
+  const result = await renderTalkingJob(jobId);
+
+  if (!result.success) {
+    log(`  Talking edit FAILED in ${since(startedAt)}: ${result.error}`);
+    await db
+      .update(renders)
+      .set({ status: 'failed', failureReason: result.error })
+      .where(eq(renders.id, render.id));
+    await failJob(jobId, result.error);
+    return;
+  }
+
+  await db
+    .update(renders)
+    .set({
+      status: 'done',
+      storageKey: result.storageKey,
+      durationSeconds: String(result.durationSeconds),
+    })
+    .where(eq(renders.id, render.id));
+
+  await db.update(jobs).set({ status: 'done', failureReason: null }).where(eq(jobs.id, jobId));
+  log(
+    `  Talking edit done in ${since(startedAt)}: ${result.durationSeconds.toFixed(1)}s kept, ` +
+      `${result.removedSeconds.toFixed(1)}s of pauses removed`
+  );
+}
+
 export async function renderJob(jobId: string): Promise<void> {
   try {
+    const [job] = await db.select().from(jobs).where(eq(jobs.id, jobId));
+    if (job?.kind === 'talking') {
+      await renderTalkingHeadJob(jobId);
+      return;
+    }
+
     const plans = await db.select().from(editPlans).where(eq(editPlans.jobId, jobId));
 
     if (plans.length === 0) {
@@ -606,6 +676,48 @@ function requestShutdown(signal: NodeJS.Signals) {
  * it boots, so a `rendering` job at startup is always an orphan, never one in
  * flight elsewhere.
  */
+/**
+ * Puts jobs stranded mid-analysis back on the queue.
+ *
+ * `reclaimOrphanedRenders` covers a job killed while rendering; nothing covered
+ * one killed while tagging or planning, so a deploy landing mid-analysis left
+ * the job in `tagging` forever with no path out. A tester's job sat there for
+ * an hour and three quarters before anyone noticed — the creator's only signal
+ * was a progress bar that never moved.
+ *
+ * A job in either status when the worker *starts* is orphaned by definition:
+ * whatever was working on it no longer exists. Requeuing is close to free
+ * because tagging is resumable — `tagClip` returns stored segments rather than
+ * re-uploading a clip already analysed — so a recovered job resumes rather than
+ * starting over, and pays no second API bill for work already done.
+ */
+export async function reclaimOrphanedAnalysis(): Promise<void> {
+  const stranded = await db
+    .select({ id: jobs.id, attempts: jobs.attempts, productName: jobs.productName })
+    .from(jobs)
+    .where(inArray(jobs.status, ['tagging', 'planning']));
+  if (stranded.length === 0) return;
+
+  let requeued = 0;
+  for (const job of stranded) {
+    // Capped like the render reaper: a job that dies here every time must fail
+    // cleanly rather than cycle the worker forever.
+    if (job.attempts >= MAX_JOB_ATTEMPTS) {
+      await failJob(job.id, 'This job could not be analysed after several attempts.');
+      continue;
+    }
+    await db
+      .update(jobs)
+      .set({ status: 'pending', attempts: job.attempts + 1 })
+      .where(eq(jobs.id, job.id));
+    requeued += 1;
+  }
+
+  if (requeued > 0) {
+    log(`Recovered ${requeued} job(s) orphaned mid-analysis, requeued from the start of tagging`);
+  }
+}
+
 async function reclaimOrphanedRenders(): Promise<void> {
   const orphaned = await db.select({ id: jobs.id }).from(jobs).where(eq(jobs.status, 'rendering'));
   if (orphaned.length === 0) return;
@@ -643,6 +755,7 @@ async function main() {
   process.on('SIGINT', requestShutdown);
 
   await reclaimOrphanedRenders();
+  await reclaimOrphanedAnalysis();
 
   await beat('starting up');
 

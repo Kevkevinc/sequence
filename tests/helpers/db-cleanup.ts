@@ -17,10 +17,24 @@ export async function cleanUpCreatorJobs(creatorId: string): Promise<void> {
   if (ownJobs.length === 0) return;
   const jobIds = ownJobs.map((j) => j.id);
 
-  const clips = await db.select({ id: rawClips.id }).from(rawClips).where(inArray(rawClips.jobId, jobIds));
-  if (clips.length > 0) {
-    await db.delete(segments).where(inArray(segments.rawClipId, clips.map((c) => c.id)));
-  }
+  /*
+   * Segments are deleted through a subquery, not through ids read a moment
+   * earlier.
+   *
+   * Reading the clip ids and then deleting their segments leaves a window, and
+   * vitest runs test files in parallel: another file tagging a clip in that
+   * window inserts segments this delete has already decided not to touch, and
+   * the `raw_clips` delete below then fails on
+   * `segments_raw_clip_id_raw_clips_id_fk`. That produced 19 failures in one
+   * run, all of them in setup rather than in anything under test. One
+   * statement has no window.
+   */
+  await db.delete(segments).where(
+    inArray(
+      segments.rawClipId,
+      db.select({ id: rawClips.id }).from(rawClips).where(inArray(rawClips.jobId, jobIds))
+    )
+  );
   // Metering rows too. They carry no foreign key (usage is a financial record
   // and must outlive the job it describes), so nothing would ever remove them
   // and a test run would permanently inflate the spend dashboard's call count.
