@@ -18,24 +18,32 @@ export const CAPTION_FONTS = [
     label: 'Roboto',
     description: 'Neutral and highly readable. The safe default.',
     file: 'Roboto-Bold.ttf',
+    /** The family name inside the TTF, which is what libass matches on. */
+    familyName: 'Roboto',
   },
   {
     id: 'anton',
     label: 'Anton',
     description: 'Tall, condensed and loud — fits long hooks on one line.',
     file: 'Anton-Regular.ttf',
+    /** The family name inside the TTF, which is what libass matches on. */
+    familyName: 'Anton',
   },
   {
     id: 'bebas',
     label: 'Bebas Neue',
     description: 'All-caps condensed. Reads as sport/streetwear.',
     file: 'BebasNeue-Regular.ttf',
+    /** The family name inside the TTF, which is what libass matches on. */
+    familyName: 'Bebas Neue',
   },
   {
     id: 'poppins',
     label: 'Poppins',
     description: 'Round geometric sans. Softer, common in beauty content.',
     file: 'Poppins-Bold.ttf',
+    /** The family name inside the TTF, which is what libass matches on. */
+    familyName: 'Poppins',
   },
 ] as const;
 
