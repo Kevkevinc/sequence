@@ -16,6 +16,7 @@ import {
 import { describeCause, MAX_CAUSE_LENGTH } from '@/lib/pipeline/errors';
 import { withTransientRetry, type TransientRetryOptions } from '@/lib/pipeline/retry';
 import { recordUsage } from '@/lib/pipeline/usage';
+import { parseFirstJsonValue } from '@/lib/pipeline/json';
 
 // Pro models (2.5-pro, 3.x-pro) return 429 quota-exceeded on the free API tier,
 // so the director runs on Flash too. Overridable so a Pro model can be selected
@@ -545,6 +546,91 @@ function shortProductNoun(productName: string): string {
 
 function round2(seconds: number): number {
   return Math.round(seconds * 100) / 100;
+}
+
+/**
+ * Nudges cuts that are byte-identical across variations until they are not.
+ *
+ * The validator forbids two variations sharing the exact same frames, and the
+ * model cannot reliably satisfy that on a ten-variation job: with ~100 cuts
+ * drawn from one pool of tagged moments, collisions are close to inevitable,
+ * and three live jobs died on it having burned three model calls each. The
+ * error message told the model to "shift its start and end so it shows a
+ * different moment" — which is a mechanical adjustment, so this does it rather
+ * than asking again and hoping.
+ *
+ * Duration is preserved exactly, which is what keeps the repair invisible: the
+ * pacing band is a rule about cut length, and the video's total length is the
+ * sum of those lengths, so neither can be disturbed by sliding a cut sideways.
+ * Only cuts that stay inside their own clip's footage are considered.
+ *
+ * Best-effort by design. Anything it cannot place is left exactly as it was for
+ * the validator to reject in the normal way — this widens the set of plans that
+ * pass, and can never let a bad one through.
+ */
+export function dedupeIdenticalCuts(
+  variations: Array<{ segments: Cut[] }>,
+  footageEndByClipId: Map<string, number>
+): void {
+  /*
+   * A variation that is a wholesale copy of another is left for the validator.
+   *
+   * Repairing it would defeat the rule it is about to break: sliding every cut
+   * by a tenth of a second makes two identical edits technically distinct while
+   * leaving the creator with two videos they cannot tell apart. That rule is
+   * about the deliverable, not about frame fingerprints, and the only correct
+   * answer is a genuinely different edit — which only the model can produce.
+   *
+   * Incidental collisions, where variations differ but happen to share one cut,
+   * are exactly what this repair is for and are handled below.
+   */
+  const sequences = variations.map((variation) =>
+    variation.segments.map((cut) => segmentKey(cut)).join('>')
+  );
+  if (new Set(sequences).size < sequences.length) return;
+
+  // Keyed to the variation that first used each cut, mirroring the validator:
+  // reuse *within* one variation is legal and governed by MAX_SEGMENT_REUSE, so
+  // moving it here would silently rewrite an edit the model built on purpose.
+  const firstUse = new Map<string, number>();
+
+  // Alternating and widening, so the first thing tried is the smallest change
+  // that could work and the search stays centred on the moment the model chose.
+  const offsets: number[] = [];
+  for (let step = 1; step <= 12; step++) {
+    offsets.push(step * 0.1, -step * 0.1);
+  }
+
+  variations.forEach((variation, index) => {
+    for (const cut of variation.segments) {
+      const key = segmentKey(cut);
+      const original = firstUse.get(key);
+
+      if (original === undefined) {
+        firstUse.set(key, index);
+        continue;
+      }
+      if (original === index) continue;
+
+      const duration = cutDuration(cut);
+      const footageEnd = footageEndByClipId.get(cut.rawClipId);
+      if (footageEnd === undefined) continue;
+
+      for (const offset of offsets) {
+        const startSeconds = round2(cut.startSeconds + offset);
+        const endSeconds = round2(startSeconds + duration);
+        if (startSeconds < 0 || endSeconds > footageEnd) continue;
+
+        const candidateKey = segmentKey({ ...cut, startSeconds, endSeconds });
+        if (firstUse.has(candidateKey)) continue;
+
+        cut.startSeconds = startSeconds;
+        cut.endSeconds = endSeconds;
+        firstUse.set(candidateKey, index);
+        break;
+      }
+    }
+  });
 }
 
 function cutDuration(cut: Cut): number {
@@ -1562,7 +1648,13 @@ export async function planJob(
       }
 
       try {
-        parsed = validator.parse(JSON.parse(response.text ?? ''));
+        // Shape-only parse first, so the repair below has real cuts to work on.
+        // The full validator still runs afterwards and is the only thing that
+        // decides whether the plan is acceptable — repairing before validating
+        // can widen what passes but never let something invalid through.
+        const raw = DirectorResponseSchema.parse(parseFirstJsonValue(response.text ?? ''));
+        dedupeIdenticalCuts(raw.variations, footageEndByClipId);
+        parsed = validator.parse(raw);
         break;
       } catch (validationError) {
         // Feed the specific reasons back into the next attempt: a blind re-roll

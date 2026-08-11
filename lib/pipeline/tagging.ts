@@ -8,6 +8,7 @@ import { getEnvWithDefault } from '@/lib/env';
 import { getGeminiClient } from '@/lib/gemini/client';
 import { describeCause } from '@/lib/pipeline/errors';
 import { recordUsage } from '@/lib/pipeline/usage';
+import { parseFirstJsonValue } from '@/lib/pipeline/json';
 import { withTransientRetry, type TransientRetryOptions } from '@/lib/pipeline/retry';
 
 // Overridable because model availability is genuinely volatile per account:
@@ -183,7 +184,7 @@ export async function tagClip(
 
       let parsed: z.infer<typeof TaggingResponseSchema>;
       try {
-        parsed = TaggingResponseSchema.parse(JSON.parse(response.text ?? ''));
+        parsed = TaggingResponseSchema.parse(parseFirstJsonValue(response.text ?? ''));
       } catch (validationError) {
         // Keep the underlying cause: this string is the only diagnostic later
         // stages have when the model drifts off the requested shape.
