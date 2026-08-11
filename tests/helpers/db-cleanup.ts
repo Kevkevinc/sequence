@@ -17,6 +17,10 @@ export async function cleanUpCreatorJobs(creatorId: string): Promise<void> {
   if (ownJobs.length === 0) return;
   const jobIds = ownJobs.map((j) => j.id);
 
+  await db.delete(apiUsage).where(inArray(apiUsage.jobId, jobIds));
+  await db.delete(renders).where(inArray(renders.jobId, jobIds));
+  await db.delete(editPlans).where(inArray(editPlans.jobId, jobIds));
+  await db.delete(jobInspirationImages).where(inArray(jobInspirationImages.jobId, jobIds));
   /*
    * Segments are deleted through a subquery, not through ids read a moment
    * earlier.
@@ -27,7 +31,8 @@ export async function cleanUpCreatorJobs(creatorId: string): Promise<void> {
    * the `raw_clips` delete below then fails on
    * `segments_raw_clip_id_raw_clips_id_fk`. That produced 19 failures in one
    * run, all of them in setup rather than in anything under test. One
-   * statement has no window.
+   * statement has no window — and it runs immediately before the clips are
+   * deleted, so nothing else in this cleanup can widen the gap between the two.
    */
   await db.delete(segments).where(
     inArray(
@@ -38,10 +43,6 @@ export async function cleanUpCreatorJobs(creatorId: string): Promise<void> {
   // Metering rows too. They carry no foreign key (usage is a financial record
   // and must outlive the job it describes), so nothing would ever remove them
   // and a test run would permanently inflate the spend dashboard's call count.
-  await db.delete(apiUsage).where(inArray(apiUsage.jobId, jobIds));
-  await db.delete(renders).where(inArray(renders.jobId, jobIds));
-  await db.delete(editPlans).where(inArray(editPlans.jobId, jobIds));
-  await db.delete(jobInspirationImages).where(inArray(jobInspirationImages.jobId, jobIds));
   await db.delete(rawClips).where(inArray(rawClips.jobId, jobIds));
   await db.delete(jobs).where(inArray(jobs.id, jobIds));
 }

@@ -11,7 +11,7 @@ import { db } from '@/db/client';
 import { creators, jobs, rawClips, segments, editPlans, styles } from '@/db/schema';
 import { createCreatorIfNotExists } from '@/db/repositories/creators';
 import { createJob } from '@/db/repositories/jobs';
-import { bandForPacing, planJob } from '@/lib/pipeline/director';
+import { DIRECTOR_RETRY, PACING_PRESET_SECONDS, bandForPacing, planJob } from '@/lib/pipeline/director';
 import { hooksForAudience } from '@/lib/pipeline/hookLibrary';
 
 /**
@@ -20,6 +20,8 @@ import { hooksForAudience } from '@/lib/pipeline/hookLibrary';
  * numbers, and a copy in the tests only records what they used to be.
  */
 const MEDIUM = bandForPacing('medium');
+/** The length the pacing fixtures use, so the prompt's cut count can be derived. */
+const PACING_JOB_LENGTH_SECONDS = 15;
 const SLOW = bandForPacing('slow');
 
 /** Matches the director's own rounding, so expected prompt text lines up. */
@@ -457,7 +459,10 @@ describe('planJob', () => {
     expect(saved).toHaveLength(1);
     // Every line comes from the creator row and the job, never the model.
     expect(saved[0].sizingOverlayText).toBe(`${CREATOR_HEIGHT}\n${CREATOR_WEIGHT}\nSize M`);
-    expect(saved[0].sizingOverlayPlacement).toBe('bottom-center');
+    // Custom mode pins the sizing block to the bottom-right for every
+    // variation, per creator direction, so the model's own choice of placement
+    // is deliberately overridden rather than honoured.
+    expect(saved[0].sizingOverlayPlacement).toBe('bottom-right');
   });
 
   it('ignores anything the model writes in sizingOverlayText, even a lead-in phrase', async () => {
@@ -519,7 +524,10 @@ describe('planJob', () => {
     expect(result).toEqual({ success: true, variationCount: 1, warning: null });
     const saved = await db.select().from(editPlans).where(eq(editPlans.jobId, overlayJob.id));
     expect(saved[0].sizingOverlayText).toBe('Size L');
-    expect(saved[0].sizingOverlayPlacement).toBe('top-left');
+    // Custom mode pins the sizing block to the bottom-right for every
+    // variation, per creator direction, so the model's own choice of placement
+    // is deliberately overridden rather than honoured.
+    expect(saved[0].sizingOverlayPlacement).toBe('bottom-right');
   });
 
   it('stores no overlay at all when neither the profile nor the job has anything true to show', async () => {
@@ -942,10 +950,18 @@ describe('planJob', () => {
     });
 
     it('rejects a cut that is too short for the pacing preset', async () => {
-      // 14s total, but the second cut is a 1.5s flash mid-video.
+      /*
+       * The second cut is a 0.8s flash mid-video, well under medium's floor.
+       *
+       * This fixture used 1.5s, which stopped being too short the moment the
+       * medium band moved to 1.5-4s — the cut became exactly legal and the test
+       * failed for a validator that was behaving correctly. The assertion is
+       * about the cut, so the fixture now breaks the rule by a clear margin
+       * rather than sitting on its boundary.
+       */
       mockGenerateContent.mockResolvedValue(
         geminiResponse([
-          variation([segA(0, 4), segB(0, 1.5), segA(4, 8), segB(4, 8.5)], HOOK_ONE),
+          variation([segA(0, 4), segB(0, 0.8), segA(4, 8), segB(4, 8.5)], HOOK_ONE),
           validVariationTwo(),
         ])
       );
@@ -953,7 +969,7 @@ describe('planJob', () => {
       const result = await planJob(jobId);
 
       expect(result.success).toBe(false);
-      expect(promptTextOfCall(1)).toContain('this cut is only 1.5s long');
+      expect(promptTextOfCall(1)).toContain('this cut is only 0.8s long');
     });
 
     it('allows a short final cut so a variation can land on the target length', async () => {
@@ -1027,7 +1043,17 @@ describe('planJob', () => {
 
       const prompt = promptTextOfCall(0);
       expect(prompt).toContain(`between ${round2(MEDIUM.min)} and ${round2(MEDIUM.max)} seconds`);
-      expect(prompt).toContain('roughly 4 cuts');
+      /*
+       * Derived, not hardcoded.
+       *
+       * The prompt states a cut count computed from the pacing preset's ideal
+       * band, so a literal here goes stale the moment that band is retuned —
+       * which is exactly what happened when medium moved to 1.5-4s, and the
+       * assertion then failed for a prompt that was perfectly correct.
+       */
+      const idealAverage = (PACING_PRESET_SECONDS.medium.min + PACING_PRESET_SECONDS.medium.max) / 2;
+      const expectedCuts = Math.max(2, Math.round(PACING_JOB_LENGTH_SECONDS / idealAverage));
+      expect(prompt).toContain(`roughly ${expectedCuts} cuts`);
       expect(prompt).toContain('RANGE YOU MAY CUT INSIDE');
       expect(prompt).toContain('SPLIT IT');
       expect(prompt).toContain('DIFFERENT POINTS');
@@ -1314,10 +1340,18 @@ describe('planJob', () => {
       // Variations 4 and 5 of the live run: same skeleton, one substituted clip
       // and a new hook. The opening differs, so only the sequence rule can
       // catch this.
+      /*
+       * The old fixture opened `segB(2, 6)` straight into `segB(0, 4)`, which
+       * overlap by more than half — so it tripped the consecutive-repeat rule
+       * first and the sequence rule never got a clean shot. This opening is
+       * different footage from variation one's and does not overlap what
+       * follows it, leaving exactly one differing position for the rule under
+       * test to catch.
+       */
       mockGenerateContent.mockResolvedValue(
         geminiResponse([
           validVariationOne(),
-          variation([segB(2, 6), segB(0, 4), segA(4, 8), segB(4, 8)], HOOK_TWO),
+          variation([segA(4, 7.5), segB(0, 4), segA(4, 8), segB(4, 8)], HOOK_TWO),
         ])
       );
 
@@ -1331,10 +1365,14 @@ describe('planJob', () => {
     it('accepts a variation that differs in two positions', async () => {
       // Deliberately not stricter than that: on a two-clip pool, demanding more
       // than "a different opening and one more change" would be retry churn.
+      // Positions 0 and 3 differ from variation one. The old fixture opened on
+      // two overlapping cuts from the same clip and so was rejected by a
+      // different rule entirely, never reaching the one under test. The tail
+      // stops at 3s to leave the minimum gap before the 4s cut before it.
       mockGenerateContent.mockResolvedValue(
         geminiResponse([
           validVariationOne(),
-          variation([segB(2, 6), segB(0, 4), segA(4, 8), segA(0, 4)], HOOK_TWO),
+          variation([segA(4, 7.5), segB(0, 4), segA(4, 8), segA(0, 3)], HOOK_TWO),
         ])
       );
 
@@ -1901,12 +1939,23 @@ describe('planJob', () => {
       const result = await planJob(jobId);
 
       expect(result.success).toBe(false);
-      expect(mockGenerateContent).toHaveBeenCalledTimes(3);
+      // Derived from the retry policy itself. Both numbers were hardcoded to 3
+      // and went stale when the policy widened to 5 to survive a real demand
+      // spike — the test then failed for a retry layer doing exactly what it
+      // was retuned to do.
+      expect(mockGenerateContent).toHaveBeenCalledTimes(DIRECTOR_RETRY.attempts);
       if (!result.success) {
-        expect(result.error).toContain('still failed after 3 attempts');
+        expect(result.error).toContain(`still failed after ${DIRECTOR_RETRY.attempts} attempts`);
         expect(result.error).toContain('high demand');
       }
-    });
+      /*
+       * Needs longer than the 5s default: this is the one test that lets the
+       * retry layer run to exhaustion, and its backoff deliberately climbs to
+       * ~16s so a real demand spike is survived rather than given up on after
+       * a blip. The timeout has to clear the sum of those waits, or the test
+       * fails for taking exactly as long as it was designed to.
+       */
+    }, 60_000);
 
     it('does not retry a terminal 404 model-not-found failure', async () => {
       mockGenerateContent.mockRejectedValue(

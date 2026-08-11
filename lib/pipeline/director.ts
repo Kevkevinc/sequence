@@ -38,7 +38,7 @@ const MAX_ATTEMPTS = 3;
  * This call matters more than any single tagging call: it happens once, at the
  * end of a four-minute stage, and failing it used to discard the whole job.
  */
-const DIRECTOR_RETRY: TransientRetryOptions = {
+export const DIRECTOR_RETRY: TransientRetryOptions = {
   attempts: 5,
   baseDelayMs: 1000,
   maxDelayMs: 16000,
@@ -124,7 +124,7 @@ const MIN_CUTS_FOR_SEQUENCE_DISTINCTNESS = 3;
  * a Style-mode job carries no named preset at all and gets its band from
  * `styles.config` instead (see `resolvePreset`).
  */
-const PACING_PRESET_SECONDS: Record<NonNullable<Job['pacing']>, { min: number; max: number }> = {
+export const PACING_PRESET_SECONDS: Record<NonNullable<Job['pacing']>, { min: number; max: number }> = {
   slow: { min: 4, max: 7 },
   medium: { min: 1.5, max: 4 },
   fast: { min: 1, max: 2 },
