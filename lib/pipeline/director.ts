@@ -17,6 +17,7 @@ import { describeCause, MAX_CAUSE_LENGTH } from '@/lib/pipeline/errors';
 import { withTransientRetry, type TransientRetryOptions } from '@/lib/pipeline/retry';
 import { recordUsage } from '@/lib/pipeline/usage';
 import { parseFirstJsonValue } from '@/lib/pipeline/json';
+import { recommendedFootageSeconds } from '@/lib/validation/job';
 
 // Pro models (2.5-pro, 3.x-pro) return 429 quota-exceeded on the free API tier,
 // so the director runs on Flash too. Overridable so a Pro model can be selected
@@ -1707,6 +1708,26 @@ export async function planJob(
     }
 
     if (!parsed) {
+      /*
+       * Appended, not substituted, when the upload cannot support what was
+       * ordered.
+       *
+       * The rule summary below is written for whoever is debugging the
+       * pipeline: "variations.0.segments: total duration 26.3s misses the 30s
+       * target length" is precise and completely useless to the creator, who
+       * needs to know that 40 seconds of footage cannot become ten different
+       * 30-second videos and what to do instead. A real job failed exactly that
+       * way. The technical summary stays because it is what makes a genuine
+       * bug diagnosable.
+       */
+      const needed = recommendedFootageSeconds(job.lengthSeconds, job.variationCount);
+      const advice =
+        footage.availableSeconds < needed
+          ? ` — you uploaded about ${Math.round(footage.availableSeconds)}s of usable footage, and ` +
+            `${job.variationCount} genuinely different ${job.lengthSeconds}s videos needs roughly ` +
+            `${needed}s. Upload more clips, ask for fewer variations, or choose a shorter length.`
+          : '';
+
       return {
         success: false,
         // Summarised the same way as the correction note, so the stored reason
@@ -1715,7 +1736,7 @@ export async function planJob(
         error: `Gemini did not produce a valid edit plan after ${MAX_ATTEMPTS} attempts: ${summarizeIssues(
           lastFailure,
           MAX_CAUSE_LENGTH
-        )}`,
+        )}${advice}`,
       };
     }
 

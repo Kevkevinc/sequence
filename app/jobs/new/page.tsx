@@ -5,7 +5,12 @@ import { useRouter } from 'next/navigation';
 import { AppShell } from '@/components/AppShell';
 import { VideoTile } from '@/components/ui';
 import { IconCheck, IconImage, IconUpload } from '@/components/icons';
-import { MAX_LENGTH_SECONDS, MIN_LENGTH_SECONDS, recommendedFootageSeconds } from '@/lib/validation/job';
+import {
+  MAX_LENGTH_SECONDS,
+  MIN_LENGTH_SECONDS,
+  maxVariationsForFootage,
+  recommendedFootageSeconds,
+} from '@/lib/validation/job';
 
 type Style = {
   id: string;
@@ -128,6 +133,15 @@ export default function NewJobPage() {
 
   const recommendedSeconds = recommendedFootageSeconds(lengthSeconds, variationCount);
   const footageShort = files.length > 0 && footageSeconds > 0 && footageSeconds < recommendedSeconds;
+  /*
+   * How many variations this upload can actually carry.
+   *
+   * The old hint only said "add more footage", which is easy to read past — a
+   * creator asked for ten 30s videos from 40s of footage, waited four minutes,
+   * and got a Zod rule name back. Naming the number their footage supports
+   * turns the warning into a decision they can make in one tap.
+   */
+  const supportedVariations = maxVariationsForFootage(footageSeconds, lengthSeconds);
 
   const uploadPercent =
     totalUploadBytes > 0 ? Math.min(100, Math.round((uploadedBytes / totalUploadBytes) * 100)) : 0;
@@ -308,8 +322,9 @@ export default function NewJobPage() {
                 className="pill"
                 style={{ marginTop: 4, color: 'var(--status-queued)', borderColor: 'var(--status-queued)' }}
               >
-                Add more footage — about {recommendedSeconds}s recommended for {variationCount} good
-                variation{variationCount === 1 ? '' : 's'} at {lengthSeconds}s
+                {Math.round(footageSeconds)}s of footage makes about {supportedVariations} good
+                variation{supportedVariations === 1 ? '' : 's'} at {lengthSeconds}s — {variationCount} needs
+                roughly {recommendedSeconds}s. Add clips, or drop to {supportedVariations}.
               </span>
             )}
             <input

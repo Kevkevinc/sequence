@@ -89,3 +89,22 @@ export function validateJobInput(input: {
 
   return errors;
 }
+
+/**
+ * The most variations `footageSeconds` can realistically carry at `lengthSeconds`.
+ *
+ * The inverse of {@link recommendedFootageSeconds}, so the two can never
+ * disagree about what "enough footage" means. Used to tell a creator what their
+ * upload actually supports instead of only telling them it is short.
+ *
+ * Floors at 1: any footage at all can make one video, and offering "0
+ * variations" would be a dead end rather than advice.
+ */
+export function maxVariationsForFootage(
+  footageSeconds: number,
+  lengthSeconds: number
+): number {
+  if (lengthSeconds <= 0) return 1;
+  const extra = (footageSeconds / lengthSeconds - 1) / 0.5;
+  return Math.max(1, Math.min(MAX_VARIATION_COUNT, Math.floor(1 + extra)));
+}
