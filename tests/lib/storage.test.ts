@@ -38,6 +38,21 @@ describe('createUploadUrl', () => {
     expect(result.storageKey).toMatch(/^clips\/.+-my-clip\.mp4$/);
   });
 
+  it('stays valid long enough to upload a full-length 4K clip', async () => {
+    await createUploadUrl('IMG_1234.mov', 'video/quicktime');
+    const [, , options] = vi.mocked(getSignedUrl).mock.calls[0];
+    const expiresIn = (options as { expiresIn: number }).expiresIn;
+
+    // This was 300s, which silently capped clip length: raw 4K phone footage
+    // measured ~25.6 Mbps, so 60 seconds of it is ~192MB, and at a 5 Mbps
+    // uplink that is 307s of transfer — the URL died mid-upload. A tester
+    // concluded clips over a minute "could not be uploaded" and split them in
+    // half by hand, which worked only because each half fit the old window.
+    const megabytesOfOneMinute4K = (60 * 25.6) / 8;
+    const secondsAtSlowUplink = (megabytesOfOneMinute4K * 8) / 1; // 1 Mbps up
+    expect(expiresIn).toBeGreaterThan(secondsAtSlowUplink);
+  });
+
   it('calls getSignedUrl with correct S3 command parameters', async () => {
     const filename = 'my-clip.mp4';
     const contentType = 'video/mp4';

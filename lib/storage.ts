@@ -31,6 +31,25 @@ const client = new S3Client({
   maxAttempts: 3,
 });
 
+/**
+ * How long an upload URL stays valid.
+ *
+ * Was five minutes, which silently capped how long a clip could be. Raw 4K
+ * phone footage runs about 25 Mbps, so a single minute of it is roughly 190MB —
+ * more than five minutes of upload on any connection slower than ~5 Mbps up,
+ * which is most phones on mobile data. The URL expired mid-transfer and R2
+ * rejected the rest, so a tester concluded clips "over a minute" could not be
+ * uploaded and started splitting them in half by hand. Two halves each fit
+ * inside the old window, which is exactly why the workaround appeared to work.
+ *
+ * Two hours covers a 60-second 4K clip on a genuinely slow uplink (~1 Mbps)
+ * with room to spare. The cost of a longer window is small and bounded: the URL
+ * grants write access to one randomly-named key in a private bucket, it is
+ * minted per file immediately before that file's PUT, and it is only ever
+ * handed to the signed-in creator who asked for it.
+ */
+const UPLOAD_URL_TTL_SECONDS = 2 * 60 * 60;
+
 export async function createUploadUrl(originalFilename: string, contentType: string) {
   const storageKey = `clips/${randomUUID()}-${originalFilename}`;
   const command = new PutObjectCommand({
@@ -38,7 +57,7 @@ export async function createUploadUrl(originalFilename: string, contentType: str
     Key: storageKey,
     ContentType: contentType,
   });
-  const url = await getSignedUrl(client, command, { expiresIn: 300 });
+  const url = await getSignedUrl(client, command, { expiresIn: UPLOAD_URL_TTL_SECONDS });
   return { url, storageKey };
 }
 
