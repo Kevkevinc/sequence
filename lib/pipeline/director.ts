@@ -573,31 +573,43 @@ export function dedupeIdenticalCuts(
   footageEndByClipId: Map<string, number>
 ): void {
   /*
-   * A variation that is a wholesale copy of another is left for the validator.
+   * Variations that are a wholesale copy of an earlier one are skipped, and
+   * only those.
    *
-   * Repairing it would defeat the rule it is about to break: sliding every cut
-   * by a tenth of a second makes two identical edits technically distinct while
-   * leaving the creator with two videos they cannot tell apart. That rule is
-   * about the deliverable, not about frame fingerprints, and the only correct
-   * answer is a genuinely different edit — which only the model can produce.
+   * Repairing such a variation would defeat the rule it is about to break:
+   * sliding every cut by a tenth of a second makes two identical edits
+   * technically distinct while leaving the creator with two videos they cannot
+   * tell apart. That rule is about the deliverable, not about frame
+   * fingerprints, and only a genuinely different edit fixes it.
    *
-   * Incidental collisions, where variations differ but happen to share one cut,
-   * are exactly what this repair is for and are handled below.
+   * Skipping *per variation* rather than abandoning the whole pass matters: a
+   * first attempt at this disabled the repair entirely whenever any duplicate
+   * pair existed anywhere in the plan, which is why a live job failed a second
+   * time on exactly the collision this is meant to absorb.
    */
-  const sequences = variations.map((variation) =>
-    variation.segments.map((cut) => segmentKey(cut)).join('>')
-  );
-  if (new Set(sequences).size < sequences.length) return;
+  const seenSequences = new Set<string>();
+  const isWholesaleCopy = variations.map((variation) => {
+    const sequence = variation.segments.map((cut) => segmentKey(cut)).join('>');
+    if (seenSequences.has(sequence)) return true;
+    seenSequences.add(sequence);
+    return false;
+  });
 
   // Keyed to the variation that first used each cut, mirroring the validator:
   // reuse *within* one variation is legal and governed by MAX_SEGMENT_REUSE, so
   // moving it here would silently rewrite an edit the model built on purpose.
   const firstUse = new Map<string, number>();
 
+  let collisions = 0;
+  let skippedAsCopy = 0;
+  const unplaceable: string[] = [];
+
   // Alternating and widening, so the first thing tried is the smallest change
   // that could work and the search stays centred on the moment the model chose.
+  // Ranges out to three seconds because a ten-variation plan draws ~100 cuts
+  // from a few dozen tagged moments, and the popular ones get crowded.
   const offsets: number[] = [];
-  for (let step = 1; step <= 12; step++) {
+  for (let step = 1; step <= 30; step++) {
     offsets.push(step * 0.1, -step * 0.1);
   }
 
@@ -611,11 +623,20 @@ export function dedupeIdenticalCuts(
         continue;
       }
       if (original === index) continue;
+      if (isWholesaleCopy[index]) {
+        skippedAsCopy++;
+        continue;
+      }
 
+      collisions++;
       const duration = cutDuration(cut);
       const footageEnd = footageEndByClipId.get(cut.rawClipId);
-      if (footageEnd === undefined) continue;
+      if (footageEnd === undefined) {
+        unplaceable.push(`${cut.rawClipId} (no footage length known)`);
+        continue;
+      }
 
+      let placed = false;
       for (const offset of offsets) {
         const startSeconds = round2(cut.startSeconds + offset);
         const endSeconds = round2(startSeconds + duration);
@@ -627,10 +648,30 @@ export function dedupeIdenticalCuts(
         cut.startSeconds = startSeconds;
         cut.endSeconds = endSeconds;
         firstUse.set(candidateKey, index);
+        placed = true;
         break;
+      }
+
+      if (!placed) {
+        unplaceable.push(
+          `variation ${index + 1}: ${round2(cut.startSeconds)}-${round2(cut.endSeconds)}s ` +
+            `(clip runs to ${round2(footageEnd)}s)`
+        );
       }
     }
   });
+
+  // Says why an attempt is about to be rejected for something this pass exists
+  // to prevent. Without it the only visible symptom is the validator's message,
+  // which cannot distinguish "the repair declined" from "the repair never ran".
+  if (unplaceable.length > 0 || skippedAsCopy > 0) {
+    console.warn(
+      `Cut de-duplication: ${collisions} collision(s), ` +
+        `${unplaceable.length} could not be moved` +
+        (skippedAsCopy > 0 ? `, ${skippedAsCopy} left in duplicate variations` : '') +
+        (unplaceable.length > 0 ? ` — ${unplaceable.slice(0, 5).join('; ')}` : '')
+    );
+  }
 }
 
 function cutDuration(cut: Cut): number {

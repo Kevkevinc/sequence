@@ -155,3 +155,44 @@ describe('dedupeIdenticalCuts and wholesale duplicates', () => {
     expect(variations[1].segments[1]).toEqual(cut(CLIP, 10, 12));
   });
 });
+
+describe('dedupeIdenticalCuts under crowding', () => {
+  it('still repairs other variations when one of them is a wholesale copy', () => {
+    // The live regression: an earlier version abandoned the whole pass as soon
+    // as any duplicate pair existed, so a plan containing both a copied
+    // variation and an ordinary collision had neither repaired — and the job
+    // failed a second time on the collision the repair exists to absorb.
+    const variations = [
+      { segments: [cut(CLIP, 0.2, 1.6), cut(CLIP, 5, 7)] },
+      { segments: [cut(CLIP, 0.2, 1.6), cut(CLIP, 5, 7)] }, // wholesale copy of #1
+      { segments: [cut(CLIP, 0.2, 1.6), cut(CLIP, 12, 14)] }, // ordinary collision
+    ];
+    dedupeIdenticalCuts(variations, new Map([[CLIP, 40]]));
+
+    // The copy is left for the validator to reject...
+    expect(variations[1].segments).toEqual([cut(CLIP, 0.2, 1.6), cut(CLIP, 5, 7)]);
+    // ...but the genuine third variation no longer shares frames with the first.
+    expect(variations[2].segments[0]).not.toEqual(cut(CLIP, 0.2, 1.6));
+    expect(
+      variations[2].segments[0].endSeconds - variations[2].segments[0].startSeconds
+    ).toBeCloseTo(1.4, 6);
+  });
+
+  it('places every variation when ten of them pile onto one popular moment', () => {
+    // 31 tagged segments feeding 10 variations is what the failing job actually
+    // had, so the same cut gets picked over and over and the search has to
+    // reach past its immediate neighbours.
+    const variations = Array.from({ length: 10 }, (_, index) => ({
+      segments: [cut(CLIP, 0.2, 1.6), cut(CLIP, 20 + index, 22 + index)],
+    }));
+    dedupeIdenticalCuts(variations, new Map([[CLIP, 40]]));
+
+    const openings = variations.map((v) => `${v.segments[0].startSeconds}-${v.segments[0].endSeconds}`);
+    expect(new Set(openings).size).toBe(10);
+    for (const v of variations) {
+      expect(v.segments[0].endSeconds - v.segments[0].startSeconds).toBeCloseTo(1.4, 6);
+      expect(v.segments[0].startSeconds).toBeGreaterThanOrEqual(0);
+      expect(v.segments[0].endSeconds).toBeLessThanOrEqual(40);
+    }
+  });
+});
