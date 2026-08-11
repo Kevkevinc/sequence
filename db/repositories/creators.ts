@@ -1,6 +1,7 @@
 import { eq } from 'drizzle-orm';
 import { db } from '@/db/client';
 import { creators } from '@/db/schema';
+import type { CaptionSettings } from '@/lib/render/captionSettings';
 
 export async function createCreatorIfNotExists(clerkUserId: string) {
   const existing = await db.query.creators.findFirst({
@@ -43,10 +44,21 @@ export async function getCreatorByClerkId(clerkUserId: string) {
 
 export async function updateCreatorProfile(
   clerkUserId: string,
-  data: { height?: string; weight?: string; audience?: 'mens' | 'womens' | 'any' }
+  data: {
+    height?: string;
+    weight?: string;
+    audience?: 'mens' | 'womens' | 'any';
+    /**
+     * The creator's own caption look, used as the starting point in Custom
+     * mode. Style mode takes its captions from the style instead.
+     */
+    captionSettings?: CaptionSettings;
+  }
 ) {
   const [updated] = await db
     .update(creators)
+    // `undefined` keys are dropped by drizzle, so a PATCH that sends only a
+    // height cannot blank out a saved caption look.
     .set(data)
     .where(eq(creators.clerkUserId, clerkUserId))
     .returning();

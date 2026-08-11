@@ -550,6 +550,24 @@ function round2(seconds: number): number {
 }
 
 /**
+ * Whether a cut could be moved at all without breaking another rule.
+ *
+ * A clip one second long, cut at the pacing floor, has exactly one legal cut:
+ * it cannot slide (there is no room) and it cannot be trimmed (anything shorter
+ * is below the band). Two variations both using that clip therefore *must*
+ * share identical frames — the alternative is not using the clip.
+ *
+ * Shared with {@link dedupeIdenticalCuts} deliberately, so the byte-identical
+ * rule only ever demands what the repair could actually have achieved. A live
+ * job failed three attempts on exactly this: the rule asked the model to move a
+ * cut that had nowhere to go.
+ */
+function hasAlternativePlacement(cut: Cut, footageEnd: number, band: PacingBand): boolean {
+  for (const _candidate of replacementCuts(cut, footageEnd, band)) return true;
+  return false;
+}
+
+/**
  * Nudges cuts that are byte-identical across variations until they are not.
  *
  * The validator forbids two variations sharing the exact same frames, and the
@@ -1313,6 +1331,21 @@ function buildValidator(context: ValidationContext) {
             return;
           }
           if (original === index) return; // same variation: MAX_SEGMENT_REUSE owns this
+
+          /*
+           * Exempt when the clip cannot offer a different cut.
+           *
+           * Asking the model to move a cut with nowhere to go fails every
+           * attempt and takes the whole job with it. A creator who uploads a
+           * one-second clip has one second of that angle; every variation using
+           * it shows the same frames, and refusing the plan does not change
+           * that — it just means no videos.
+           */
+          const clipEnd = footageEndByClipId.get(cut.rawClipId);
+          if (clipEnd !== undefined && !hasAlternativePlacement(cut, clipEnd, pacingBand)) {
+            return;
+          }
+
           ctx.addIssue({
             code: 'custom',
             path: ['variations', index, 'segments', cutIndex],

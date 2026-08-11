@@ -108,3 +108,48 @@ export function maxVariationsForFootage(
   const extra = (footageSeconds / lengthSeconds - 1) / 0.5;
   return Math.max(1, Math.min(MAX_VARIATION_COUNT, Math.floor(1 + extra)));
 }
+
+/**
+ * Shortest clip the editor can actually use.
+ *
+ * Not a style preference — a hard limit that falls out of how cuts are made.
+ * A cut has to sit inside the pacing band (as low as 1-2s, as high as 4-7s),
+ * and two variations may never show the exact same frames. A clip barely longer
+ * than one cut therefore offers exactly one legal cut, so every variation using
+ * it is identical there, and there is nowhere to move it to. Three seconds is
+ * the point where a clip can yield two genuinely different moments at the
+ * fastest pacing.
+ *
+ * Every editing failure on record traces to this. Jobs with 4 of 6, 6 of 7 and
+ * 6 of 8 clips under three seconds each failed after burning three model calls;
+ * the only failures without short clips were Google-side outages. Excluding
+ * these up front is the difference between a job that cannot succeed and one
+ * that never gets created.
+ */
+export const MIN_CLIP_SECONDS = 3;
+
+export type ClipCheck = {
+  /** Clips long enough to cut from. */
+  usable: number[];
+  /** Indexes of clips that are too short, in the order they were given. */
+  tooShortIndexes: number[];
+};
+
+/**
+ * Splits measured clip durations into what the editor can and cannot use.
+ *
+ * A duration of zero means the browser could not read the file at all, which is
+ * treated as usable rather than rejected: refusing a clip because we failed to
+ * measure it would block a perfectly good upload on our own limitation.
+ */
+export function checkClipDurations(durations: number[]): ClipCheck {
+  const usable: number[] = [];
+  const tooShortIndexes: number[] = [];
+
+  durations.forEach((duration, index) => {
+    if (duration > 0 && duration < MIN_CLIP_SECONDS) tooShortIndexes.push(index);
+    else usable.push(duration);
+  });
+
+  return { usable, tooShortIndexes };
+}

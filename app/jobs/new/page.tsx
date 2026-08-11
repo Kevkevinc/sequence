@@ -10,7 +10,9 @@ import { VideoTile } from '@/components/ui';
 import { IconCheck, IconImage, IconUpload } from '@/components/icons';
 import {
   MAX_LENGTH_SECONDS,
+  MIN_CLIP_SECONDS,
   MIN_LENGTH_SECONDS,
+  checkClipDurations,
   maxVariationsForFootage,
   recommendedFootageSeconds,
 } from '@/lib/validation/job';
@@ -142,6 +144,8 @@ export default function NewJobPage() {
   const [files, setFiles] = useState<File[]>([]);
   /** Total seconds of raw footage selected, read from the files in the browser. */
   const [footageSeconds, setFootageSeconds] = useState(0);
+  /** Names of clips dropped for being too short to cut from. */
+  const [skippedShortClips, setSkippedShortClips] = useState<string[]>([]);
   const [productName, setProductName] = useState('');
   const [sizingOn, setSizingOn] = useState(false);
   const [sizeWorn, setSizeWorn] = useState('');
@@ -168,6 +172,8 @@ export default function NewJobPage() {
    */
   const [tweakedCaptions, setTweakedCaptions] = useState<CaptionSettings | null>(null);
   const [savedCaptions, setSavedCaptions] = useState<unknown>(null);
+  const [savingCaptions, setSavingCaptions] = useState(false);
+  const [captionsSavedAt, setCaptionsSavedAt] = useState<number | null>(null);
   const [selectedBlock, setSelectedBlock] = useState<CaptionBlock>('hook');
 
   useEffect(() => {
@@ -230,11 +236,28 @@ export default function NewJobPage() {
    * cannot make its variations.
    */
   function selectClips(selected: File[]) {
-    setFiles(selected);
-    Promise.all(selected.map(readVideoDuration)).then((durations) =>
-      setFootageSeconds(durations.reduce((sum, d) => sum + d, 0))
-    );
+    Promise.all(selected.map(readVideoDuration)).then((durations) => {
+      /*
+       * Clips too short to cut from are dropped here, before they upload.
+       *
+       * A clip barely longer than one cut offers exactly one legal cut, so
+       * every variation using it shows identical frames with nowhere to move
+       * them. Every editing failure on record came from an upload that was
+       * mostly clips like this, and each one cost three model calls and four
+       * minutes before saying so. Dropping them at selection is the difference
+       * between a job that cannot succeed and one that is never created.
+       */
+      const { tooShortIndexes } = checkClipDurations(durations);
+      const keep = selected.filter((_, index) => !tooShortIndexes.includes(index));
+      const keptDurations = durations.filter((_, index) => !tooShortIndexes.includes(index));
+
+      setSkippedShortClips(tooShortIndexes.map((index) => selected[index].name));
+      setFiles(keep);
+      setFootageSeconds(keptDurations.reduce((sum, d) => sum + d, 0));
+    });
   }
+
+
 
   const recommendedSeconds = recommendedFootageSeconds(lengthSeconds, variationCount);
   const footageShort =
@@ -426,6 +449,16 @@ export default function NewJobPage() {
                 <IconCheck size={13} />
                 {files.length} clip{files.length === 1 ? '' : 's'} ready
                 {footageSeconds > 0 ? ` · ${Math.round(footageSeconds)}s` : ''}
+              </span>
+            )}
+            {skippedShortClips.length > 0 && (
+              <span
+                className="pill"
+                style={{ marginTop: 4, color: 'var(--status-failed)', borderColor: 'var(--status-failed)' }}
+              >
+                Skipped {skippedShortClips.length} clip
+                {skippedShortClips.length === 1 ? '' : 's'} under {MIN_CLIP_SECONDS}s —
+                too short to cut from. Record longer takes.
               </span>
             )}
             {footageShort && (
@@ -855,16 +888,46 @@ export default function NewJobPage() {
                     style={{ width: 44, height: 30, padding: 0, border: 'none', background: 'none' }}
                   />
                   {captionsTouched && (
-                    <button
-                      type="button"
-                      className="btn"
-                      style={{ marginLeft: 'auto' }}
-                      onClick={() => setTweakedCaptions(null)}
-                    >
-                      Reset
-                    </button>
+                    <div style={{ marginLeft: 'auto', display: 'flex', gap: 8 }}>
+                      <button type="button" className="btn" onClick={() => setTweakedCaptions(null)}>
+                        Reset
+                      </button>
+                      {/* Saving is offered only in Custom mode: in Style mode the
+                          look belongs to the style, and writing it to the profile
+                          would have no effect on the job being created. */}
+                      {mode === 'custom' && (
+                        <button
+                          type="button"
+                          className="btn"
+                          disabled={savingCaptions}
+                          onClick={async () => {
+                            setSavingCaptions(true);
+                            try {
+                              const res = await fetch('/api/profile', {
+                                method: 'PATCH',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({ captionSettings: captions }),
+                              });
+                              if (res.ok) {
+                                setSavedCaptions(captions);
+                                setCaptionsSavedAt(Date.now());
+                              }
+                            } finally {
+                              setSavingCaptions(false);
+                            }
+                          }}
+                        >
+                          {savingCaptions ? 'Saving…' : 'Save as my default'}
+                        </button>
+                      )}
+                    </div>
                   )}
                 </div>
+                {captionsSavedAt !== null && (
+                  <p className="helper" style={{ marginTop: 8 }}>
+                    Saved. New Custom-mode videos will start from this look.
+                  </p>
+                )}
               </div>
             </div>
           </section>

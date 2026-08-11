@@ -221,3 +221,23 @@ describe('dedupeIdenticalCuts under crowding', () => {
     }
   });
 });
+
+describe('a clip with only one legal cut', () => {
+  it('is left alone by the repair rather than made illegal', () => {
+    // One second of footage at fast pacing (1-2s band): no room to slide, and
+    // any trim falls below the band floor. A live job failed three attempts
+    // being asked to move this.
+    const FAST = { min: 1, max: 2 };
+    const variations = [
+      { segments: [cut(CLIP, 0, 1), cut(OTHER, 0, 2)] },
+      { segments: [cut(CLIP, 0, 1), cut(OTHER, 4, 6)] },
+    ];
+    dedupeIdenticalCuts(variations, new Map([[CLIP, 1], [OTHER, 30]]), FAST);
+
+    // Unchanged and still legal — a cut below the band floor would fail a
+    // different rule instead, which is not an improvement.
+    expect(variations[1].segments[0]).toEqual(cut(CLIP, 0, 1));
+    expect(variations[1].segments[0].endSeconds - variations[1].segments[0].startSeconds)
+      .toBeGreaterThanOrEqual(FAST.min);
+  });
+});

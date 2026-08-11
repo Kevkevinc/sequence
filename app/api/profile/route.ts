@@ -1,5 +1,6 @@
 import { auth } from '@clerk/nextjs/server';
 import { createCreatorIfNotExists, updateCreatorProfile } from '@/db/repositories/creators';
+import { CaptionSettingsSchema } from '@/lib/render/captionSettings';
 
 export async function GET() {
   const { userId } = await auth();
@@ -21,9 +22,14 @@ export async function PATCH(req: Request) {
     return Response.json({ error: 'Audience must be mens, womens, or any.' }, { status: 400 });
   }
 
-  if (body.height === undefined && body.weight === undefined && body.audience === undefined) {
+  if (
+    body.height === undefined &&
+    body.weight === undefined &&
+    body.audience === undefined &&
+    body.captionSettings === undefined
+  ) {
     return Response.json(
-      { error: 'At least one of height, weight or audience is required.' },
+      { error: 'At least one of height, weight, audience or captionSettings is required.' },
       { status: 400 }
     );
   }
@@ -36,6 +42,10 @@ export async function PATCH(req: Request) {
     height: body.height,
     weight: body.weight,
     audience: body.audience,
+    // Parsed rather than trusted: it arrives from the browser and is read back
+    // by the renderer. An invalid shape is ignored, which leaves the previous
+    // look in place rather than failing a profile save over something cosmetic.
+    captionSettings: CaptionSettingsSchema.safeParse(body.captionSettings).data,
   });
 
   // Return 404 if no creator exists for this user
