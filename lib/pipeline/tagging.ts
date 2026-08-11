@@ -7,6 +7,7 @@ import { downloadClipToTempFile } from '@/lib/storage';
 import { getEnvWithDefault } from '@/lib/env';
 import { getGeminiClient } from '@/lib/gemini/client';
 import { describeCause } from '@/lib/pipeline/errors';
+import { recordUsage } from '@/lib/pipeline/usage';
 import { withTransientRetry, type TransientRetryOptions } from '@/lib/pipeline/retry';
 
 // Overridable because model availability is genuinely volatile per account:
@@ -169,6 +170,16 @@ export async function tagClip(
           config: { responseMimeType: 'application/json' },
         });
       }, TAGGING_RETRY);
+
+      // Metered before the response is validated: the call was billed whether
+      // or not the model returned usable JSON, so recording it only on the
+      // success path would under-report exactly the spend worth noticing.
+      await recordUsage({
+        jobId: clip.jobId,
+        kind: 'tagging',
+        model: TAGGING_MODEL,
+        usage: response.usageMetadata,
+      });
 
       let parsed: z.infer<typeof TaggingResponseSchema>;
       try {

@@ -1,6 +1,6 @@
 import { and, eq, inArray, isNotNull, notInArray } from 'drizzle-orm';
 import { db } from '@/db/client';
-import { creators, jobs, rawClips, segments, editPlans, renders, jobInspirationImages, styles } from '@/db/schema';
+import { apiUsage, creators, jobs, rawClips, segments, editPlans, renders, jobInspirationImages, styles } from '@/db/schema';
 
 /**
  * Deletes every job a creator owns, and everything those jobs reference.
@@ -21,6 +21,10 @@ export async function cleanUpCreatorJobs(creatorId: string): Promise<void> {
   if (clips.length > 0) {
     await db.delete(segments).where(inArray(segments.rawClipId, clips.map((c) => c.id)));
   }
+  // Metering rows too. They carry no foreign key (usage is a financial record
+  // and must outlive the job it describes), so nothing would ever remove them
+  // and a test run would permanently inflate the spend dashboard's call count.
+  await db.delete(apiUsage).where(inArray(apiUsage.jobId, jobIds));
   await db.delete(renders).where(inArray(renders.jobId, jobIds));
   await db.delete(editPlans).where(inArray(editPlans.jobId, jobIds));
   await db.delete(jobInspirationImages).where(inArray(jobInspirationImages.jobId, jobIds));

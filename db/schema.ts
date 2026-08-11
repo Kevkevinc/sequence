@@ -135,3 +135,55 @@ export const renders = pgTable('renders', {
   failureReason: text('failure_reason'),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 });
+
+/**
+ * Which pipeline step spent a model call. Only these two exist today; both are
+ * paid per token, and they have very different shapes — tagging sends a whole
+ * video, planning sends text — so a single "gemini spend" number without this
+ * split would hide which one is actually costing money.
+ */
+export const apiUsageKindEnum = pgEnum('api_usage_kind', ['tagging', 'planning']);
+
+/**
+ * One row per Gemini call, with the token counts the API itself reported.
+ *
+ * Recorded rather than estimated. Cost per job was previously guessed from call
+ * counts, which cannot be right: a tagging call is billed by the duration of
+ * the video it ingests, so two jobs with the same number of calls can differ by
+ * an order of magnitude. The provider returns exact counts on every response —
+ * this stores them so spend can be answered rather than approximated.
+ *
+ * `jobId` is nullable and not cascaded: usage is a financial record and has to
+ * survive the job it belongs to being deleted. Writes are best-effort at the
+ * call sites — failing a render because a metering row could not be written
+ * would be a bad trade.
+ */
+export const apiUsage = pgTable('api_usage', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  jobId: uuid('job_id'),
+  kind: apiUsageKindEnum('kind').notNull(),
+  model: text('model').notNull(),
+  promptTokens: integer('prompt_tokens').notNull().default(0),
+  outputTokens: integer('output_tokens').notNull().default(0),
+  totalTokens: integer('total_tokens').notNull().default(0),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
+/**
+ * Liveness for each worker process, refreshed on every poll.
+ *
+ * "Is the worker up?" could not be answered before without reading deploy logs,
+ * and inferring it from recent job activity gives the wrong answer in exactly
+ * the case that matters: an idle queue and a dead worker look identical. A
+ * heartbeat separates them.
+ *
+ * Keyed by a per-process id so a restart or a second replica is visible as its
+ * own row rather than silently overwriting another's timestamp.
+ */
+export const workerHeartbeats = pgTable('worker_heartbeats', {
+  id: text('id').primaryKey(),
+  startedAt: timestamp('started_at', { withTimezone: true }).notNull().defaultNow(),
+  lastSeenAt: timestamp('last_seen_at', { withTimezone: true }).notNull().defaultNow(),
+  /** What the process is currently doing, for the dashboard's status line. */
+  activity: text('activity'),
+});

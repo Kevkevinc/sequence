@@ -4,7 +4,7 @@ import { clerkMiddleware, createRouteMatcher } from "@clerk/nextjs/server";
 // each one already checks `auth()` itself and returns 401, which is the
 // correct behaviour for a fetch (a middleware redirect to a sign-in HTML page
 // would be useless to a JSON client).
-const isProtectedRoute = createRouteMatcher(["/profile(.*)", "/jobs(.*)"]);
+const isProtectedRoute = createRouteMatcher(["/profile(.*)", "/jobs(.*)", "/status(.*)"]);
 
 export default clerkMiddleware(async (auth, req) => {
   if (isProtectedRoute(req)) {

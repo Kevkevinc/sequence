@@ -1,6 +1,7 @@
+import { randomUUID } from 'crypto';
 import { and, eq, inArray, isNull, like, notExists, sql } from 'drizzle-orm';
 import { db } from '@/db/client';
-import { jobs, rawClips, editPlans, renders, creators, jobStatusEnum } from '@/db/schema';
+import { jobs, rawClips, editPlans, renders, creators, jobStatusEnum, workerHeartbeats } from '@/db/schema';
 import { tagClip } from '@/lib/pipeline/tagging';
 import { planJob } from '@/lib/pipeline/director';
 import { describeCause } from '@/lib/pipeline/errors';
@@ -8,6 +9,42 @@ import { isTransientError } from '@/lib/pipeline/retry';
 import { renderPlan } from '@/lib/render/renderPlan';
 
 const POLL_INTERVAL_MS = 5000;
+
+/**
+ * Identifies this worker process to the dashboard.
+ *
+ * Railway exposes a per-deployment id; falling back to a random suffix keeps
+ * two local workers from writing over each other's heartbeat. Stable for the
+ * life of the process, so a restart appears as a new row with a new
+ * `startedAt` rather than silently continuing the old one — which is how the
+ * dashboard can show a crash-restart loop instead of hiding it.
+ */
+const WORKER_ID =
+  process.env.RAILWAY_DEPLOYMENT_ID ??
+  process.env.RAILWAY_REPLICA_ID ??
+  `local-${randomUUID().slice(0, 8)}`;
+
+/**
+ * Records that this worker is alive and what it is doing.
+ *
+ * Called on every poll, so "last seen" is never more than one poll interval
+ * stale while the worker is healthy. Best-effort: a database blip must not kill
+ * the worker, and the dashboard showing a stale timestamp is a better failure
+ * than a process that exits because it could not report its own health.
+ */
+async function beat(activity: string): Promise<void> {
+  try {
+    await db
+      .insert(workerHeartbeats)
+      .values({ id: WORKER_ID, activity })
+      .onConflictDoUpdate({
+        target: workerHeartbeats.id,
+        set: { lastSeenAt: new Date(), activity },
+      });
+  } catch (error) {
+    console.warn(`Could not write worker heartbeat: ${describeCause(error)}`);
+  }
+}
 
 /* ------------------------------------------------------- timed logging --- */
 
@@ -575,6 +612,7 @@ async function main() {
 
   await reclaimOrphanedRenders();
 
+  await beat('starting up');
 
   console.log(
     `Worker started, polling for pending jobs every ${POLL_INTERVAL_MS / 1000} seconds...`
@@ -582,6 +620,7 @@ async function main() {
 
   while (!shuttingDown) {
     try {
+      await beat('idle');
       // Rendering is checked first: it finishes work a creator is already
       // waiting on, where tagging only starts new work. Preferring it keeps
       // the `planned` queue from growing behind a steady stream of new jobs.
@@ -589,6 +628,7 @@ async function main() {
       if (readyToRender) {
         const startedAt = Date.now();
         log(`RENDER STAGE  job ${readyToRender.id}`);
+        await beat(`rendering job ${readyToRender.id}`);
         await renderJob(readyToRender.id);
         log(`RENDER STAGE  job ${readyToRender.id} done in ${since(startedAt)}\n`);
         continue;
@@ -598,6 +638,7 @@ async function main() {
       if (readyToTag) {
         const startedAt = Date.now();
         log(`AI STAGE      job ${readyToTag.id}`);
+        await beat(`tagging and planning job ${readyToTag.id}`);
         await processJob(readyToTag.id);
         log(`AI STAGE      job ${readyToTag.id} done in ${since(startedAt)}`);
         continue;

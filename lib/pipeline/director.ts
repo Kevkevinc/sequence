@@ -15,6 +15,7 @@ import {
 } from '@/lib/pipeline/hookLibrary';
 import { describeCause, MAX_CAUSE_LENGTH } from '@/lib/pipeline/errors';
 import { withTransientRetry, type TransientRetryOptions } from '@/lib/pipeline/retry';
+import { recordUsage } from '@/lib/pipeline/usage';
 
 // Pro models (2.5-pro, 3.x-pro) return 429 quota-exceeded on the free API tier,
 // so the director runs on Flash too. Overridable so a Pro model can be selected
@@ -1528,6 +1529,17 @@ export async function planJob(
           }),
         DIRECTOR_RETRY
       );
+
+      // Metered before any of the checks below, all of which can return early:
+      // the call was billed whether or not its answer turned out to be usable,
+      // and a truncated or invalid response is exactly the kind that costs a
+      // full output-token budget.
+      await recordUsage({
+        jobId: job.id,
+        kind: 'planning',
+        model: DIRECTOR_MODEL,
+        usage: response.usageMetadata,
+      });
 
       // A response the model never got to finish is not a wrong answer, and
       // must not be treated as one. Without this, hitting the output-token
