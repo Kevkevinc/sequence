@@ -359,7 +359,9 @@ describe('worker', () => {
     const job = await makeJob();
     vi.mocked(tagClip).mockRejectedValue(new Error('gemini client blew up'));
 
-    await expect(processJob(job.id)).resolves.toBeUndefined();
+    // Reports the failure to its caller rather than returning nothing, so the
+    // worker's own log can say FAILED instead of announcing a dead job as done.
+    await expect(processJob(job.id)).resolves.toBe(false);
 
     const updated = await statusOf(job.id);
     expect(updated.status).toBe('failed');

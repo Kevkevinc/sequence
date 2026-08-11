@@ -83,6 +83,33 @@ async function timed<T>(label: string, operation: () => Promise<T>): Promise<T> 
 }
 
 /**
+ * {@link timed} for a step that reports failure by returning rather than
+ * throwing.
+ *
+ * The pipeline's stages return `{ success: false, error }` instead of throwing,
+ * so plain `timed` sees a value come back and prints "finished" — a job that
+ * died at planning produced a log reading `Planning cuts finished in 166.0s`
+ * followed by `AI STAGE done`, with nothing anywhere to suggest the creator got
+ * no video. That is the second time this exact shape of lie has cost real
+ * debugging time, so the distinction lives in the logger rather than in each
+ * caller remembering to add a line.
+ */
+async function timedResult<T extends { success: boolean; error?: string }>(
+  label: string,
+  operation: () => Promise<T>
+): Promise<T> {
+  const startedAt = Date.now();
+  log(`  ${label}...`);
+  const result = await operation();
+  if (result.success) {
+    log(`  ${label} finished in ${since(startedAt)}`);
+  } else {
+    log(`  ${label} FAILED after ${since(startedAt)}: ${result.error ?? 'no reason given'}`);
+  }
+  return result;
+}
+
+/**
  * How many clips may be tagged at once.
  *
  * Was unbounded (`Promise.all(clips.map(...))`). Each `tagClip` streams a whole
@@ -284,7 +311,7 @@ async function failJob(jobId: string, reason: string): Promise<void> {
  * reason rather than leaving it stuck in `tagging`/`planning` forever, where
  * nothing would ever pick it up again.
  */
-export async function processJob(jobId: string): Promise<void> {
+export async function processJob(jobId: string): Promise<boolean> {
   // Distinguishes "the pipeline broke" from "the pipeline finished but the
   // bookkeeping write failed", which are very different things to report.
   let plansCommitted = false;
@@ -294,7 +321,7 @@ export async function processJob(jobId: string): Promise<void> {
 
     if (clips.length === 0) {
       await failJob(jobId, 'Job has no clips to edit');
-      return;
+      return false;
     }
 
     const tagResults = await timed(`Tagging ${clips.length} clips`, () =>
@@ -310,7 +337,7 @@ export async function processJob(jobId: string): Promise<void> {
         .filter(Boolean)
         .join('; ');
       await failJob(jobId, `All clips failed tagging: ${reasons}`);
-      return;
+      return false;
     }
 
     if (failedTags.length > 0) {
@@ -328,17 +355,19 @@ export async function processJob(jobId: string): Promise<void> {
 
     await db.update(jobs).set({ status: 'planning' }).where(eq(jobs.id, jobId));
 
-    const planResult = await timed('Planning cuts', () => planJob(jobId));
+    const planResult = await timedResult('Planning cuts', () => planJob(jobId));
 
     if (!planResult.success) {
       // The tagging above is already saved, so a requeue resumes here rather
       // than starting over -- which is the difference between a slow job and a
       // destroyed one.
       if (isTransientError(planResult.error) && (await requeueForTransientFailure(jobId, planResult.error))) {
-        return;
+        // Requeued rather than failed: the job is alive, so this is not a
+        // failure the caller should announce as one.
+        return true;
       }
       await failJob(jobId, planResult.error);
-      return;
+      return false;
     }
 
     plansCommitted = true;
@@ -353,6 +382,8 @@ export async function processJob(jobId: string): Promise<void> {
       .update(jobs)
       .set({ status: 'planned', failureReason: null })
       .where(eq(jobs.id, jobId));
+
+    return true;
   } catch (error) {
     // `planJob` has already written its edit_plans rows by this point, so
     // reporting a generic pipeline failure would be actively wrong: the plans
@@ -363,6 +394,7 @@ export async function processJob(jobId: string): Promise<void> {
         ? `Edit plans were generated but the job could not be marked planned: ${describeCause(error)}`
         : `Unexpected worker error: ${describeCause(error)}`
     );
+    return false;
   }
 }
 
@@ -639,8 +671,10 @@ async function main() {
         const startedAt = Date.now();
         log(`AI STAGE      job ${readyToTag.id}`);
         await beat(`tagging and planning job ${readyToTag.id}`);
-        await processJob(readyToTag.id);
-        log(`AI STAGE      job ${readyToTag.id} done in ${since(startedAt)}`);
+        const ok = await processJob(readyToTag.id);
+        log(
+          `AI STAGE      job ${readyToTag.id} ${ok ? 'done' : 'FAILED'} in ${since(startedAt)}`
+        );
         continue;
       }
     } catch (error) {
