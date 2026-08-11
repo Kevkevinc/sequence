@@ -20,6 +20,46 @@ code and the interface has to communicate it accurately. Everything else is open
 
 ---
 
+## 0. Design this as an app, not a website
+
+Sequence is a website technically, but creators add it to their phone's home
+screen and it opens **full-screen with no browser interface at all** — no
+address bar, no tabs, no toolbar. It should be designed as a portrait mobile
+app. Designed as a website, it will feel broken.
+
+Four consequences worth having in front of you before you start:
+
+**There is no back button — you own all navigation.**
+The single most important item here. In full-screen mode iOS provides no back
+affordance whatsoever, and there is no browser chrome to fall back on. **Every
+screen that isn't the root needs its own designed way back.** (The current video
+page has an "All videos" link at the top for exactly this reason — it isn't
+decoration.)
+
+**Navigation should be thumb-reachable.**
+The current sidebar is a desktop pattern inherited from the prototype. Bottom
+navigation is both the app convention and the reachable one on a phone.
+
+**Respect the safe areas.**
+Content must not sit under the notch or the home-indicator bar.
+
+**Portrait only.**
+Orientation is locked in the app manifest; the interface never rotates. Design
+for one orientation.
+
+### The one caveat
+
+It must still work **opened in a normal browser tab**, because not everyone
+installs it and every first-time visitor arrives in Safari. So: design as an app,
+but nothing may *depend* on being installed. In practice that means don't place
+critical controls where Safari's own toolbar would cover them, and don't hide
+anything essential behind installing.
+
+> **One-line brief:** design a portrait mobile app that also survives being
+> opened in a browser tab; assume no browser chrome and no system back button.
+
+---
+
 ## 1. What Sequence does
 
 A creator uploads raw phone footage of a product. The app analyses it, decides
@@ -269,7 +309,9 @@ Yours entirely:
 
 - Colour, typography, spacing, iconography
 - Component library and layout system
-- Navigation structure (currently a sidebar: Home / Your videos / New video / Profile)
+- Navigation structure — the *shape* is yours (currently a sidebar: Home /
+  Your videos / New video / Profile). The constraint in §0 stands: every screen
+  needs a designed way back, because the phone provides none.
 - How the new-video form is broken up — one page, steps, or something else
 - Empty states, onboarding, and first-run experience
 - Whether the job detail page separates "running" and "finished" views
