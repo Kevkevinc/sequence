@@ -1,6 +1,7 @@
 import { and, desc, eq } from 'drizzle-orm';
 import { db } from '@/db/client';
 import { jobs, rawClips, jobInspirationImages } from '@/db/schema';
+import type { CaptionSettings } from '@/lib/render/captionSettings';
 
 export type CreateJobInput = {
   creatorId: string;
@@ -11,6 +12,15 @@ export type CreateJobInput = {
   pacing?: 'slow' | 'medium' | 'fast';
   styleId?: string;
   variationCount: number;
+  /**
+   * Caption look chosen for this job specifically.
+   *
+   * Undefined is the normal case and is stored as null, meaning "keep
+   * inheriting from the style or the profile" — freezing today's inherited
+   * values into the row would silently detach the job from a look the creator
+   * later changes.
+   */
+  captionSettings?: CaptionSettings;
   clips: { storageKey: string; originalFilename: string }[];
   inspirationImage?: { storageKey: string };
   /**
@@ -34,6 +44,7 @@ export async function createJob(input: CreateJobInput) {
         pacing: input.pacing,
         styleId: input.styleId,
         variationCount: input.variationCount,
+        captionSettings: input.captionSettings ?? null,
       })
       .returning();
 

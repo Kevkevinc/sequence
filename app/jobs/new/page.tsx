@@ -1,6 +1,9 @@
 'use client';
 
 import { useEffect, useState } from 'react';
+import { CaptionPreview, type CaptionBlock } from '@/components/CaptionPreview';
+import { resolveCaptionSettings, type CaptionSettings } from '@/lib/render/captionSettings';
+import { CAPTION_FONTS } from '@/lib/render/fonts';
 import { useRouter } from 'next/navigation';
 import { AppShell } from '@/components/AppShell';
 import { VideoTile } from '@/components/ui';
@@ -12,12 +15,62 @@ import {
   recommendedFootageSeconds,
 } from '@/lib/validation/job';
 
+/**
+ * The hook shown in the preview.
+ *
+ * A representative line rather than the creator's real hook, which does not
+ * exist yet — the AI writes it during planning. Chosen to be long enough to
+ * wrap onto a second line at the default size, so the preview shows how a real
+ * hook behaves rather than flattering the layout with one short word.
+ */
+const PREVIEW_HOOK = 'POV: you finally found the perfect fit';
+
+/** One labelled slider in the caption controls. */
+function CaptionSlider({
+  label,
+  value,
+  min,
+  max,
+  step,
+  onChange,
+  format,
+}: {
+  label: string;
+  value: number;
+  min: number;
+  max: number;
+  step: number;
+  onChange: (value: number) => void;
+  format?: (value: number) => string;
+}) {
+  return (
+    <div style={{ marginTop: 12 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13 }}>
+        <span className="label" style={{ margin: 0 }}>{label}</span>
+        <span style={{ opacity: 0.7 }}>{format ? format(value) : Math.round(value)}</span>
+      </div>
+      <input
+        type="range"
+        className="range"
+        min={min}
+        max={max}
+        step={step}
+        value={value}
+        onChange={(e) => onChange(Number(e.target.value))}
+        style={{ ['--fill' as string]: `${((value - min) / (max - min)) * 100}%`, width: '100%' }}
+      />
+    </div>
+  );
+}
+
 type Style = {
   id: string;
   name: string;
   description: string;
   usesInspirationOverlay: boolean;
   usesFitInspoIntro: boolean;
+  /** The style's own caption look, previewed and applied when this style is picked. */
+  captionSettings: Partial<CaptionSettings> | null;
 };
 
 /**
@@ -94,6 +147,17 @@ export default function NewJobPage() {
   // The preview rail shows the sizing overlay exactly as the renderer will
   // build it, which means it needs the creator's stored measurements.
   const [profile, setProfile] = useState<{ height?: string; weight?: string }>({});
+  /**
+   * The caption look for this job.
+   *
+   * Seeded from the style (Style mode) or the creator's saved look (Custom
+   * mode) whenever that source changes, unless the creator has already tweaked
+   * something — `captionsTouched` is what stops switching style from silently
+   * discarding their edits.
+   */
+  const [tweakedCaptions, setTweakedCaptions] = useState<CaptionSettings | null>(null);
+  const [savedCaptions, setSavedCaptions] = useState<unknown>(null);
+  const [selectedBlock, setSelectedBlock] = useState<CaptionBlock>('hook');
 
   useEffect(() => {
     fetch('/api/styles')
@@ -104,12 +168,42 @@ export default function NewJobPage() {
     fetch('/api/profile')
       .then((res) => (res.ok ? res.json() : null))
       .then((data) => {
-        if (data) setProfile({ height: data.height ?? '', weight: data.weight ?? '' });
+        if (data) {
+          setProfile({ height: data.height ?? '', weight: data.weight ?? '' });
+          setSavedCaptions(data.captionSettings ?? null);
+        }
       })
       .catch(() => {});
   }, []);
 
+  // Built the same way the director builds the real overlay — height, weight,
+  // then size worn — so the preview shows a block of the right shape and length.
+  const previewSizingText =
+    [profile.height, profile.weight, sizeWorn ? `Size ${sizeWorn}` : '']
+      .filter(Boolean)
+      .join(', ') || 'Size M';
+
   const selectedStyle = styles.find((s) => s.id === selectedStyleId) ?? null;
+
+  /*
+   * Mirrors the renderer's layering, so what is drawn here is what will be
+   * burned in: style look in Style mode, personal look in Custom mode.
+   *
+   * Derived during render rather than copied into state by an effect. The
+   * effect version had to re-seed whenever the inherited look changed, which
+   * meant either stamping on the creator's edits or serialising an object into
+   * a dependency array to spot the change. Deriving makes "switching style
+   * updates the preview, unless you have taken over" fall out for free.
+   */
+  const inheritedCaptions = mode === 'style' ? selectedStyle?.captionSettings : savedCaptions;
+  const baseCaptions = resolveCaptionSettings(inheritedCaptions);
+  const captions = tweakedCaptions ?? baseCaptions;
+  const captionsTouched = tweakedCaptions !== null;
+
+  /** Applies one caption change, taking over from the inherited look. */
+  function tweakCaptions(patch: Partial<CaptionSettings>) {
+    setTweakedCaptions((current) => ({ ...(current ?? baseCaptions), ...patch }));
+  }
   const errorFor = (field: string) => errors.find((e) => e.field === field)?.message;
 
   /** Adds Fit Inspo images, capped at what the intro can show legibly. */
@@ -269,6 +363,10 @@ export default function NewJobPage() {
           pacing: mode === 'custom' ? pacing : undefined,
           styleId: mode === 'style' ? selectedStyleId : undefined,
           variationCount,
+          // Only sent when the creator actually changed something, so an
+          // untouched job keeps inheriting from its style or profile later
+          // rather than freezing today's defaults into the row.
+          captionSettings: captionsTouched ? captions : undefined,
           clips,
           inspirationImage,
           inspirationImages,
@@ -599,6 +697,129 @@ export default function NewJobPage() {
               {errorFor('variationCount') && (
                 <p className="errorText">{errorFor('variationCount')}</p>
               )}
+            </div>
+          </section>
+
+          <section className="glass card" style={{ marginTop: 20 }}>
+            <label className="label">On-screen text</label>
+            <p className="helper" style={{ marginTop: 2 }}>
+              Drag the text on the preview, or use the sliders. The hook shown here is an
+              example — the AI writes the real one.
+            </p>
+
+            <div
+              style={{
+                display: 'flex',
+                gap: 18,
+                marginTop: 14,
+                flexWrap: 'wrap',
+                alignItems: 'flex-start',
+              }}
+            >
+              <CaptionPreview
+                settings={captions}
+                hookText={PREVIEW_HOOK}
+                sizingText={sizingOn ? previewSizingText : null}
+                clip={files[0] ?? null}
+                selected={selectedBlock}
+                onSelect={setSelectedBlock}
+                onMove={(block, x, y) =>
+                  tweakCaptions(
+                    block === 'hook' ? { hookX: x, hookY: y } : { sizingX: x, sizingY: y }
+                  )
+                }
+              />
+
+              <div style={{ flex: '1 1 260px', minWidth: 240 }}>
+                <label className="label" htmlFor="captionFont">Font</label>
+                <select
+                  id="captionFont"
+                  className="input"
+                  value={captions.fontId}
+                  onChange={(e) => tweakCaptions({ fontId: e.target.value as CaptionSettings['fontId'] })}
+                >
+                  {CAPTION_FONTS.map((font) => (
+                    <option key={font.id} value={font.id}>
+                      {font.label} — {font.description}
+                    </option>
+                  ))}
+                </select>
+
+                {/* Which block the sliders act on. The preview outlines it too. */}
+                <div style={{ display: 'flex', gap: 8, marginTop: 14 }}>
+                  {(['hook', 'sizing'] as CaptionBlock[]).map((block) => (
+                    <button
+                      key={block}
+                      type="button"
+                      className="btn"
+                      data-active={selectedBlock === block}
+                      disabled={block === 'sizing' && !sizingOn}
+                      onClick={() => setSelectedBlock(block)}
+                      style={{ flex: 1, opacity: block === 'sizing' && !sizingOn ? 0.45 : 1 }}
+                    >
+                      {block === 'hook' ? 'Hook text' : 'Sizing info'}
+                    </button>
+                  ))}
+                </div>
+
+                <CaptionSlider
+                  label="Size"
+                  value={selectedBlock === 'hook' ? captions.hookFontSize : captions.sizingFontSize}
+                  min={selectedBlock === 'hook' ? 20 : 16}
+                  max={selectedBlock === 'hook' ? 72 : 60}
+                  step={1}
+                  onChange={(value) =>
+                    tweakCaptions(
+                      selectedBlock === 'hook'
+                        ? { hookFontSize: value }
+                        : { sizingFontSize: value }
+                    )
+                  }
+                />
+                <CaptionSlider
+                  label="Across"
+                  value={selectedBlock === 'hook' ? captions.hookX : captions.sizingX}
+                  min={0}
+                  max={1}
+                  step={0.01}
+                  format={(v) => `${Math.round(v * 100)}%`}
+                  onChange={(value) =>
+                    tweakCaptions(selectedBlock === 'hook' ? { hookX: value } : { sizingX: value })
+                  }
+                />
+                <CaptionSlider
+                  label="Down"
+                  value={selectedBlock === 'hook' ? captions.hookY : captions.sizingY}
+                  min={0}
+                  max={1}
+                  step={0.01}
+                  format={(v) => `${Math.round(v * 100)}%`}
+                  onChange={(value) =>
+                    tweakCaptions(selectedBlock === 'hook' ? { hookY: value } : { sizingY: value })
+                  }
+                />
+
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 12 }}>
+                  <label className="label" htmlFor="captionColor" style={{ margin: 0 }}>Colour</label>
+                  <input
+                    id="captionColor"
+                    type="color"
+                    value={captions.textColor}
+                    onChange={(e) => tweakCaptions({ textColor: e.target.value.toUpperCase() })}
+                    style={{ width: 44, height: 30, padding: 0, border: 'none', background: 'none' }}
+                  />
+                  {captionsTouched && (
+                    <button
+                      type="button"
+                      className="btn"
+                      style={{ marginLeft: 'auto' }}
+                      onClick={() => setTweakedCaptions(null)}
+                    >
+                      Reset
+                    </button>
+                  )}
+                </div>
+              </div>
             </div>
           </section>
 

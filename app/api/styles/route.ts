@@ -16,6 +16,11 @@ export async function GET() {
         description: style.description,
         usesInspirationOverlay: parsed.success ? parsed.data.usesInspirationOverlay : false,
         usesFitInspoIntro: parsed.success ? parsed.data.usesFitInspoIntro : false,
+        // The style's caption look, so the new-video screen can preview a style
+        // exactly as the renderer will apply it. Partial or absent for styles
+        // seeded before captions were configurable, which the resolver treats
+        // as "use the defaults".
+        captionSettings: parsed.success ? (parsed.data.captionSettings ?? null) : null,
       };
     })
   );

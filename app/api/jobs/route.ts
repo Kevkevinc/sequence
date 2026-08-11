@@ -7,6 +7,7 @@ import { createCreatorIfNotExists } from '@/db/repositories/creators';
 import { createJob, listJobsForCreator } from '@/db/repositories/jobs';
 import { getStyleById, listStyles } from '@/db/repositories/styles';
 import { validateJobInput } from '@/lib/validation/job';
+import { CaptionSettingsSchema } from '@/lib/render/captionSettings';
 import { StyleConfigSchema } from '@/lib/styles';
 
 export async function POST(req: Request) {
@@ -118,6 +119,11 @@ export async function POST(req: Request) {
     pacing: pacing as 'slow' | 'medium' | 'fast' | undefined,
     styleId: style?.id,
     variationCount: body.variationCount,
+    // Parsed rather than trusted: this arrives from the browser and lands in a
+    // jsonb column the renderer reads back. An invalid shape is dropped, which
+    // falls back to the inherited look rather than failing job creation over
+    // something cosmetic.
+    captionSettings: CaptionSettingsSchema.safeParse(body.captionSettings).data,
     clips: body.clips,
     inspirationImage: hasInspirationImage ? { storageKey: inspirationImage.storageKey } : undefined,
     inspirationImages: fitInspoImages,
