@@ -1,4 +1,4 @@
-import { unlink } from 'fs/promises';
+import { stat, unlink } from 'fs/promises';
 import path from 'path';
 import { tmpdir } from 'os';
 import { randomUUID } from 'crypto';
@@ -55,6 +55,9 @@ export type TranscribeResult =
   | { success: true; transcript: Transcript }
   | { success: false; error: string };
 
+/** Uncompressed 16kHz mono: see {@link extractAudio}. */
+const AUDIO_MIME_TYPE = 'audio/wav';
+
 /**
  * Extracts a small mono audio file for transcription.
  *
@@ -62,16 +65,24 @@ export type TranscribeResult =
  * video per second, transcription cannot use the pixels, and a raw 4K clip is
  * a couple of hundred megabytes to push over the wire. 16kHz mono is the rate
  * speech recognition wants anyway.
+ *
+ * WAV rather than the AAC-in-M4A this originally produced. That version
+ * transcribed reliably when run on Windows and failed every single time on the
+ * Linux worker — same source file, same code, fifteen consecutive 500s from the
+ * model against none locally. The one thing that genuinely differed between the
+ * two was the ffmpeg build writing the container. WAV has no container
+ * subtleties to differ over: it is a header and raw samples, it is on the
+ * model's supported list, and at 16kHz mono a thirty-second take is about a
+ * megabyte — small enough that the compression was never buying much.
  */
 async function extractAudio(sourcePath: string): Promise<string> {
-  const outputPath = path.join(tmpdir(), `ugc-speech-${randomUUID()}.m4a`);
+  const outputPath = path.join(tmpdir(), `ugc-speech-${randomUUID()}.wav`);
   const result = await runFfmpeg([
     '-i', sourcePath,
     '-vn',
     '-ac', '1',
     '-ar', '16000',
-    '-c:a', 'aac',
-    '-b:a', '64k',
+    '-c:a', 'pcm_s16le',
     outputPath,
   ]);
   if (!result.success) {
@@ -103,10 +114,25 @@ export async function transcribeClip(sourcePath: string): Promise<TranscribeResu
     const client = getGeminiClient();
     const localAudio = audioPath;
 
+    /*
+     * Described in every failure below.
+     *
+     * This step failed on the deployed worker while succeeding locally on the
+     * same recording, and the error said only "the call failed" — which cannot
+     * distinguish a bad file from a bad upload from a model outage, and left
+     * the difference between the two machines invisible. The audio's own
+     * measurements are the thing that differed, so they travel with the error.
+     */
+    const { size } = await stat(localAudio);
+    const describeAudio = () =>
+      `${AUDIO_MIME_TYPE}, ${(size / 1024).toFixed(0)}KB, from ${path.basename(sourcePath)}`;
+
     const response = await withTransientRetry(async () => {
       const uploaded = await client.files.upload({
         file: localAudio,
-        config: { mimeType: 'audio/mp4' },
+        config: { mimeType: AUDIO_MIME_TYPE },
+      }).catch((error) => {
+        throw new Error(`upload of the audio failed (${describeAudio()}): ${describeCause(error)}`);
       });
       if (!uploaded.name || !uploaded.uri) {
         throw new Error('Gemini upload did not return a usable file reference');
@@ -126,13 +152,15 @@ export async function transcribeClip(sourcePath: string): Promise<TranscribeResu
           {
             role: 'user',
             parts: [
-              { fileData: { fileUri: uploaded.uri, mimeType: 'audio/mp4' } },
+              { fileData: { fileUri: uploaded.uri, mimeType: AUDIO_MIME_TYPE } },
               { text: TRANSCRIBE_PROMPT },
             ],
           },
         ],
       });
-    }, TRANSCRIBE_RETRY);
+    }, TRANSCRIBE_RETRY).catch((error) => {
+      throw new Error(`${describeCause(error)} [audio: ${describeAudio()}]`);
+    });
 
     // Metered before the response is inspected: the call was billed whether or
     // not the answer turns out to be usable.
