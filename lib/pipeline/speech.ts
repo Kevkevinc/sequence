@@ -31,17 +31,22 @@ export type SilenceOptions = {
   /**
    * How far under the recording's own average level the threshold sits.
    *
-   * 8dB puts it between speech and breath on real footage: a tester's speech
-   * measured -25 to -32dB with breaths at -38 to -45dB, against an average of
-   * -28.8dB.
+   * 5dB is deliberately close to the average. Creators want their pauses gone,
+   * and a wider margin only catches the obvious ones: at 8dB a real pause
+   * beginning at 16.7s was not picked up until 17.1s, because the decaying tail
+   * of the previous word kept breaking the run, leaving half a second of dead
+   * air in the export. Closer in, the pause is caught where it actually starts.
+   * Much closer than this and the quiet moments *inside* words start counting
+   * as silence, which clips word endings.
    */
   thresholdBelowMeanDb?: number;
   /**
    * How long a quiet patch must last to count as a pause worth cutting.
    *
-   * 0.15s catches a breath. Much below that and the "silence" is the stop
-   * consonant inside a word, and cutting there is what makes an edit sound
-   * chopped.
+   * 0.10s catches a breath and the short beat between sentences. Much below
+   * that and the "silence" is the stop consonant inside a word; the real guard
+   * against chopping is the minimum *cut* length applied after padding, which
+   * is what decides whether a detected gap becomes an edit at all.
    */
   minSilenceSeconds?: number;
   /** Resolution of the loudness measurement. */
@@ -49,8 +54,8 @@ export type SilenceOptions = {
 };
 
 const DEFAULTS: Required<Omit<SilenceOptions, 'noiseFloorDb'>> & { noiseFloorDb?: number } = {
-  thresholdBelowMeanDb: 8,
-  minSilenceSeconds: 0.15,
+  thresholdBelowMeanDb: 5,
+  minSilenceSeconds: 0.1,
   windowSeconds: 0.05,
   noiseFloorDb: undefined,
 };

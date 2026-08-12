@@ -6,7 +6,7 @@ import { eq } from 'drizzle-orm';
 import { db } from '@/db/client';
 import { creators, jobs, rawClips, styles } from '@/db/schema';
 import { downloadClipToTempFile, uploadRenderThumbnail, uploadRenderedVideo } from '@/lib/storage';
-import { alignWordsToRuns, buildCaptionCues } from '@/lib/pipeline/align';
+import { alignWordsToRuns, buildCaptionCues, type CaptionCue } from '@/lib/pipeline/align';
 import { transcribeClip, wordsOf } from '@/lib/pipeline/transcribe';
 import { detectSpeechRuns, mergeShortGaps, padRuns } from '@/lib/pipeline/speech';
 import { renderTalkingHead } from '@/lib/render/renderTalkingHead';
@@ -31,27 +31,42 @@ export const TALKING_DEFAULTS = {
   /**
    * Pauses shorter than this are kept.
    *
-   * 0.25s is under a breath (0.3-0.5s on real footage) and over the gap between
-   * words, so breaths are cut and speech keeps its rhythm. Removing every
-   * detected gap leaves delivery with no air in it, which reads as
-   * machine-gunned rather than tight.
+   * Tuned down from 0.35 and then 0.25 on creator direction: pauses and gaps
+   * should be minimised. 0.18s still sits above the gap between two words, so
+   * speech is not chopped mid-phrase, but it no longer swallows the short beats
+   * between sentences that a viewer reads as dead air.
    */
-  keepGapSeconds: 0.25,
+  keepGapSeconds: 0.18,
   /**
    * Restores the few milliseconds trimmed off a word's attack and tail.
-   * Without it a cut clips the "p" off "perfect".
+   * Without it a cut clips the "p" off "perfect". Kept as small as that job
+   * allows, because every millisecond of padding is a millisecond of the pause
+   * put back.
    */
-  padSeconds: 0.06,
+  padSeconds: 0.03,
   /**
    * Anything still shorter than this after padding is not cut at all.
    *
    * Padding expands both sides of every section, so a gap that was just long
    * enough to detect can end up a few hundredths of a second wide. A cut that
    * short is not an edit, it is a glitch — inaudible as a pause and visible as
-   * a jump.
+   * a jump. This is the real guard against a choppy edit, which is what lets
+   * the detection above run as close to the speech as it does.
    */
-  minCutSeconds: 0.1,
-  /** Captions sit low, clear of the speaker's face. */
+  minCutSeconds: 0.15,
+  /**
+   * Burned-in captions, off on creator direction.
+   *
+   * The machinery is kept and tested — measured word alignment, cue grouping
+   * and an ASS track — because this is a presentation choice rather than a
+   * dead end, and creators caption in TikTok itself where they can restyle it.
+   *
+   * Turning them off removes the only reason this editor talks to an AI at all:
+   * the cuts come from measuring the audio, and the transcript existed solely
+   * to caption it. A talking job now costs nothing per run.
+   */
+  captions: false,
+  /** Where captions sit when they are on: low, clear of the speaker's face. */
   captionPosition: { x: 0.5, y: 0.76 },
 };
 
@@ -101,21 +116,24 @@ export async function renderTalkingJob(jobId: string): Promise<TalkingHeadResult
     );
 
     /*
-     * A stored transcript is reused rather than re-requested.
+     * Transcribed only to caption. With captions off there is nothing to say
+     * and nothing to pay for — the cuts were measured from the audio itself.
      *
-     * Re-rendering after a caption tweak is expected — that is the whole point
-     * of the preview — and re-transcribing the same audio would charge for the
-     * same answer every time.
+     * A stored transcript is reused when it is needed, because re-rendering
+     * after a tweak is expected and re-transcribing the same audio would charge
+     * for the same answer twice.
      */
-    let text = job.transcript ?? '';
-    if (!text.trim()) {
-      const transcribed = await transcribeClip(local.path);
-      if (!transcribed.success) return { success: false, error: transcribed.error };
-      text = transcribed.transcript.text;
-      await db.update(jobs).set({ transcript: text }).where(eq(jobs.id, jobId));
+    let cues: CaptionCue[] = [];
+    if (TALKING_DEFAULTS.captions) {
+      let text = job.transcript ?? '';
+      if (!text.trim()) {
+        const transcribed = await transcribeClip(local.path);
+        if (!transcribed.success) return { success: false, error: transcribed.error };
+        text = transcribed.transcript.text;
+        await db.update(jobs).set({ transcript: text }).where(eq(jobs.id, jobId));
+      }
+      cues = buildCaptionCues(alignWordsToRuns(wordsOf(text), runs), runs);
     }
-
-    const cues = buildCaptionCues(alignWordsToRuns(wordsOf(text), runs), runs);
 
     // Style mode takes the caption look from the style, Custom mode from the
     // creator's profile; a per-job tweak sits on top of either.

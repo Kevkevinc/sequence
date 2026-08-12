@@ -155,17 +155,22 @@ describe('renderTalkingJob', () => {
     expect(media.video).toMatchObject({ width: WIDTH, height: HEIGHT });
   }, 300_000);
 
-  it('stores the transcript so a re-render never pays for it twice', async () => {
+  it('costs no AI call at all, because the cuts come from the audio', async () => {
+    /*
+     * With captions off there is nothing to transcribe: every cut is decided by
+     * measuring loudness, which is free. This is the whole cost story for
+     * talking mode, so it is asserted rather than assumed — a stray call here
+     * would bill every creator on every re-render without anyone noticing.
+     */
     const job = await seedJob(speechClip);
-    await renderTalkingJob(job.id);
-    expect(mockTranscribe).toHaveBeenCalledTimes(1);
+    const result = await renderTalkingJob(job.id);
 
-    const [saved] = await db.select().from(jobs).where(eq(jobs.id, job.id));
-    expect(saved.transcript).toContain('hello everyone');
+    expect(result).toMatchObject({ success: true });
+    expect(mockTranscribe).not.toHaveBeenCalled();
 
-    // Second run: the words are already known, so no further API call.
+    // And re-rendering stays free.
     await renderTalkingJob(job.id);
-    expect(mockTranscribe).toHaveBeenCalledTimes(1);
+    expect(mockTranscribe).not.toHaveBeenCalled();
   }, 300_000);
 
   it('refuses a recording with no speech before it costs an API call', async () => {
