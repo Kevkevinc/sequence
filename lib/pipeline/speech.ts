@@ -29,17 +29,26 @@ export type SilenceOptions = {
    */
   noiseFloorDb?: number;
   /**
-   * How far under the recording's own average level the threshold sits.
+   * How far above the room's own noise floor a window counts as speech.
    *
-   * 5dB is deliberately close to the average. Creators want their pauses gone,
-   * and a wider margin only catches the obvious ones: at 8dB a real pause
-   * beginning at 16.7s was not picked up until 17.1s, because the decaying tail
-   * of the previous word kept breaking the run, leaving half a second of dead
-   * air in the export. Closer in, the pause is caught where it actually starts.
-   * Much closer than this and the quiet moments *inside* words start counting
-   * as silence, which clips word endings.
+   * 7dB. Measured across a take, the room sat at -47dB and every genuine pause
+   * fell between -43 and -48; the quietest real speech reached -37. 7dB puts
+   * the line at -40, inside that gap, with room either side.
+   *
+   * Wider and quiet speech is called silence. Narrower and the room's own
+   * variation crosses the line, so pauses stop registering as pauses.
    */
-  thresholdBelowMeanDb?: number;
+  speechAboveFloorDb?: number;
+  /**
+   * The smallest gap allowed between the threshold and the average level.
+   *
+   * A backstop for a room nearly as loud as the speaker, where the floor sits
+   * high enough that adding to it lands inside the speech. Taking whichever of
+   * the two rules gives the *lower* threshold means the effect there is to stop
+   * cutting rather than to cut into words — the right way to fail when the
+   * recording genuinely cannot tell room from voice.
+   */
+  minBelowMeanDb?: number;
   /**
    * How long a quiet patch must last to count as a pause worth cutting.
    *
@@ -56,7 +65,8 @@ export type SilenceOptions = {
 };
 
 const DEFAULTS: Required<Omit<SilenceOptions, 'noiseFloorDb'>> & { noiseFloorDb?: number } = {
-  thresholdBelowMeanDb: 5,
+  speechAboveFloorDb: 7,
+  minBelowMeanDb: 10,
   minSilenceSeconds: 0.15,
   windowSeconds: 0.05,
   noiseFloorDb: undefined,
@@ -131,7 +141,7 @@ function isRealRun(run: SpeechRun): boolean {
 async function measureLoudness(
   mediaPath: string,
   windowSeconds: number
-): Promise<{ windowsDb: number[]; durationSeconds: number; meanDb: number }> {
+): Promise<{ windowsDb: number[]; durationSeconds: number; meanDb: number; floorDb: number }> {
   const binary = ffmpegPath;
   if (!binary) throw new Error('ffmpeg binary not found');
 
@@ -175,7 +185,23 @@ ${withOutput.stderr ?? ''}`;
     windowsDb,
     durationSeconds: parseDuration(stderr),
     meanDb: mean ? Number(mean[1]) : -30,
+    floorDb: noiseFloorOf(windowsDb),
   };
+}
+
+/**
+ * How quiet this room is when nobody is talking.
+ *
+ * The 5th percentile of the window levels rather than the minimum, because the
+ * minimum is whatever the single flukiest window happened to catch — one
+ * -inf window from a codec boundary would put the floor at negative infinity.
+ * A twentieth of any take of somebody speaking is reliably room and nothing
+ * else: even wall-to-wall talking has that much in the gaps between words.
+ */
+function noiseFloorOf(windowsDb: number[]): number {
+  const finite = windowsDb.filter((db) => Number.isFinite(db)).sort((a, b) => a - b);
+  if (finite.length === 0) return Number.NEGATIVE_INFINITY;
+  return finite[Math.floor(0.05 * (finite.length - 1))];
 }
 
 /**
@@ -189,31 +215,42 @@ ${withOutput.stderr ?? ''}`;
  * -43dB for seven tenths of a second and `silencedetect` reported nothing at
  * all. RMS is both what the ear responds to and what makes a breath visible.
  *
- * The threshold is derived from the recording rather than fixed. A fixed floor
- * cannot serve a quiet bedroom and a noisy street at once: too low and every
- * pause is missed, too high and quiet speech is cut off mid-word. Sitting it a
- * set distance under the recording's own average places it between that
- * speaker's speech and that room's noise.
+ * The threshold is measured from the room, not from the speaker. It used to sit
+ * a set distance under the recording's average level, which is a property of
+ * how loud somebody is talking — and nobody talks at one volume. Where a
+ * creator dropped to a softer delivery near the end of a take, that passage fell
+ * under an average set by the louder start and was cut as though it were a
+ * pause, taking words with it.
+ *
+ * The room does hold still. Silence is what the microphone picks up when nobody
+ * is speaking, so that is what the line is drawn from, a fixed margin up. It
+ * stays put when the speaker gets quieter, which is exactly when the old rule
+ * moved.
  */
 export async function detectSpeechRuns(
   mediaPath: string,
   options: SilenceOptions = {}
 ): Promise<{ runs: SpeechRun[]; durationSeconds: number }> {
-  const { minSilenceSeconds, windowSeconds, thresholdBelowMeanDb, noiseFloorDb } = {
+  const { minSilenceSeconds, windowSeconds, speechAboveFloorDb, minBelowMeanDb, noiseFloorDb } = {
     ...DEFAULTS,
     ...options,
   };
 
-  const { windowsDb, durationSeconds, meanDb } = await measureLoudness(mediaPath, windowSeconds);
+  const { windowsDb, durationSeconds, meanDb, floorDb } = await measureLoudness(
+    mediaPath,
+    windowSeconds
+  );
   if (windowsDb.length === 0) {
     return { runs: [], durationSeconds };
   }
 
-  // An explicit floor still wins, so a caller can pin it; otherwise it follows
-  // the recording. Clamped so a pathological measurement cannot produce a
-  // threshold that calls everything, or nothing, silence.
+  // An explicit floor still wins, so a caller can pin it. Otherwise: up from the
+  // room, but never within `minBelowMeanDb` of the speaker's own average — see
+  // both option docs. Clamped last, so a recording of digital silence (floor at
+  // -inf) still produces a usable number rather than one nothing can cross.
   const threshold =
-    noiseFloorDb ?? Math.min(-20, Math.max(-55, meanDb - thresholdBelowMeanDb));
+    noiseFloorDb ??
+    Math.min(-20, Math.max(-55, Math.min(floorDb + speechAboveFloorDb, meanDb - minBelowMeanDb)));
 
   const silences: Array<{ startSeconds: number; endSeconds: number | null }> = [];
   let runStart: number | null = null;
@@ -238,9 +275,60 @@ export async function detectSpeechRuns(
   }
 
   return {
-    runs: speechRunsFromSilences(silences, durationSeconds),
+    runs: speechRunsFromSilences(
+      silences.map((silence) => absorbTrailingDecay(silence, windowsDb, threshold, windowSeconds)),
+      durationSeconds
+    ),
     durationSeconds,
   };
+}
+
+/**
+ * How far above the silence threshold a window still counts as decay.
+ *
+ * The last word before a pause does not stop, it fades — through reverb, room
+ * and the speaker trailing off. Those windows sit in a band just above the
+ * threshold, and left in they are the difference between a pause cut where it
+ * begins and one cut half a second late.
+ */
+const DECAY_BAND_DB = 5;
+
+/** Longest fade this will absorb, so a soft passage cannot be eaten whole. */
+const MAX_DECAY_SECONDS = 0.4;
+
+/**
+ * Moves a pause back through the fade of the word before it.
+ *
+ * Level alone cannot separate that fade from genuinely soft speech: measured on
+ * the same take, a word decaying into a two-second pause averaged -38.6dB and a
+ * softly-delivered phrase averaged -35.7dB. Three decibels is not a rule.
+ *
+ * What separates them is what comes next. The fade is followed by a confirmed
+ * pause; the soft phrase is followed by more talking. So this runs only
+ * backwards from a pause that has already been detected — which is why it can
+ * afford a threshold loose enough to catch a fade without that looseness ever
+ * reaching speech that stands on its own.
+ *
+ * Backwards only, deliberately. The same band exists on the other side of a
+ * pause, at the attack of the next word, but a clipped word opening is plainly
+ * audible where a clipped fade is not.
+ */
+function absorbTrailingDecay(
+  silence: { startSeconds: number; endSeconds: number | null },
+  windowsDb: number[],
+  threshold: number,
+  windowSeconds: number
+): { startSeconds: number; endSeconds: number | null } {
+  const decayThreshold = threshold + DECAY_BAND_DB;
+  const limit = Math.round(MAX_DECAY_SECONDS / windowSeconds);
+  let index = Math.round(silence.startSeconds / windowSeconds);
+
+  for (let stepped = 0; stepped < limit && index > 0; stepped++) {
+    if (windowsDb[index - 1] >= decayThreshold) break;
+    index--;
+  }
+
+  return { ...silence, startSeconds: index * windowSeconds };
 }
 
 /** `Duration: 00:01:02.34,` from ffmpeg's own header dump. */

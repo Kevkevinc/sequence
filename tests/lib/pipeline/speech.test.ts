@@ -241,3 +241,90 @@ describe('rapid speech', () => {
     expect(gap).toBe(true);
   }, 60_000);
 });
+
+/**
+ * Builds audio over a constant room tone, the way a recording actually arrives.
+ *
+ * The plain `buildAudio` above puts digital silence between its bursts, which no
+ * microphone produces and which makes the room trivially separable from the
+ * voice. These cases are all about the band in between, so they need a floor to
+ * measure against.
+ *
+ * `level` is an ffmpeg volume expression in `t`, so a case can describe a fade
+ * as easily as a gate.
+ */
+async function buildOverRoomTone(file: string, level: string, seconds: number): Promise<void> {
+  await execFileAsync(ffmpegPath!, [
+    '-hide_banner', '-loglevel', 'error', '-y',
+    '-f', 'lavfi', '-i', `sine=frequency=300:duration=${seconds}`,
+    '-f', 'lavfi', '-i', `anoisesrc=d=${seconds}:c=white:a=0.002`,
+    '-filter_complex',
+    `[0:a]volume='${level}':eval=frame[v];` +
+      `[v][1:a]amix=inputs=2:duration=first:weights=1 1,volume=2[a]`,
+    '-map', '[a]', '-ac', '1', '-ar', '16000',
+    file,
+  ]);
+}
+
+describe('soft speech', () => {
+  let dir: string;
+
+  beforeAll(async () => {
+    dir = await mkdtemp(path.join(tmpdir(), 'soft-'));
+  }, 30_000);
+
+  afterAll(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it('keeps a quiet passage that is still well clear of the room', async () => {
+    /*
+     * Nobody talks at one volume. When the threshold was set a fixed distance
+     * under the recording's *average* level, a creator dropping to a softer
+     * delivery near the end of a take fell under a line drawn by the louder
+     * start, and the passage was cut as a pause — words and all.
+     *
+     * Here the quiet section sits far below the average and far above the room,
+     * which is the case the average cannot represent and the floor can.
+     */
+    const file = path.join(dir, 'quiet-passage.wav');
+    await buildOverRoomTone(
+      file,
+      'if(lt(t,2),0.3, if(lt(t,3.2),0.02, if(lt(t,5),0.3, if(lt(t,6),0, 0.3))))',
+      8
+    );
+
+    const { runs } = await detectSpeechRuns(file);
+
+    // One unbroken run across loud - quiet - loud, then the real pause at 5s.
+    expect(runs).toHaveLength(2);
+    expect(runs[0].startSeconds).toBeLessThan(0.1);
+    expect(runs[0].endSeconds).toBeGreaterThan(4.9);
+    expect(runs[1].startSeconds).toBeGreaterThan(5.5);
+  }, 60_000);
+
+  it('cuts the pause from where the last word fades, not where it lands', async () => {
+    /*
+     * A word decaying into a pause passes through the same levels as genuinely
+     * soft speech — measured on real footage, 3dB apart — so it is only
+     * separable by what follows it. Left in, the fade is dead air at the head of
+     * every cut.
+     *
+     * This fade drops 40dB over 1.5s. Measured: the speech run ends at 2.90s
+     * without the backwards walk and 2.70s with it, and never encroaches on the
+     * full-level speech that ends at 2.0s.
+     */
+    const file = path.join(dir, 'word-fade.wav');
+    await buildOverRoomTone(
+      file,
+      'if(lt(t,2),0.3, if(lt(t,3.5), 0.3*pow(0.01,(t-2)/1.5), if(lt(t,5.5),0, 0.3)))',
+      7
+    );
+
+    const { runs } = await detectSpeechRuns(file);
+
+    expect(runs.length).toBeGreaterThanOrEqual(2);
+    expect(runs[0].endSeconds).toBeLessThan(2.8);
+    expect(runs[0].endSeconds).toBeGreaterThan(2.0);
+  }, 60_000);
+});
