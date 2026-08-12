@@ -4,6 +4,7 @@ import { FileState, type GoogleGenAI } from '@google/genai';
 import { db } from '@/db/client';
 import { rawClips, segments } from '@/db/schema';
 import { downloadClipToTempFile } from '@/lib/storage';
+import { probeMedia } from '@/lib/render/ffmpeg';
 import { getEnvWithDefault } from '@/lib/env';
 import { getGeminiClient } from '@/lib/gemini/client';
 import { describeCause } from '@/lib/pipeline/errors';
@@ -107,6 +108,55 @@ async function waitUntilActive(client: GoogleGenAI, fileName: string): Promise<v
   throw new Error('Gemini file did not become ACTIVE in time');
 }
 
+/** Shortest tagged segment worth keeping once it has been clamped. */
+const MIN_SEGMENT_SECONDS = 0.5;
+
+/**
+ * Discards or trims tagged segments that run past the end of the clip.
+ *
+ * The model invents them. On a real 77-second clip it returned segments out to
+ * 117s — forty seconds of footage that does not exist — and because nothing
+ * checked, those timings were stored, the director planned cuts inside them,
+ * and four of ten variations died at render with "cut starts at 110s, past the
+ * end of 77.1s of picture". The creator got six videos instead of ten and no
+ * explanation.
+ *
+ * This is the same discipline the talking editor already applies: the model is
+ * good at saying *what* is in a recording and unreliable about *when*, so every
+ * number it gives about time is checked against the file itself.
+ *
+ * Segments starting past the end are dropped outright; ones that merely
+ * overrun are trimmed back, then dropped if what remains is too short to cut.
+ */
+export function clampSegmentsToClip<T extends { startSeconds: number; endSeconds: number }>(
+  tagged: T[],
+  clipDurationSeconds: number
+): { kept: T[]; droppedCount: number; trimmedCount: number } {
+  const kept: T[] = [];
+  let droppedCount = 0;
+  let trimmedCount = 0;
+
+  for (const segment of tagged) {
+    if (segment.startSeconds >= clipDurationSeconds) {
+      droppedCount += 1;
+      continue;
+    }
+    if (segment.endSeconds <= clipDurationSeconds) {
+      kept.push(segment);
+      continue;
+    }
+    const trimmed = { ...segment, endSeconds: clipDurationSeconds };
+    if (trimmed.endSeconds - trimmed.startSeconds < MIN_SEGMENT_SECONDS) {
+      droppedCount += 1;
+      continue;
+    }
+    trimmedCount += 1;
+    kept.push(trimmed);
+  }
+
+  return { kept, droppedCount, trimmedCount };
+}
+
 export async function tagClip(
   rawClipId: string
 ): Promise<{ success: true; segmentCount: number } | { success: false; error: string }> {
@@ -194,12 +244,44 @@ export async function tagClip(
         };
       }
 
+      /*
+       * Measured from the file, never taken from the model.
+       *
+       * Clamped against the *picture* rather than the container, because a
+       * clip's audio can outlast its video and a cut past the last frame is
+       * exactly the failure this prevents.
+       */
+      const media = await probeMedia(localClip.path);
+      const clipDuration = Math.min(
+        ...[media.video?.duration ?? null, media.containerDuration].filter(
+          (value): value is number => value !== null
+        )
+      );
+
+      const { kept, droppedCount, trimmedCount } = Number.isFinite(clipDuration)
+        ? clampSegmentsToClip(parsed.segments, clipDuration)
+        : { kept: parsed.segments, droppedCount: 0, trimmedCount: 0 };
+
+      if (droppedCount > 0 || trimmedCount > 0) {
+        console.warn(
+          `Clip ${rawClipId}: the tagger returned segments past the end of a ` +
+            `${clipDuration.toFixed(1)}s clip — dropped ${droppedCount}, trimmed ${trimmedCount}.`
+        );
+      }
+
+      if (kept.length === 0) {
+        return {
+          success: false,
+          error: `Every tagged segment fell outside this clip's ${clipDuration.toFixed(1)}s of footage`,
+        };
+      }
+
       // Re-tagging a clip replaces its segments rather than appending, so a retry
       // after a partial failure cannot leave duplicate rows behind.
       await db.transaction(async (tx) => {
         await tx.delete(segments).where(eq(segments.rawClipId, rawClipId));
         await tx.insert(segments).values(
-          parsed.segments.map((s) => ({
+          kept.map((s) => ({
             rawClipId,
             startSeconds: s.startSeconds.toString(),
             endSeconds: s.endSeconds.toString(),
@@ -209,7 +291,7 @@ export async function tagClip(
         );
       });
 
-      return { success: true, segmentCount: parsed.segments.length };
+      return { success: true, segmentCount: kept.length };
     } finally {
       // Runs on every exit path, including the early returns above, so a job
       // cannot fill the worker's temp directory with abandoned videos.
