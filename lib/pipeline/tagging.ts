@@ -66,7 +66,13 @@ const TaggedSegmentSchema = z
  */
 const TaggingResponseSchema = z
   .union([
-    z.object({ segments: z.array(TaggedSegmentSchema).min(1) }),
+    z.object({
+      segments: z.array(TaggedSegmentSchema).min(1),
+      // Optional, so a model that ignores them — or the bare-array form below —
+      // behaves exactly as before rather than failing the whole clip.
+      usableStartSeconds: z.number().min(0).optional(),
+      usableEndSeconds: z.number().min(0).optional(),
+    }),
     z.array(TaggedSegmentSchema).min(1),
   ])
   .transform((value) => (Array.isArray(value) ? { segments: value } : value));
@@ -85,9 +91,19 @@ editor builds distinct variations by drawing DIFFERENT subsets of your segments,
 large segments forces every variation to reuse the same footage. More, smaller, specific moments
 is always better.
 
-Also include exactly one segment spanning the entire clip (start 0 to full duration) tagged
-contentTag "whole-clip", as a fallback — but it is in ADDITION to the granular segments above,
-never instead of them.
+Most raw phone footage begins and ends with the creator operating the camera: reaching for the
+phone, pressing record, stepping back into frame, then walking toward the lens to stop it. That
+footage is never usable and must never appear in any segment. Report where the real content
+starts and ends as usableStartSeconds and usableEndSeconds. Look for the creator's hand near the
+lens, the framing lurching, the person walking toward or away from the camera at the very start or
+very end, or a moment of them checking the shot before they begin. If the clip genuinely opens and
+closes on usable content, use 0 and the full duration — do not invent a trim.
+
+Every segment you return, including the whole-clip one, must lie inside that window.
+
+Also include exactly one segment spanning the usable window (usableStartSeconds to
+usableEndSeconds) tagged contentTag "whole-clip", as a fallback — but it is in ADDITION to the
+granular segments above, never instead of them.
 
 Tag each segment's contentTag as one of: "whole-clip", "b-roll" (product on its own / detail /
 environment), "try-on" (person wearing or using the product), "other".
@@ -96,7 +112,8 @@ subject, good lighting, strong composition. Be discerning: this score is how the
 best moments, so do not mark everything "high".
 
 Respond with JSON only, matching this shape:
-{"segments": [{"startSeconds": number, "endSeconds": number, "contentTag": string, "qualityTag": string}]}`;
+{"usableStartSeconds": number, "usableEndSeconds": number,
+ "segments": [{"startSeconds": number, "endSeconds": number, "contentTag": string, "qualityTag": string}]}`;
 
 async function waitUntilActive(client: GoogleGenAI, fileName: string): Promise<void> {
   for (let attempt = 0; attempt < FILE_POLL_ATTEMPTS; attempt++) {
@@ -132,20 +149,39 @@ export function clampSegmentsToClip<T extends { startSeconds: number; endSeconds
   tagged: T[],
   clipDurationSeconds: number
 ): { kept: T[]; droppedCount: number; trimmedCount: number } {
+  return clampSegmentsToWindow(tagged, 0, clipDurationSeconds);
+}
+
+/**
+ * The same discipline against both ends of a window rather than just the end.
+ *
+ * Used for the usable window — see {@link usableWindowOf} — where the head of a
+ * clip is as unusable as footage past its end, and for exactly the same reason:
+ * the editor must not be able to plan a cut there.
+ */
+export function clampSegmentsToWindow<T extends { startSeconds: number; endSeconds: number }>(
+  tagged: T[],
+  windowStartSeconds: number,
+  windowEndSeconds: number
+): { kept: T[]; droppedCount: number; trimmedCount: number } {
   const kept: T[] = [];
   let droppedCount = 0;
   let trimmedCount = 0;
 
   for (const segment of tagged) {
-    if (segment.startSeconds >= clipDurationSeconds) {
+    if (segment.startSeconds >= windowEndSeconds || segment.endSeconds <= windowStartSeconds) {
       droppedCount += 1;
       continue;
     }
-    if (segment.endSeconds <= clipDurationSeconds) {
+    if (segment.startSeconds >= windowStartSeconds && segment.endSeconds <= windowEndSeconds) {
       kept.push(segment);
       continue;
     }
-    const trimmed = { ...segment, endSeconds: clipDurationSeconds };
+    const trimmed = {
+      ...segment,
+      startSeconds: Math.max(segment.startSeconds, windowStartSeconds),
+      endSeconds: Math.min(segment.endSeconds, windowEndSeconds),
+    };
     if (trimmed.endSeconds - trimmed.startSeconds < MIN_SEGMENT_SECONDS) {
       droppedCount += 1;
       continue;
@@ -156,6 +192,59 @@ export function clampSegmentsToClip<T extends { startSeconds: number; endSeconds
 
   return { kept, droppedCount, trimmedCount };
 }
+
+/**
+ * Most footage a creator can spare at each end of a clip.
+ *
+ * A phone reach is a second or two. This is the ceiling on trusting the model's
+ * answer, not an expectation: it bounds the damage if the tagger decides the
+ * first eight seconds are setup when they are the product.
+ */
+const MAX_HANDLING_SECONDS = 3;
+
+/**
+ * Where the footage is actually usable, given what the tagger reported.
+ *
+ * Raw phone footage opens with the creator reaching for the record button and
+ * closes with them walking back to stop it, and that is what a creator saw in
+ * his finished videos. It was reaching the editor by two separate routes: the
+ * prompt never said the moment was unusable, and it explicitly required a
+ * whole-clip segment spanning zero to the full duration — which handed the
+ * director the reach and the walk-up no matter how the model rated them.
+ *
+ * The model reports the window because it is the only thing that can see where
+ * the setup ends. This function decides how much of that report to act on, so a
+ * wrong answer costs at most {@link MAX_HANDLING_SECONDS} at each end. A model
+ * that reports nothing, or nothing usable, leaves the clip exactly as it was —
+ * the whole clip — which is the behaviour every clip had before this existed.
+ */
+export function usableWindowOf(
+  reported: { usableStartSeconds?: number; usableEndSeconds?: number },
+  clipDurationSeconds: number
+): { startSeconds: number; endSeconds: number } {
+  const whole = { startSeconds: 0, endSeconds: clipDurationSeconds };
+
+  const start = Math.min(Math.max(reported.usableStartSeconds ?? 0, 0), MAX_HANDLING_SECONDS);
+  const reportedEnd = reported.usableEndSeconds ?? clipDurationSeconds;
+  const end = Math.max(
+    Math.min(reportedEnd, clipDurationSeconds),
+    clipDurationSeconds - MAX_HANDLING_SECONDS
+  );
+
+  // A window that leaves less than the shortest clip the app accepts is not a
+  // trim, it is a bad reading. Whole clip rather than a stub.
+  if (end - start < MIN_USABLE_SECONDS) return whole;
+  return { startSeconds: start, endSeconds: end };
+}
+
+/**
+ * Shortest window worth trimming to.
+ *
+ * Matches the minimum clip length enforced at upload: below it there is not
+ * enough footage to cut two different ways, which is the whole point of the
+ * clip being here.
+ */
+const MIN_USABLE_SECONDS = 3;
 
 export async function tagClip(
   rawClipId: string
@@ -258,13 +347,30 @@ export async function tagClip(
         )
       );
 
+      // One pass over both ends: past the end of the file, and inside the
+      // camera-handling at the start or finish. Same clamp, one window.
+      const usable = Number.isFinite(clipDuration)
+        ? usableWindowOf(parsed, clipDuration)
+        : { startSeconds: 0, endSeconds: Number.POSITIVE_INFINITY };
+
       const { kept, droppedCount, trimmedCount } = Number.isFinite(clipDuration)
-        ? clampSegmentsToClip(parsed.segments, clipDuration)
+        ? clampSegmentsToWindow(parsed.segments, usable.startSeconds, usable.endSeconds)
         : { kept: parsed.segments, droppedCount: 0, trimmedCount: 0 };
+
+      if (usable.startSeconds > 0 || usable.endSeconds < clipDuration) {
+        console.log(
+          `Clip ${rawClipId}: usable footage is ${usable.startSeconds.toFixed(1)}s–` +
+            `${usable.endSeconds.toFixed(1)}s of ${clipDuration.toFixed(1)}s ` +
+            `(camera handling trimmed at ${usable.startSeconds > 0 ? 'start' : ''}` +
+            `${usable.startSeconds > 0 && usable.endSeconds < clipDuration ? ' and ' : ''}` +
+            `${usable.endSeconds < clipDuration ? 'end' : ''}).`
+        );
+      }
 
       if (droppedCount > 0 || trimmedCount > 0) {
         console.warn(
-          `Clip ${rawClipId}: the tagger returned segments past the end of a ` +
+          `Clip ${rawClipId}: the tagger returned segments outside the usable ` +
+            `${usable.startSeconds.toFixed(1)}s–${usable.endSeconds.toFixed(1)}s of a ` +
             `${clipDuration.toFixed(1)}s clip — dropped ${droppedCount}, trimmed ${trimmedCount}.`
         );
       }

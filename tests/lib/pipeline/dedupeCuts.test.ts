@@ -241,3 +241,43 @@ describe('a clip with only one legal cut', () => {
       .toBeGreaterThanOrEqual(FAST.min);
   });
 });
+
+describe('dedupeIdenticalCuts and the usable window', () => {
+  /*
+   * Tagging excludes the seconds a creator spends reaching for the record
+   * button, but this repair slides a colliding cut by up to three seconds
+   * looking for a placement it can use — the same distance. Without a floor it
+   * slides straight back into the footage tagging had just removed, and the
+   * creator sees himself starting the video.
+   */
+  it('will not slide a cut back into footage tagging excluded', () => {
+    const variations = [
+      { segments: [cut(CLIP, 2, 4), cut(CLIP, 10, 12)] },
+      { segments: [cut(CLIP, 2, 4), cut(CLIP, 14, 16)] },
+    ];
+
+    // Usable footage runs 2s-30s: the first two seconds are the creator
+    // picking the phone up.
+    dedupeIdenticalCuts(variations, new Map([[CLIP, 30]]), BAND, new Map([[CLIP, 2]]));
+
+    for (const variation of variations) {
+      for (const segment of variation.segments) {
+        expect(segment.startSeconds).toBeGreaterThanOrEqual(2);
+      }
+    }
+    // Still repaired — it moved forwards instead.
+    expect(new Set(keys(variations)).size).toBe(keys(variations).length);
+  });
+
+  it('behaves exactly as before for a clip whose footage starts at zero', () => {
+    // Every clip that opens on usable footage, which is most of them. Passing
+    // a floor of zero and passing nothing at all must not differ.
+    const withMap = collidingPlan(3, cut(CLIP, 0, 2));
+    const withoutMap = collidingPlan(3, cut(CLIP, 0, 2));
+
+    dedupeIdenticalCuts(withMap, new Map([[CLIP, 30]]), BAND, new Map([[CLIP, 0]]));
+    dedupeIdenticalCuts(withoutMap, new Map([[CLIP, 30]]), BAND);
+
+    expect(keys(withMap)).toEqual(keys(withoutMap));
+  });
+});

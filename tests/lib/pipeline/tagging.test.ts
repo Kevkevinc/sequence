@@ -14,6 +14,29 @@ vi.mock('@/lib/gemini/client', () => ({
 
 const mockCleanUp = vi.fn(async () => {});
 
+/*
+ * The downloaded clip is a stand-in path, so its duration has to be one too.
+ *
+ * Without this the whole suite stopped at `ffprobe failed for /tmp/ugc-clip-fake`
+ * the moment tagging started measuring clips — seven tests passing on a file
+ * that never existed, then failing for a reason that had nothing to do with what
+ * they were testing. Stating the duration outright also lets a test say what the
+ * clip is and check what the tagger does with the model's timings against it.
+ */
+const CLIP_DURATION_SECONDS = 30;
+
+vi.mock('@/lib/render/ffmpeg', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/lib/render/ffmpeg')>();
+  return {
+    ...actual,
+    probeMedia: vi.fn(async () => ({
+      video: { width: 1080, height: 1920, duration: CLIP_DURATION_SECONDS },
+      audio: { duration: CLIP_DURATION_SECONDS },
+      containerDuration: CLIP_DURATION_SECONDS,
+    })),
+  };
+});
+
 vi.mock('@/lib/storage', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/lib/storage')>();
   return {
@@ -154,6 +177,69 @@ describe('tagClip', () => {
           }),
         ]),
       })
+    );
+  });
+
+  it('keeps the camera handling at each end out of the stored segments', async () => {
+    /*
+     * A creator's finished videos showed him reaching for the record button and
+     * walking up to stop it. Two things put it there: nothing told the tagger
+     * that moment was unusable, and the prompt required a whole-clip segment
+     * spanning zero to the full duration — which handed the planner the reach
+     * and the walk-up whatever the model thought of them.
+     *
+     * So the model reports where the real footage starts and ends, and nothing
+     * outside that window is stored, including the whole-clip segment.
+     */
+    mockUpload.mockResolvedValue({ name: 'files/abc', uri: 'https://files/abc', mimeType: 'video/mp4', state: 'ACTIVE' });
+    mockGetFile.mockResolvedValue({ state: 'ACTIVE' });
+    mockGenerateContent.mockResolvedValue({
+      text: JSON.stringify({
+        usableStartSeconds: 1.5,
+        usableEndSeconds: 27.5,
+        segments: [
+          { startSeconds: 0, endSeconds: 30, contentTag: 'whole-clip', qualityTag: 'medium' },
+          { startSeconds: 0, endSeconds: 1.2, contentTag: 'other', qualityTag: 'low' },
+          { startSeconds: 6, endSeconds: 10, contentTag: 'try-on', qualityTag: 'high' },
+          { startSeconds: 28, endSeconds: 30, contentTag: 'other', qualityTag: 'low' },
+        ],
+      }),
+    });
+
+    const result = await tagClip(rawClipId);
+    expect(result).toEqual({ success: true, segmentCount: 2 });
+
+    const stored = await db.select().from(segments).where(eq(segments.rawClipId, rawClipId));
+    const times = stored
+      .map((row) => [Number(row.startSeconds), Number(row.endSeconds)] as const)
+      .sort((a, b) => a[0] - b[0]);
+
+    // The whole-clip fallback survives, pulled inside the window rather than
+    // dropped — the planner leans on it when the granular segments run out.
+    expect(times[0]).toEqual([1.5, 27.5]);
+    expect(times[1]).toEqual([6, 10]);
+  });
+
+  it('stores the whole clip when the tagger reports no camera handling', async () => {
+    // The behaviour every clip had before the window existed. A clip that opens
+    // and closes on usable footage must not lose anything to this.
+    mockUpload.mockResolvedValue({ name: 'files/abc', uri: 'https://files/abc', mimeType: 'video/mp4', state: 'ACTIVE' });
+    mockGetFile.mockResolvedValue({ state: 'ACTIVE' });
+    mockGenerateContent.mockResolvedValue({
+      text: JSON.stringify({
+        usableStartSeconds: 0,
+        usableEndSeconds: 30,
+        segments: [
+          { startSeconds: 0, endSeconds: 30, contentTag: 'whole-clip', qualityTag: 'medium' },
+          { startSeconds: 2, endSeconds: 6, contentTag: 'try-on', qualityTag: 'high' },
+        ],
+      }),
+    });
+
+    expect(await tagClip(rawClipId)).toEqual({ success: true, segmentCount: 2 });
+    const stored = await db.select().from(segments).where(eq(segments.rawClipId, rawClipId));
+    expect(stored.some((row) => Number(row.startSeconds) === 0 && Number(row.endSeconds) === 30)).toBe(
+      true
     );
   });
 

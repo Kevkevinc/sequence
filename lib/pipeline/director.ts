@@ -322,6 +322,8 @@ type ValidationContext = {
   expectedVariationCount: number;
   targetLengthSeconds: number;
   footageEndByClipId: Map<string, number>;
+  /** Where each clip's usable footage begins; absent entries mean zero. */
+  footageStartByClipId: Map<string, number>;
   sizingOverlayEnabled: boolean;
   footage: PoolCapacity;
   /**
@@ -562,8 +564,13 @@ function round2(seconds: number): number {
  * job failed three attempts on exactly this: the rule asked the model to move a
  * cut that had nowhere to go.
  */
-function hasAlternativePlacement(cut: Cut, footageEnd: number, band: PacingBand): boolean {
-  for (const _candidate of replacementCuts(cut, footageEnd, band)) return true;
+function hasAlternativePlacement(
+  cut: Cut,
+  footageStart: number,
+  footageEnd: number,
+  band: PacingBand
+): boolean {
+  for (const _candidate of replacementCuts(cut, footageStart, footageEnd, band)) return true;
   return false;
 }
 
@@ -600,6 +607,7 @@ function hasAlternativePlacement(cut: Cut, footageEnd: number, band: PacingBand)
  */
 function* replacementCuts(
   cut: Cut,
+  footageStart: number,
   footageEnd: number,
   band: PacingBand
 ): Generator<{ startSeconds: number; endSeconds: number }> {
@@ -612,7 +620,9 @@ function* replacementCuts(
     for (const direction of [1, -1]) {
       const startSeconds = round2(cut.startSeconds + direction * step * STEP);
       const endSeconds = round2(startSeconds + duration);
-      if (startSeconds >= 0 && endSeconds <= footageEnd) yield { startSeconds, endSeconds };
+      if (startSeconds >= footageStart && endSeconds <= footageEnd) {
+        yield { startSeconds, endSeconds };
+      }
     }
   }
 
@@ -622,12 +632,12 @@ function* replacementCuts(
     if (shorter < band.min) break;
 
     const trimmedEnd = round2(cut.startSeconds + shorter);
-    if (cut.startSeconds >= 0 && trimmedEnd <= footageEnd) {
+    if (cut.startSeconds >= footageStart && trimmedEnd <= footageEnd) {
       yield { startSeconds: round2(cut.startSeconds), endSeconds: trimmedEnd };
     }
 
     const trimmedStart = round2(cut.endSeconds - shorter);
-    if (trimmedStart >= 0 && cut.endSeconds <= footageEnd) {
+    if (trimmedStart >= footageStart && cut.endSeconds <= footageEnd) {
       yield { startSeconds: trimmedStart, endSeconds: round2(cut.endSeconds) };
     }
   }
@@ -650,7 +660,18 @@ function* replacementCuts(
 export function dedupeIdenticalCuts(
   variations: Array<{ segments: Cut[] }>,
   footageEndByClipId: Map<string, number>,
-  band: PacingBand
+  band: PacingBand,
+  /**
+   * Where each clip's usable footage begins, when it does not begin at zero.
+   *
+   * Optional because a clip whose segments start at zero — which is every clip
+   * whose opening is usable — behaves exactly as it always has. It matters for
+   * the ones where tagging excluded the creator reaching for the record button:
+   * this repair slides cuts by up to three seconds looking for a placement, and
+   * without a floor it would slide them straight back into the footage tagging
+   * had just taken out.
+   */
+  footageStartByClipId?: Map<string, number>
 ): void {
   /*
    * Variations that are a wholesale copy of an earlier one are skipped, and
@@ -702,7 +723,8 @@ export function dedupeIdenticalCuts(
       }
 
       let placed = false;
-      for (const candidate of replacementCuts(cut, footageEnd, band)) {
+      const footageStart = footageStartByClipId?.get(cut.rawClipId) ?? 0;
+      for (const candidate of replacementCuts(cut, footageStart, footageEnd, band)) {
         const candidateKey = segmentKey({ ...cut, ...candidate });
         if (firstUse.has(candidateKey)) continue;
 
@@ -1014,6 +1036,7 @@ function buildValidator(context: ValidationContext) {
     expectedVariationCount,
     targetLengthSeconds,
     footageEndByClipId,
+    footageStartByClipId,
     sizingOverlayEnabled,
     footage,
     pacingLabel,
@@ -1342,7 +1365,11 @@ function buildValidator(context: ValidationContext) {
            * that — it just means no videos.
            */
           const clipEnd = footageEndByClipId.get(cut.rawClipId);
-          if (clipEnd !== undefined && !hasAlternativePlacement(cut, clipEnd, pacingBand)) {
+          const clipStart = footageStartByClipId.get(cut.rawClipId) ?? 0;
+          if (
+            clipEnd !== undefined &&
+            !hasAlternativePlacement(cut, clipStart, clipEnd, pacingBand)
+          ) {
             return;
           }
 
@@ -1652,12 +1679,20 @@ export async function planJob(
     }));
 
     // The furthest tagged end time per clip is the most footage we know exists,
-    // so it bounds what the director is allowed to cut.
+    // so it bounds what the director is allowed to cut. The earliest tagged
+    // start is the same fact at the other end: tagging excludes the moments a
+    // creator spends operating the camera, and a cut placed before the first
+    // segment would be footage nothing vouched for.
     const footageEndByClipId = new Map<string, number>();
+    const footageStartByClipId = new Map<string, number>();
     for (const segment of segmentPool) {
       footageEndByClipId.set(
         segment.rawClipId,
         Math.max(footageEndByClipId.get(segment.rawClipId) ?? 0, segment.endSeconds)
+      );
+      footageStartByClipId.set(
+        segment.rawClipId,
+        Math.min(footageStartByClipId.get(segment.rawClipId) ?? Infinity, segment.startSeconds)
       );
     }
 
@@ -1688,6 +1723,7 @@ export async function planJob(
       expectedVariationCount: job.variationCount,
       targetLengthSeconds: job.lengthSeconds,
       footageEndByClipId,
+      footageStartByClipId,
       sizingOverlayEnabled: job.sizingOverlayEnabled,
       footage,
       pacingLabel: preset.label,
@@ -1770,7 +1806,7 @@ export async function planJob(
         // decides whether the plan is acceptable — repairing before validating
         // can widen what passes but never let something invalid through.
         const raw = DirectorResponseSchema.parse(parseFirstJsonValue(response.text ?? ''));
-        dedupeIdenticalCuts(raw.variations, footageEndByClipId, band);
+        dedupeIdenticalCuts(raw.variations, footageEndByClipId, band, footageStartByClipId);
         parsed = validator.parse(raw);
         break;
       } catch (validationError) {
