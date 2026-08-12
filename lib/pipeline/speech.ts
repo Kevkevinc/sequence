@@ -22,31 +22,44 @@ export type SpeechRun = { startSeconds: number; endSeconds: number };
 
 export type SilenceOptions = {
   /**
-   * Level below which audio counts as silence.
+   * Pins the silence threshold in dB, overriding the adaptive one.
    *
-   * -35dB is deliberately conservative for phone footage recorded in a room:
-   * a lower threshold starts treating room tone and breath as speech, and a
-   * higher one clips quiet word endings.
+   * Normally left unset: a fixed floor cannot serve both a quiet bedroom and a
+   * noisy street, which is why the threshold follows the recording by default.
    */
   noiseFloorDb?: number;
   /**
+   * How far under the recording's own average level the threshold sits.
+   *
+   * 8dB puts it between speech and breath on real footage: a tester's speech
+   * measured -25 to -32dB with breaths at -38 to -45dB, against an average of
+   * -28.8dB.
+   */
+  thresholdBelowMeanDb?: number;
+  /**
    * How long a quiet patch must last to count as a pause worth cutting.
    *
-   * Below about a quarter of a second, a "silence" is usually the gap between
-   * two words or the stop consonant inside one, and cutting there produces the
-   * chopped, breathless sound that makes an edit obvious.
+   * 0.15s catches a breath. Much below that and the "silence" is the stop
+   * consonant inside a word, and cutting there is what makes an edit sound
+   * chopped.
    */
   minSilenceSeconds?: number;
+  /** Resolution of the loudness measurement. */
+  windowSeconds?: number;
 };
 
-const DEFAULTS: Required<SilenceOptions> = {
-  noiseFloorDb: -35,
-  minSilenceSeconds: 0.25,
+const DEFAULTS: Required<Omit<SilenceOptions, 'noiseFloorDb'>> & { noiseFloorDb?: number } = {
+  thresholdBelowMeanDb: 8,
+  minSilenceSeconds: 0.15,
+  windowSeconds: 0.05,
+  noiseFloorDb: undefined,
 };
 
-/** `silence_start: 12.34` / `silence_end: 13.5 | silence_duration: 1.16` */
-const SILENCE_START = /silence_start:\s*(-?[\d.]+)/;
-const SILENCE_END = /silence_end:\s*(-?[\d.]+)/;
+/** Everything is measured at one rate so window maths is exact. */
+const ANALYSIS_SAMPLE_RATE = 16_000;
+
+/** `lavfi.astats.Overall.RMS_level=-23.4` (or `-inf` for a dead-silent window). */
+const RMS_LEVEL = /lavfi\.astats\.Overall\.RMS_level=(-inf|-?[\d.]+)/g;
 
 /**
  * Inverts ffmpeg's silence report into the speech between the silences.
@@ -94,63 +107,120 @@ function isRealRun(run: SpeechRun): boolean {
   return run.endSeconds - run.startSeconds >= MIN_RUN_SECONDS;
 }
 
-/**
- * Runs `silencedetect` over a media file and returns where the speech is.
- *
- * Reads ffmpeg's stderr rather than producing an output file — `-f null -`
- * decodes the audio and throws the samples away, which is all this needs.
- */
-export async function detectSpeechRuns(
+/** One RMS reading per window, in dB, plus the file's length. */
+async function measureLoudness(
   mediaPath: string,
-  options: SilenceOptions = {}
-): Promise<{ runs: SpeechRun[]; durationSeconds: number }> {
-  const { noiseFloorDb, minSilenceSeconds } = { ...DEFAULTS, ...options };
+  windowSeconds: number
+): Promise<{ windowsDb: number[]; durationSeconds: number; meanDb: number }> {
   const binary = ffmpegPath;
   if (!binary) throw new Error('ffmpeg binary not found');
 
+  const samplesPerWindow = Math.max(1, Math.round(ANALYSIS_SAMPLE_RATE * windowSeconds));
   let stderr = '';
+
   try {
     const result = await execFileAsync(
       binary,
       [
         '-hide_banner',
         '-i', mediaPath,
-        '-af', `silencedetect=noise=${noiseFloorDb}dB:d=${minSilenceSeconds}`,
+        '-af',
+        `aresample=${ANALYSIS_SAMPLE_RATE},asetnsamples=${samplesPerWindow},` +
+          `astats=metadata=1:reset=1,ametadata=print:key=lavfi.astats.Overall.RMS_level:file=-,` +
+          `volumedetect`,
         '-f', 'null',
         '-',
       ],
-      { maxBuffer: 10 * 1024 * 1024, windowsHide: true }
+      { maxBuffer: 64 * 1024 * 1024, windowsHide: true }
     );
-    stderr = result.stderr;
+    stderr = `${result.stdout}
+${result.stderr}`;
   } catch (error) {
-    // ffmpeg writes the report to stderr and can still exit non-zero on a file
-    // with quirks it recovered from; the report is usable either way.
-    const withStderr = error as { stderr?: string };
-    if (!withStderr.stderr) throw error;
-    stderr = withStderr.stderr;
-
-    // A non-zero exit is only survivable if ffmpeg still got far enough to
-    // report the file's duration. Without that it never decoded any audio —
-    // an unreadable or non-media file — and continuing would hand the caller
-    // "no speech found", which is a lie that silently produces an empty edit.
+    const withOutput = error as { stdout?: string; stderr?: string };
+    if (!withOutput.stderr && !withOutput.stdout) throw error;
+    stderr = `${withOutput.stdout ?? ''}
+${withOutput.stderr ?? ''}`;
     if (parseDuration(stderr) === 0) throw error;
   }
 
+  const windowsDb: number[] = [];
+  for (const match of stderr.matchAll(RMS_LEVEL)) {
+    // A completely silent window reports -inf; treated as the floor rather
+    // than dropped, so window N always corresponds to second N*windowSeconds.
+    windowsDb.push(match[1] === '-inf' ? Number.NEGATIVE_INFINITY : Number(match[1]));
+  }
+
+  const mean = stderr.match(/mean_volume:\s*(-?[\d.]+)/);
+  return {
+    windowsDb,
+    durationSeconds: parseDuration(stderr),
+    meanDb: mean ? Number(mean[1]) : -30,
+  };
+}
+
+/**
+ * Finds where somebody is actually talking.
+ *
+ * Measures RMS per window rather than using ffmpeg's `silencedetect`, which was
+ * the original implementation and gets breaths wrong. `silencedetect` compares
+ * *peak* amplitude against the threshold, and a breath is quiet on average
+ * while still carrying sharp transients — so its peaks stay above the line and
+ * it never registers as a pause. On a real tester recording the level sat at
+ * -43dB for seven tenths of a second and `silencedetect` reported nothing at
+ * all. RMS is both what the ear responds to and what makes a breath visible.
+ *
+ * The threshold is derived from the recording rather than fixed. A fixed floor
+ * cannot serve a quiet bedroom and a noisy street at once: too low and every
+ * pause is missed, too high and quiet speech is cut off mid-word. Sitting it a
+ * set distance under the recording's own average places it between that
+ * speaker's speech and that room's noise.
+ */
+export async function detectSpeechRuns(
+  mediaPath: string,
+  options: SilenceOptions = {}
+): Promise<{ runs: SpeechRun[]; durationSeconds: number }> {
+  const { minSilenceSeconds, windowSeconds, thresholdBelowMeanDb, noiseFloorDb } = {
+    ...DEFAULTS,
+    ...options,
+  };
+
+  const { windowsDb, durationSeconds, meanDb } = await measureLoudness(mediaPath, windowSeconds);
+  if (windowsDb.length === 0) {
+    return { runs: [], durationSeconds };
+  }
+
+  // An explicit floor still wins, so a caller can pin it; otherwise it follows
+  // the recording. Clamped so a pathological measurement cannot produce a
+  // threshold that calls everything, or nothing, silence.
+  const threshold =
+    noiseFloorDb ?? Math.min(-20, Math.max(-55, meanDb - thresholdBelowMeanDb));
+
   const silences: Array<{ startSeconds: number; endSeconds: number | null }> = [];
-  for (const line of stderr.split(/\r?\n/)) {
-    const start = line.match(SILENCE_START);
-    if (start) {
-      silences.push({ startSeconds: Number(start[1]), endSeconds: null });
-      continue;
+  let runStart: number | null = null;
+
+  windowsDb.forEach((db, index) => {
+    const quiet = db < threshold;
+    if (quiet && runStart === null) runStart = index;
+    if (!quiet && runStart !== null) {
+      const seconds = (index - runStart) * windowSeconds;
+      if (seconds >= minSilenceSeconds) {
+        silences.push({ startSeconds: runStart * windowSeconds, endSeconds: index * windowSeconds });
+      }
+      runStart = null;
     }
-    const end = line.match(SILENCE_END);
-    if (end && silences.length > 0) {
-      silences[silences.length - 1].endSeconds = Number(end[1]);
+  });
+
+  if (runStart !== null) {
+    const seconds = (windowsDb.length - runStart) * windowSeconds;
+    if (seconds >= minSilenceSeconds) {
+      silences.push({ startSeconds: runStart * windowSeconds, endSeconds: null });
     }
   }
 
-  const durationSeconds = parseDuration(stderr);
-  return { runs: speechRunsFromSilences(silences, durationSeconds), durationSeconds };
+  return {
+    runs: speechRunsFromSilences(silences, durationSeconds),
+    durationSeconds,
+  };
 }
 
 /** `Duration: 00:01:02.34,` from ffmpeg's own header dump. */

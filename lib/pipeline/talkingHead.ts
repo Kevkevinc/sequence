@@ -31,16 +31,26 @@ export const TALKING_DEFAULTS = {
   /**
    * Pauses shorter than this are kept.
    *
-   * Removing every detected gap leaves speech with no breath in it, which reads
-   * as machine-gunned rather than tight. Only the "erm, let me think" pauses are
-   * worth cutting.
+   * 0.25s is under a breath (0.3-0.5s on real footage) and over the gap between
+   * words, so breaths are cut and speech keeps its rhythm. Removing every
+   * detected gap leaves delivery with no air in it, which reads as
+   * machine-gunned rather than tight.
    */
-  keepGapSeconds: 0.35,
+  keepGapSeconds: 0.25,
   /**
-   * Restores the few milliseconds `silencedetect` trims off a word's attack and
-   * tail. Without it a cut clips the "p" off "perfect".
+   * Restores the few milliseconds trimmed off a word's attack and tail.
+   * Without it a cut clips the "p" off "perfect".
    */
-  padSeconds: 0.08,
+  padSeconds: 0.06,
+  /**
+   * Anything still shorter than this after padding is not cut at all.
+   *
+   * Padding expands both sides of every section, so a gap that was just long
+   * enough to detect can end up a few hundredths of a second wide. A cut that
+   * short is not an edit, it is a glitch — inaudible as a pause and visible as
+   * a jump.
+   */
+  minCutSeconds: 0.1,
   /** Captions sit low, clear of the speaker's face. */
   captionPosition: { x: 0.5, y: 0.76 },
 };
@@ -79,10 +89,15 @@ export async function renderTalkingJob(jobId: string): Promise<TalkingHeadResult
       };
     }
 
-    const runs = padRuns(
-      mergeShortGaps(rawRuns, TALKING_DEFAULTS.keepGapSeconds),
-      TALKING_DEFAULTS.padSeconds,
-      durationSeconds
+    // Merged, padded, then merged again: the second pass drops cuts that
+    // padding has shrunk below the point of being an edit at all.
+    const runs = mergeShortGaps(
+      padRuns(
+        mergeShortGaps(rawRuns, TALKING_DEFAULTS.keepGapSeconds),
+        TALKING_DEFAULTS.padSeconds,
+        durationSeconds
+      ),
+      TALKING_DEFAULTS.minCutSeconds
     );
 
     /*
