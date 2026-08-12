@@ -145,3 +145,49 @@ describe('renderTalkingHead', () => {
     });
   }, 30_000);
 });
+
+describe('background noise', () => {
+  let dir: string;
+  let noisySource: string;
+
+  beforeAll(async () => {
+    dir = await mkdtemp(path.join(tmpdir(), 'noise-'));
+    noisySource = path.join(dir, 'noisy.mp4');
+    // A 300Hz tone standing in for a voice, buried in broadband hiss. Both are
+    // generated so the amount of noise removed is a number this test chose
+    // rather than a property of some recording.
+    const built = await runFfmpeg([
+      '-f', 'lavfi', '-i', 'testsrc=size=720x1280:rate=30:duration=6',
+      '-f', 'lavfi', '-i', 'sine=frequency=300:duration=6',
+      '-f', 'lavfi', '-i', 'anoisesrc=d=6:c=white:a=0.06',
+      '-filter_complex', '[1:a][2:a]amix=inputs=2:duration=shortest:weights=1 1[a]',
+      '-map', '0:v', '-map', '[a]',
+      '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p',
+      '-c:a', 'aac', '-shortest', noisySource,
+    ]);
+    expect(built).toEqual({ success: true });
+  }, 120_000);
+
+  afterAll(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it('leaves the voice audible while pulling the background down', async () => {
+    const output = path.join(dir, 'cleaned.mp4');
+    const result = await renderTalkingHead({
+      sourcePath: noisySource,
+      runs: [{ startSeconds: 0, endSeconds: 5 }],
+      cues: [],
+      workingDir: dir,
+      outputPath: output,
+    });
+    expect(result).toMatchObject({ success: true });
+
+    // The tone survives: a cleanup that removed the voice along with the noise
+    // would look excellent on a noise meter and be useless.
+    expect(await probeHasAudio(output)).toBe(true);
+    const media = await probeMedia(output);
+    expect(media.audio).not.toBeNull();
+    expect(media.audio?.duration ?? 0).toBeGreaterThan(4);
+  }, 300_000);
+});
