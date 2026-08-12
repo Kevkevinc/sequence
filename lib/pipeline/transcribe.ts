@@ -1,4 +1,4 @@
-import { stat, unlink } from 'fs/promises';
+import { readFile, stat, unlink } from 'fs/promises';
 import path from 'path';
 import { tmpdir } from 'os';
 import { randomUUID } from 'crypto';
@@ -101,6 +101,46 @@ export function wordsOf(text: string): string[] {
 }
 
 /**
+ * Ceiling for sending audio inside the request.
+ *
+ * base64 inflates by roughly a third, so this leaves generous headroom under
+ * the request limit. At 16kHz mono WAV it covers a take of about four minutes,
+ * which is far longer than anyone talks to camera in one shot.
+ */
+const INLINE_AUDIO_LIMIT_BYTES = 8 * 1024 * 1024;
+
+/**
+ * The long way round, for a take too big to send inline.
+ *
+ * Kept because refusing a long recording outright would be worse than a slower
+ * path, but it is no longer the common case — see the note at the call site.
+ */
+async function uploadForTranscription(
+  client: ReturnType<typeof getGeminiClient>,
+  localAudio: string,
+  describeAudio: () => string
+): Promise<string> {
+  const uploaded = await client.files
+    .upload({ file: localAudio, config: { mimeType: AUDIO_MIME_TYPE } })
+    .catch((error) => {
+      throw new Error(`upload of the audio failed (${describeAudio()}): ${describeCause(error)}`);
+    });
+
+  if (!uploaded.name || !uploaded.uri) {
+    throw new Error('Gemini upload did not return a usable file reference');
+  }
+  if (uploaded.state !== FileState.ACTIVE) {
+    for (let attempt = 0; attempt < FILE_POLL_ATTEMPTS; attempt++) {
+      const file = await client.files.get({ name: uploaded.name });
+      if (file.state === FileState.ACTIVE) break;
+      if (file.state === FileState.FAILED) throw new Error('Gemini file processing failed');
+      await new Promise((resolve) => setTimeout(resolve, FILE_POLL_INTERVAL_MS));
+    }
+  }
+  return uploaded.uri;
+}
+
+/**
  * Transcribes what is said in a clip.
  *
  * Returns the words only. Where they fall in time is established separately by
@@ -127,36 +167,36 @@ export async function transcribeClip(sourcePath: string): Promise<TranscribeResu
     const describeAudio = () =>
       `${AUDIO_MIME_TYPE}, ${(size / 1024).toFixed(0)}KB, from ${path.basename(sourcePath)}`;
 
+    /*
+     * Sent inline, not through the Files API.
+     *
+     * The upload-then-reference dance is what this step used to do, and it is
+     * the one part of the request that still differed between the worker and a
+     * local run once the file itself was ruled out: the worker produced a
+     * perfectly good 934KB WAV and still got INTERNAL back every time, while
+     * the identical audio transcribed here. For a thirty-second take the Files
+     * API is ceremony anyway — an upload, a processing poll, a URI with a
+     * lifetime, and a second service that can fail independently of the model.
+     * Inline audio is one request with none of that.
+     *
+     * Large takes still go the long way round: base64 inflates by a third and
+     * the request has a ceiling, so anything past INLINE_AUDIO_LIMIT_BYTES
+     * uploads as before rather than being refused.
+     */
     const response = await withTransientRetry(async () => {
-      const uploaded = await client.files.upload({
-        file: localAudio,
-        config: { mimeType: AUDIO_MIME_TYPE },
-      }).catch((error) => {
-        throw new Error(`upload of the audio failed (${describeAudio()}): ${describeCause(error)}`);
-      });
-      if (!uploaded.name || !uploaded.uri) {
-        throw new Error('Gemini upload did not return a usable file reference');
-      }
-      if (uploaded.state !== FileState.ACTIVE) {
-        for (let attempt = 0; attempt < FILE_POLL_ATTEMPTS; attempt++) {
-          const file = await client.files.get({ name: uploaded.name });
-          if (file.state === FileState.ACTIVE) break;
-          if (file.state === FileState.FAILED) throw new Error('Gemini file processing failed');
-          await new Promise((resolve) => setTimeout(resolve, FILE_POLL_INTERVAL_MS));
-        }
-      }
+      const audioPart =
+        size <= INLINE_AUDIO_LIMIT_BYTES
+          ? {
+              inlineData: {
+                mimeType: AUDIO_MIME_TYPE,
+                data: (await readFile(localAudio)).toString('base64'),
+              },
+            }
+          : { fileData: { fileUri: await uploadForTranscription(client, localAudio, describeAudio) } };
 
       return client.models.generateContent({
         model: TRANSCRIBE_MODEL,
-        contents: [
-          {
-            role: 'user',
-            parts: [
-              { fileData: { fileUri: uploaded.uri, mimeType: AUDIO_MIME_TYPE } },
-              { text: TRANSCRIBE_PROMPT },
-            ],
-          },
-        ],
+        contents: [{ role: 'user', parts: [audioPart, { text: TRANSCRIBE_PROMPT }] }],
       });
     }, TRANSCRIBE_RETRY).catch((error) => {
       throw new Error(`${describeCause(error)} [audio: ${describeAudio()}]`);
