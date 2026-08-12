@@ -23,7 +23,7 @@ const FILE_POLL_ATTEMPTS = 30;
 const FILE_POLL_INTERVAL_MS = 2000;
 
 /**
- * Asks only for the words, in order — never for timings.
+ * Asks for plain text, and only for the words — never for timings.
  *
  * The model's timestamps were measured against a synthesised track with known
  * word positions and drift to -0.7s within ten seconds (see `speech.ts`). Not
@@ -34,14 +34,16 @@ const FILE_POLL_INTERVAL_MS = 2000;
  * Filler words are kept deliberately: the editor decides what to cut, and it
  * cannot cut an "um" the transcript quietly tidied away.
  */
+/** What the model replies with when there is nothing to transcribe. */
+const NO_SPEECH_SENTINEL = 'NO_SPEECH';
+
 const TRANSCRIBE_PROMPT = `Transcribe the speech in this audio, word for word.
 
-Return JSON only: {"speech": boolean, "text": string}
-- "speech" is false if nobody is speaking (music, room noise, or silence only).
-- "text" is the full transcript as plain text.
-- Transcribe exactly what is said, including filler words like "um", "uh", "like"
-  and false starts. Do NOT clean up, summarise, paraphrase or punctuate for style.
-- Do not include timestamps, speaker labels or any commentary.`;
+Reply with the transcript as plain text and nothing else — no JSON, no labels, no timestamps,
+no speaker names, no commentary.
+Include filler words like "um", "uh", "like" and false starts exactly as spoken. Do NOT clean up,
+summarise, paraphrase or punctuate for style.
+If nobody is speaking (music, room noise or silence only), reply with exactly: ${NO_SPEECH_SENTINEL}`;
 
 export type Transcript = {
   /** Words in spoken order. Timing is added later from the measured audio. */
@@ -129,7 +131,6 @@ export async function transcribeClip(sourcePath: string): Promise<TranscribeResu
             ],
           },
         ],
-        config: { responseMimeType: 'application/json' },
       });
     }, TRANSCRIBE_RETRY);
 
@@ -141,13 +142,11 @@ export async function transcribeClip(sourcePath: string): Promise<TranscribeResu
       usage: response.usageMetadata,
     });
 
-    const raw = response.text ?? '';
-    const parsed = JSON.parse(raw.slice(raw.indexOf('{'), raw.lastIndexOf('}') + 1)) as {
-      speech?: boolean;
-      text?: string;
-    };
+    const text = (response.text ?? '').trim();
 
-    if (parsed.speech === false || !parsed.text || !parsed.text.trim()) {
+    // The sentinel is matched loosely: the model occasionally wraps it in a
+    // sentence, and "NO_SPEECH." should not be transcribed as a word.
+    if (!text || text.toUpperCase().includes(NO_SPEECH_SENTINEL)) {
       return {
         success: false,
         error:
@@ -155,7 +154,7 @@ export async function transcribeClip(sourcePath: string): Promise<TranscribeResu
       };
     }
 
-    return { success: true, transcript: { text: parsed.text, words: wordsOf(parsed.text) } };
+    return { success: true, transcript: { text, words: wordsOf(text) } };
   } catch (error) {
     return { success: false, error: `Could not transcribe the recording: ${describeCause(error)}` };
   } finally {
