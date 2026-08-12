@@ -539,6 +539,30 @@ async function renderTalkingHeadJob(jobId: string): Promise<void> {
 
   if (!result.success) {
     log(`  Talking edit FAILED in ${since(startedAt)}: ${result.error}`);
+
+    /*
+     * A temporary AI outage must not destroy the job.
+     *
+     * This is what killed a tester's first talking edit: Gemini returned a 500
+     * five times while transcribing, the retry layer gave up, and the job was
+     * marked failed permanently. The same recording transcribed cleanly
+     * minutes later. The silent pipeline has requeued on transient failures
+     * since an earlier outage did the same thing there; this path was written
+     * without that and inherited the bug.
+     *
+     * The renders row is deleted rather than marked failed, because the job is
+     * coming back: leaving it would show the creator a failed video beside the
+     * one that eventually succeeds.
+     */
+    if (isTransientError(result.error)) {
+      await db.delete(renders).where(eq(renders.id, render.id));
+      if (await requeueForTransientFailure(jobId, result.error)) return;
+      // Past the retry cap: fall through and fail it honestly, but the row is
+      // gone, so record the failure on the job alone.
+      await failJob(jobId, result.error);
+      return;
+    }
+
     await db
       .update(renders)
       .set({ status: 'failed', failureReason: result.error })
