@@ -10,7 +10,25 @@ import { describeCause } from '@/lib/pipeline/errors';
 import { withTransientRetry, type TransientRetryOptions } from '@/lib/pipeline/retry';
 import { recordUsage } from '@/lib/pipeline/usage';
 
-const TRANSCRIBE_MODEL = getEnvWithDefault('GEMINI_TRANSCRIBE_MODEL', 'gemini-3.6-flash');
+/**
+ * Which model transcribes, defaulting to whichever one already tags clips.
+ *
+ * Not a fresh default of its own, which is what this shipped with and what
+ * broke it. Model availability differs per key — this project has switched
+ * models before for exactly that reason, and the deployed worker carries a
+ * `GEMINI_TAGGING_MODEL` override because of it. A new variable nobody had set
+ * there fell back to a model that key cannot serve, so every transcription
+ * returned INTERNAL while video tagging on the same worker, same key, same
+ * moment, kept working.
+ *
+ * Inheriting the tagging model means the step that reads media uses the model
+ * already proven to work for reading media on that deployment. The dedicated
+ * variable still wins when someone sets it deliberately.
+ */
+const TRANSCRIBE_MODEL = getEnvWithDefault(
+  'GEMINI_TRANSCRIBE_MODEL',
+  getEnvWithDefault('GEMINI_TAGGING_MODEL', 'gemini-3.6-flash')
+);
 
 const TRANSCRIBE_RETRY: TransientRetryOptions = {
   attempts: 5,
