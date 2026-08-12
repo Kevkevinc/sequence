@@ -2,7 +2,7 @@ import { mkdir, writeFile } from 'fs/promises';
 import path from 'path';
 import { concatCuts } from '@/lib/render/concat';
 import { buildAssFile, escapeFilterPath } from '@/lib/render/captions';
-import { normaliseCut } from '@/lib/render/normalise';
+import { measureChannelBalance, normaliseCut } from '@/lib/render/normalise';
 import { probeDuration, runFfmpeg } from '@/lib/render/ffmpeg';
 import { DEFAULT_CAPTION_SETTINGS, type CaptionSettings } from '@/lib/render/captionSettings';
 import type { CaptionCue } from '@/lib/pipeline/align';
@@ -80,6 +80,9 @@ export async function renderTalkingHead(input: {
     };
   }
 
+  // Measured once on the whole recording, so every cut is treated identically.
+  const channelBalance = await measureChannelBalance(input.sourcePath);
+
   const cutsDir = path.join(input.workingDir, 'talking-cuts');
   await mkdir(cutsDir, { recursive: true });
 
@@ -92,6 +95,7 @@ export async function renderTalkingHead(input: {
       endSeconds: run.endSeconds,
       outputPath: partPath,
       keepAudio: true,
+      channelBalance,
     });
     if (!result.success) {
       return {

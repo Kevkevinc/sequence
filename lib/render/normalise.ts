@@ -1,7 +1,12 @@
 import { rm } from 'fs/promises';
+import { execFile } from 'child_process';
+import { promisify } from 'util';
+import ffmpegPath from 'ffmpeg-static';
 import { probeMedia, type MediaInfo, runFfmpeg } from '@/lib/render/ffmpeg';
 
 import { FPS, HEIGHT, WIDTH } from '@/lib/render/frame';
+
+const execFileAsync = promisify(execFile);
 
 /**
  * Crop-to-fill rather than letterbox: black bars read as amateur in short-form
@@ -111,6 +116,78 @@ const AUDIO_BITRATE = '192k';
 const AUDIO_CLEANUP = 'highpass=f=85,afftdn=nf=-25:tn=0';
 
 /**
+ * How far under the louder channel a channel counts as carrying nothing.
+ *
+ * 40dB is not "quiet", it is off. A tester's phone wrote a stereo file with the
+ * left channel at -26dB and the right at -116dB — a 90dB gap. Real stereo from
+ * a phone held at arm's length is a couple of decibels apart at most, because
+ * both microphones are pointed at the same person from the same place.
+ */
+const DEAD_CHANNEL_DB = 40;
+
+export type ChannelBalance = 'stereo' | 'left-only' | 'right-only';
+
+/**
+ * Which channels of a recording actually contain anything.
+ *
+ * Phones record "stereo" whether or not they captured any, and some write a
+ * second channel of pure digital silence. Copied through faithfully, that plays
+ * out of one earbud — which is what happened, and which nobody notices until
+ * they happen to be wearing headphones.
+ */
+export async function measureChannelBalance(mediaPath: string): Promise<ChannelBalance> {
+  const binary = ffmpegPath;
+  if (!binary) throw new Error('ffmpeg binary not found');
+
+  let output = '';
+  try {
+    const result = await execFileAsync(binary, [
+      '-hide_banner', '-nostats', '-i', mediaPath,
+      '-map', '0:a:0', '-af', 'astats=metadata=0:reset=0', '-f', 'null', '-',
+    ], { maxBuffer: 64 * 1024 * 1024 });
+    output = `${result.stdout}
+${result.stderr}`;
+  } catch (error) {
+    const withOutput = error as { stdout?: string; stderr?: string };
+    output = `${withOutput.stdout ?? ''}
+${withOutput.stderr ?? ''}`;
+  }
+
+  // astats prints a block per channel and then an Overall block; only the
+  // per-channel ones are wanted, and they are the ones that come first.
+  const levels: number[] = [];
+  for (const match of output.matchAll(/Channel:\s*\d+[\s\S]*?RMS level dB:\s*(-?[\d.]+|-?inf|nan)/g)) {
+    const value = Number(match[1]);
+    levels.push(Number.isFinite(value) ? value : Number.NEGATIVE_INFINITY);
+  }
+
+  // Anything that is not a two-channel reading is left alone: mono is already
+  // centred, and a genuine multichannel mix is not ours to second-guess.
+  if (levels.length !== 2) return 'stereo';
+  if (levels[0] - levels[1] > DEAD_CHANNEL_DB) return 'left-only';
+  if (levels[1] - levels[0] > DEAD_CHANNEL_DB) return 'right-only';
+  return 'stereo';
+}
+
+/**
+ * Puts the voice in both ears.
+ *
+ * A dead channel is rebuilt from the live one at full level rather than by
+ * averaging the pair, which would halve the volume of a recording whose only
+ * fault is that half of it was never written.
+ *
+ * A recording with two live channels is folded to the centre rather than
+ * averaged-and-kept, because these are single voices talking to a phone. There
+ * is no stereo image in that to protect, and half the audience is listening on
+ * one earbud or a phone speaker where a hard-panned anything is a defect.
+ */
+function centreChannels(balance: ChannelBalance): string {
+  if (balance === 'left-only') return 'pan=stereo|c0=c0|c1=c0,';
+  if (balance === 'right-only') return 'pan=stereo|c0=c1|c1=c1,';
+  return 'pan=stereo|c0=0.5*c0+0.5*c1|c1=0.5*c0+0.5*c1,';
+}
+
+/**
  * Trims the audio alongside the picture, keeping the two in step.
  *
  * `asetpts=N/SR/TB` restarts the timestamps at zero the way the video chain
@@ -120,9 +197,12 @@ const AUDIO_CLEANUP = 'highpass=f=85,afftdn=nf=-25:tn=0';
  * and on a talking-head video that reads immediately as bad lip sync — the one
  * defect this mode cannot ship with.
  */
-function audioChain(seconds: string, cleanUp: boolean): string {
+function audioChain(seconds: string, cleanUp: boolean, balance: ChannelBalance): string {
   return (
     `[0:a:0]atrim=duration=${seconds},asetpts=N/SR/TB,` +
+    // Before the cleanup, so the denoiser sees the same signal in both channels
+    // and cannot leave them treated differently.
+    centreChannels(balance) +
     (cleanUp ? `${AUDIO_CLEANUP},` : '') +
     `aresample=${AUDIO_RATE}:async=1:first_pts=0,` +
     `aformat=sample_fmts=fltp:channel_layouts=stereo[a]`
@@ -182,6 +262,14 @@ export async function normaliseCut(input: {
    * recording can be given the raw take if that ever proves better.
    */
   cleanUpAudio?: boolean;
+  /**
+   * Which channels the source actually uses, from {@link measureChannelBalance}.
+   *
+   * Passed in rather than measured here because this runs once per cut, and a
+   * per-cut measurement could classify two cuts of one recording differently —
+   * the same trap as noise tracking, and just as audible at the splice.
+   */
+  channelBalance?: ChannelBalance;
 }): Promise<{ success: true } | { success: false; error: string }> {
   const requested = input.endSeconds - input.startSeconds;
   if (!Number.isFinite(requested) || requested <= 0) {
@@ -254,7 +342,7 @@ export async function normaliseCut(input: {
     '-xerror',
     '-ss', formatSeconds(start), '-t', seconds, '-i', input.sourcePath,
     '-filter_complex', keepAudio
-      ? `${videoChain(seconds)};${audioChain(seconds, input.cleanUpAudio !== false)}`
+      ? `${videoChain(seconds)};${audioChain(seconds, input.cleanUpAudio !== false, input.channelBalance ?? 'stereo')}`
       : videoChain(seconds),
     '-map', '[v]',
     ...(keepAudio

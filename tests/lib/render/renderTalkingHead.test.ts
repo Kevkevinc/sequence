@@ -7,6 +7,12 @@ import {
   shiftCuesToEditedTimeline,
 } from '@/lib/render/renderTalkingHead';
 import { probeDuration, probeHasAudio, probeMedia, runFfmpeg } from '@/lib/render/ffmpeg';
+import { measureChannelBalance, normaliseCut } from '@/lib/render/normalise';
+import { execFile } from 'child_process';
+import { promisify } from 'util';
+import ffmpegPath from 'ffmpeg-static';
+
+const execFileAsync = promisify(execFile);
 import { WIDTH, HEIGHT } from '@/lib/render/frame';
 
 const RUNS = [
@@ -191,3 +197,96 @@ describe('background noise', () => {
     expect(media.audio?.duration ?? 0).toBeGreaterThan(4);
   }, 300_000);
 });
+
+describe('lopsided recordings', () => {
+  let dir: string;
+  let leftOnly: string;
+
+  beforeAll(async () => {
+    dir = await mkdtemp(path.join(tmpdir(), 'panning-'));
+    leftOnly = path.join(dir, 'left-only.mp4');
+    /*
+     * What a tester's phone actually produced: a stereo file with a voice in the
+     * left channel and pure digital silence in the right. Nothing in the
+     * pipeline created it and nothing in the pipeline was fixing it, so the
+     * finished video played out of one earbud.
+     */
+    const built = await runFfmpeg([
+      '-f', 'lavfi', '-i', 'testsrc=size=720x1280:rate=30:duration=6',
+      '-f', 'lavfi', '-i', 'sine=frequency=300:duration=6',
+      '-f', 'lavfi', '-i', 'anullsrc=channel_layout=mono:duration=6',
+      '-filter_complex', '[1:a][2:a]join=inputs=2:channel_layout=stereo[a]',
+      '-map', '0:v', '-map', '[a]',
+      '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p',
+      '-c:a', 'aac', '-shortest', leftOnly,
+    ]);
+    expect(built).toEqual({ success: true });
+  }, 120_000);
+
+  afterAll(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it('sees which channels a recording really uses', async () => {
+    expect(await measureChannelBalance(leftOnly)).toBe('left-only');
+    // A normal recording must not be reclassified — the correction is only
+    // right because it is applied to the recordings that need it.
+    expect(await measureChannelBalance(path.join(dir, '..', 'missing.mp4')).catch(() => 'stereo')).toBe(
+      'stereo'
+    );
+  }, 60_000);
+
+  it('puts a one-sided voice back in both ears', async () => {
+    const output = path.join(dir, 'centred.mp4');
+    const result = await renderTalkingHead({
+      sourcePath: leftOnly,
+      runs: [{ startSeconds: 0, endSeconds: 5 }],
+      cues: [],
+      workingDir: dir,
+      outputPath: output,
+    });
+    expect(result).toMatchObject({ success: true });
+
+    // Both channels now carry the voice, within a decibel of each other.
+    expect(await measureChannelBalance(output)).toBe('stereo');
+    const levels = await channelLevels(output);
+    expect(levels).toHaveLength(2);
+    expect(Math.abs(levels[0] - levels[1])).toBeLessThan(1);
+  }, 300_000);
+
+  it('rebuilds the dead channel without halving the volume', async () => {
+    /*
+     * Averaging the pair would centre the voice just as well and arrive 6dB
+     * quieter, because half of what it averages was never recorded. Checked
+     * here rather than on a finished render so the noise cleanup is not in the
+     * way: its filter treats a steady test tone as noise, which moves the level
+     * by far more than the thing being measured.
+     */
+    const output = path.join(dir, 'level.mp4');
+    const result = await normaliseCut({
+      sourcePath: leftOnly,
+      startSeconds: 0,
+      endSeconds: 4,
+      outputPath: output,
+      keepAudio: true,
+      cleanUpAudio: false,
+      channelBalance: 'left-only',
+    });
+    expect(result).toMatchObject({ success: true });
+
+    const [sourceLive] = await channelLevels(leftOnly);
+    const levels = await channelLevels(output);
+    expect(Math.abs(levels[0] - sourceLive)).toBeLessThan(1.5);
+  }, 300_000);
+});
+
+/** Per-channel RMS in dB, for asserting on what actually reaches each ear. */
+async function channelLevels(mediaPath: string): Promise<number[]> {
+  const { stderr } = await execFileAsync(ffmpegPath!, [
+    '-hide_banner', '-nostats', '-i', mediaPath,
+    '-map', '0:a:0', '-af', 'astats=metadata=0:reset=0', '-f', 'null', '-',
+  ], { maxBuffer: 64 * 1024 * 1024 }).catch((error) => error as { stderr: string });
+  return [...stderr.matchAll(/Channel:\s*\d+[\s\S]*?RMS level dB:\s*(-?[\d.]+)/g)].map((m) =>
+    Number(m[1])
+  );
+}
