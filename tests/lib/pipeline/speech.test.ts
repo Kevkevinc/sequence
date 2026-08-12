@@ -191,3 +191,53 @@ describe('detectSpeechRuns', () => {
     await expect(detectSpeechRuns(bogus)).rejects.toThrow();
   }, 30_000);
 });
+
+describe('rapid speech', () => {
+  let dir: string;
+
+  beforeAll(async () => {
+    dir = await mkdtemp(path.join(tmpdir(), 'rapid-'));
+  }, 30_000);
+
+  afterAll(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it('does not mistake the gaps between syllables for a pause', async () => {
+    /*
+     * The real defect this guards. Syllables in "if you don't have a fitted
+     * shirt" registered as 0.10s bursts separated by 0.05s gaps; every burst
+     * was discarded as too short to be a word, which fused the gaps into one
+     * 0.75s "pause" that was then cut — deleting words the creator said. The
+     * failure is silent, because what is left still sounds like speech.
+     */
+    const file = path.join(dir, 'syllables.m4a');
+    const bursts = Array.from({ length: 12 }, (_, i) => ({
+      start: i * 0.15,
+      end: i * 0.15 + 0.1,
+    }));
+    await buildAudio(file, bursts, 3);
+
+    const { runs } = await detectSpeechRuns(file);
+    const spoken = runs.reduce((total, r) => total + (r.endSeconds - r.startSeconds), 0);
+
+    // The whole 1.8s of rapid speech must survive as speech, not collapse into
+    // one long silence. A couple of sections is fine; a single tiny one is the
+    // bug.
+    expect(spoken).toBeGreaterThan(1.4);
+  }, 60_000);
+
+  it('still finds a genuine pause between two phrases', async () => {
+    const file = path.join(dir, 'phrases.m4a');
+    await buildAudio(file, [
+      { start: 0, end: 1.2 },
+      { start: 2.2, end: 3.4 },
+    ], 4);
+
+    const { runs } = await detectSpeechRuns(file);
+    expect(runs.length).toBeGreaterThanOrEqual(2);
+    // The one-second gap between the phrases is found.
+    const gap = runs.slice(1).some((r, i) => r.startSeconds - runs[i].endSeconds > 0.7);
+    expect(gap).toBe(true);
+  }, 60_000);
+});

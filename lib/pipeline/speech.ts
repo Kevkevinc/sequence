@@ -43,10 +43,12 @@ export type SilenceOptions = {
   /**
    * How long a quiet patch must last to count as a pause worth cutting.
    *
-   * 0.10s catches a breath and the short beat between sentences. Much below
-   * that and the "silence" is the stop consonant inside a word; the real guard
-   * against chopping is the minimum *cut* length applied after padding, which
-   * is what decides whether a detected gap becomes an edit at all.
+   * A pause has to be *sustained*, not momentary. In rapid speech the gaps
+   * between syllables register as one or two quiet windows, and at 0.10s those
+   * qualified — producing cuts inside phrases. 0.15s is longer than any
+   * inter-syllable gap measured on real footage and shorter than any real
+   * pause, which is the distinction level alone cannot make: a breath and the
+   * gap between two syllables sit at the same loudness and differ in length.
    */
   minSilenceSeconds?: number;
   /** Resolution of the loudness measurement. */
@@ -55,7 +57,7 @@ export type SilenceOptions = {
 
 const DEFAULTS: Required<Omit<SilenceOptions, 'noiseFloorDb'>> & { noiseFloorDb?: number } = {
   thresholdBelowMeanDb: 5,
-  minSilenceSeconds: 0.1,
+  minSilenceSeconds: 0.15,
   windowSeconds: 0.05,
   noiseFloorDb: undefined,
 };
@@ -102,11 +104,24 @@ export function speechRunsFromSilences(
 /**
  * Discards runs too short to be a word.
  *
- * A click, a lip smack or a single frame of noise crossing the threshold would
- * otherwise become a "speech run" the editor tries to keep, which is how an
- * edit ends up with 80ms fragments spliced between sentences.
+ * Deliberately barely longer than one measurement window. A click or a lip
+ * smack in the middle of a long pause should not split it into two unusable
+ * halves — but this filter cuts the other way too, and that is far more
+ * dangerous: dropping a short *speech* run fuses the quiet either side of it
+ * into one long "pause" that never existed.
+ *
+ * At 0.12s that is exactly what happened. In rapid speech the syllables of
+ * "if you don't have a fitted shirt" register as 0.10s runs separated by 0.05s
+ * gaps; every syllable was thrown away and the whole phrase became a 0.75s
+ * silence the editor then cut out — removing words the creator said. The
+ * failure is silent, because what is left still sounds like speech.
+ *
+ * So the bar sits just above a single window. Everything that actually protects
+ * against noise does it by looking at the *gaps*: a pause must be long enough
+ * to detect, survive merging, and still be worth cutting after padding. Those
+ * three can only ever keep material. This one can delete it.
  */
-const MIN_RUN_SECONDS = 0.12;
+const MIN_RUN_SECONDS = 0.06;
 
 function isRealRun(run: SpeechRun): boolean {
   return run.endSeconds - run.startSeconds >= MIN_RUN_SECONDS;

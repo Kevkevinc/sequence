@@ -53,7 +53,7 @@ export const TALKING_DEFAULTS = {
    * a jump. This is the real guard against a choppy edit, which is what lets
    * the detection above run as close to the speech as it does.
    */
-  minCutSeconds: 0.15,
+  minCutSeconds: 0.12,
   /**
    * Burned-in captions, off on creator direction.
    *
