@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { useParams } from 'next/navigation';
-import { PhoneFrame, Screen } from '@/components/PhoneFrame';
+import { AppFrame, Screen } from '@/components/AppFrame';
 import { StatusBadge } from '@/components/StatusMarker';
 import { StageTimeline } from '@/components/StageTimeline';
 import { ResultCell } from '@/components/ResultCell';
@@ -55,27 +55,27 @@ export default function JobDetailPage() {
 
   if (error) {
     return (
-      <PhoneFrame>
+      <AppFrame>
         <Screen>
           <BackLink />
           <div className="panel" data-tone="failure" style={{ marginTop: 20 }}>
             <p className="panelText">{error}</p>
           </div>
         </Screen>
-      </PhoneFrame>
+      </AppFrame>
     );
   }
 
   if (!job) {
     return (
-      <PhoneFrame>
+      <AppFrame>
         <Screen>
           <BackLink />
           <p className="meta" style={{ marginTop: 20 }}>
             Loading this video.
           </p>
         </Screen>
-      </PhoneFrame>
+      </AppFrame>
     );
   }
 
@@ -121,7 +121,7 @@ export default function JobDetailPage() {
   }
 
   return (
-    <PhoneFrame>
+    <AppFrame>
       <header className="detailHeader">
         <BackLink />
         <h1 className="detailTitle" style={{ marginTop: 10 }}>
@@ -202,7 +202,7 @@ export default function JobDetailPage() {
           )}
         </div>
       </Screen>
-    </PhoneFrame>
+    </AppFrame>
   );
 }
 

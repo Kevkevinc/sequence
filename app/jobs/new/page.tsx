@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { PhoneFrame, Screen } from '@/components/PhoneFrame';
+import { AppFrame, Screen } from '@/components/AppFrame';
 import { CaptionEditor } from '@/components/CaptionEditor';
 import { Thumb } from '@/components/Thumb';
 import {
@@ -388,7 +388,7 @@ export default function NewJobPage() {
               : `Make ${variations} video${variations === 1 ? '' : 's'}`;
 
   return (
-    <PhoneFrame showNav={false}>
+    <AppFrame showNav={false}>
       <header className="flowHeader">
         <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
           <button type="button" className="backButton" onClick={back} aria-label="Back">
@@ -939,6 +939,6 @@ export default function NewJobPage() {
           {footerLabel}
         </button>
       </footer>
-    </PhoneFrame>
+    </AppFrame>
   );
 }

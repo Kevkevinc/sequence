@@ -152,37 +152,3 @@ export const LogoMark = ({ size = 30 }: IconProps) => (
   </svg>
 );
 
-/* ------------------------------------------------- status bar glyphs --- */
-
-export const IconSignal = () => (
-  <svg width="17" height="11" viewBox="0 0 17 11" aria-hidden="true" focusable="false">
-    {[0, 1, 2, 3].map((bar) => (
-      <rect
-        key={bar}
-        x={bar * 4.4}
-        y={8 - bar * 2.4}
-        width="3"
-        height={3 + bar * 2.4}
-        rx="1"
-        fill="#fff"
-      />
-    ))}
-  </svg>
-);
-
-export const IconWifi = () => (
-  <svg width="16" height="11" viewBox="0 0 16 11" aria-hidden="true" focusable="false">
-    <path
-      d="M8 9.6 5.9 7.4a3 3 0 0 1 4.2 0zM8 4.6a6 6 0 0 0-4.3 1.8L2.3 5A8 8 0 0 1 8 2.6 8 8 0 0 1 13.7 5l-1.4 1.4A6 6 0 0 0 8 4.6z"
-      fill="#fff"
-    />
-  </svg>
-);
-
-export const IconBattery = () => (
-  <svg width="25" height="12" viewBox="0 0 25 12" aria-hidden="true" focusable="false">
-    <rect x="0.5" y="0.5" width="21" height="11" rx="3" stroke="#fff" strokeOpacity="0.4" fill="none" />
-    <rect x="2" y="2" width="16" height="8" rx="1.6" fill="#fff" />
-    <path d="M23 4.2v3.6a2 2 0 0 0 0-3.6z" fill="#fff" fillOpacity="0.4" />
-  </svg>
-);

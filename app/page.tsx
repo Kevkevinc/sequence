@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { SignInButton, SignUpButton, useAuth, useUser } from '@clerk/nextjs';
-import { PhoneFrame, Screen } from '@/components/PhoneFrame';
+import { AppFrame, Screen } from '@/components/AppFrame';
 import { JobRow } from '@/components/JobRow';
 import { RunningCard } from '@/components/RunningCard';
 import { IconPlus, LogoMark } from '@/components/icons';
@@ -14,7 +14,7 @@ export default function HomePage() {
 
   // Clerk resolves auth on the client, and rendering either branch before it
   // knows would flash the signed-out screen at a creator who is signed in.
-  if (!isLoaded) return <PhoneFrame showNav={false}><Screen>{null}</Screen></PhoneFrame>;
+  if (!isLoaded) return <AppFrame showNav={false}><Screen>{null}</Screen></AppFrame>;
   if (!isSignedIn) return <SignedOut />;
   return <Home />;
 }
@@ -31,7 +31,7 @@ function Home() {
       .toUpperCase();
 
   return (
-    <PhoneFrame>
+    <AppFrame>
       <Screen>
         <header
           style={{
@@ -155,7 +155,7 @@ function Home() {
           )}
         </section>
       </Screen>
-    </PhoneFrame>
+    </AppFrame>
   );
 }
 
@@ -166,7 +166,7 @@ function Home() {
  */
 function SignedOut() {
   return (
-    <PhoneFrame showNav={false}>
+    <AppFrame showNav={false}>
       <Screen flush>
         <header style={{ padding: '6px 0 26px' }}>
           <LogoMark size={30} />
@@ -200,6 +200,6 @@ function SignedOut() {
           Add Sequence to your home screen and it opens like an app, with no address bar.
         </p>
       </Screen>
-    </PhoneFrame>
+    </AppFrame>
   );
 }

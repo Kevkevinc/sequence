@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { PhoneFrame, Screen } from '@/components/PhoneFrame';
+import { AppFrame, Screen } from '@/components/AppFrame';
 import { CaptionEditor } from '@/components/CaptionEditor';
 import { IconChevronLeft } from '@/components/icons';
 import {
@@ -69,7 +69,7 @@ export default function CaptionLookPage() {
   }
 
   return (
-    <PhoneFrame showNav={false}>
+    <AppFrame showNav={false}>
       <header className="detailHeader">
         <button
           type="button"
@@ -133,6 +133,6 @@ export default function CaptionLookPage() {
           )}
         </div>
       </Screen>
-    </PhoneFrame>
+    </AppFrame>
   );
 }

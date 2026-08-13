@@ -10,15 +10,12 @@ import { LogoMark } from '@/components/icons';
  */
 export function AuthScreen({ children }: { children: React.ReactNode }) {
   return (
-    <div className="desk">
-      <div className="frame">
-        <div className="screen" data-flush="true" style={{ display: 'grid', alignContent: 'center' }}>
-          <div style={{ display: 'grid', justifyItems: 'center', gap: 18, paddingTop: 20 }}>
-            <LogoMark size={34} />
-            {children}
-          </div>
+    <div className="app">
+      <div className="screen" data-flush="true" style={{ display: 'grid', alignContent: 'center' }}>
+        <div style={{ display: 'grid', justifyItems: 'center', gap: 18, paddingTop: 20 }}>
+          <LogoMark size={34} />
+          {children}
         </div>
-        <div className="homeIndicator" />
       </div>
     </div>
   );

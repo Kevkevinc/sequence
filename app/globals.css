@@ -8,11 +8,13 @@
  * numbers drift apart.
  *
  * The one deliberate departure from the handoff is the device frame. The
- * handoff draws a 390x844 phone on a dark desk, which is what the app should
- * look like in a desktop browser. On an actual phone that frame would be a
- * second, smaller phone drawn inside the real one, so below 560px the frame
- * drops its radius, shadow, mock status bar and home indicator and fills the
- * viewport instead. Every screen inside is unchanged.
+ * handoff draws a 390x844 phone on a dark desk and calls that the app rather
+ * than a mock-up. It is a mock-up: a drawn bezel and a painted 9:41 clock are
+ * a picture of a phone, and on a real phone they are a second, smaller phone
+ * inside the first. So there is no frame. The app is one column that fills the
+ * height it is given, capped at a width the design's geometry was drawn for and
+ * centred, with a hairline down each side on wide screens so it reads as a pane
+ * rather than as content adrift in the dark. Every screen inside is unchanged.
  */
 
 /* ------------------------------------------------------------- tokens --- */
@@ -129,96 +131,36 @@ button {
   outline-offset: 2px;
 }
 
-/* ------------------------------------------------------- device frame --- */
+/* ----------------------------------------------------------- the app --- */
 
-.desk {
-  display: grid;
-  place-items: center;
-  width: 100%;
-  height: 100dvh;
-}
-
-.frame {
+/*
+ * One column, full height, capped and centred.
+ *
+ * The cap is not decoration: every measurement in the design (58px thumbnails,
+ * a 40px headline, two-column results) was drawn against a 390px phone, and a
+ * list row stretched across a 1600px monitor is not the same design at a larger
+ * size, it is a broken one. So the column stops at a width those numbers still
+ * hold at, and the desk gradient behind it does the rest.
+ */
+.app {
   position: relative;
   display: flex;
   flex-direction: column;
-  width: 390px;
-  height: 844px;
-  max-height: calc(100dvh - 32px);
+  width: 100%;
+  max-width: 520px;
+  height: 100dvh;
+  margin: 0 auto;
   overflow: hidden;
   background: var(--surface);
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  border-radius: 46px;
-  box-shadow: 0 50px 130px rgba(0, 0, 0, 0.75);
+  /* On a notched phone this is what keeps the first row clear of the camera. */
+  padding-top: env(safe-area-inset-top);
 }
 
-.statusBar {
-  display: flex;
-  flex-shrink: 0;
-  align-items: center;
-  justify-content: space-between;
-  height: 54px;
-  padding: 16px 32px 0;
-  font-size: 14px;
-  font-weight: 600;
-}
-
-.statusGlyphs {
-  display: flex;
-  gap: 6px;
-  align-items: center;
-}
-
-.homeIndicator {
-  display: grid;
-  flex-shrink: 0;
-  height: 22px;
-  place-items: center;
-}
-
-.homeIndicator::after {
-  width: 134px;
-  height: 5px;
-  content: '';
-  background: rgba(255, 255, 255, 0.3);
-  border-radius: 999px;
-}
-
-/*
- * On a phone the app *is* the phone: no drawn bezel, no mock status bar, and
- * the safe-area insets stand in for both.
- */
-@media (max-width: 560px) {
-  /*
-   * Block, not grid. A grid column sizes to its content, so a long line inside
-   * a full-width frame widened the column past the viewport and every screen
-   * scrolled sideways.
-   */
-  .desk {
-    display: block;
-    height: 100dvh;
-  }
-
-  .frame {
-    width: 100%;
-    height: 100dvh;
-    max-height: none;
-    padding-top: env(safe-area-inset-top);
-    border: none;
-    border-radius: 0;
-    box-shadow: none;
-  }
-
-  .statusBar {
-    display: none;
-  }
-
-  .homeIndicator {
-    height: max(env(safe-area-inset-bottom), 8px);
-  }
-
-  .homeIndicator::after {
-    display: none;
+/* Wide enough for the column to have edges worth drawing. */
+@media (min-width: 561px) {
+  .app {
+    border-right: 1px solid rgba(255, 255, 255, 0.06);
+    border-left: 1px solid rgba(255, 255, 255, 0.06);
   }
 }
 
@@ -226,7 +168,7 @@ button {
 .screen {
   flex: 1;
   min-height: 0;
-  padding: 0 20px 118px;
+  padding: 8px 20px 118px;
   overflow-x: hidden;
   overflow-y: auto;
   -webkit-overflow-scrolling: touch;
@@ -821,14 +763,9 @@ button {
   right: 0;
   bottom: 0;
   left: 0;
-  padding: 0 18px 28px;
+  /* The inset clears the iPhone home bar; 18px is the floor everywhere else. */
+  padding: 0 18px max(env(safe-area-inset-bottom), 18px);
   pointer-events: none;
-}
-
-@media (max-width: 560px) {
-  .nav {
-    padding-bottom: max(env(safe-area-inset-bottom), 18px);
-  }
 }
 
 .navBar {

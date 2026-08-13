@@ -3,7 +3,7 @@
 import { Suspense, useState } from 'react';
 import Link from 'next/link';
 import { useSearchParams } from 'next/navigation';
-import { PhoneFrame, Screen } from '@/components/PhoneFrame';
+import { AppFrame, Screen } from '@/components/AppFrame';
 import { JobRow } from '@/components/JobRow';
 import { useJobs } from '@/lib/useJobs';
 import { displayStatus, type DisplayStatus } from '@/lib/jobView';
@@ -27,7 +27,7 @@ function matches(filter: Filter, status: DisplayStatus) {
 export default function JobsPage() {
   return (
     // useSearchParams needs a Suspense boundary to keep the route static.
-    <Suspense fallback={<PhoneFrame><Screen>{null}</Screen></PhoneFrame>}>
+    <Suspense fallback={<AppFrame><Screen>{null}</Screen></AppFrame>}>
       <Jobs />
     </Suspense>
   );
@@ -45,7 +45,7 @@ function Jobs() {
   const shown = (jobs ?? []).filter((job) => matches(filter, displayStatus(job)));
 
   return (
-    <PhoneFrame>
+    <AppFrame>
       <Screen>
         <h1 className="screenTitle" style={{ padding: '10px 0 18px' }}>
           Your videos
@@ -101,6 +101,6 @@ function Jobs() {
           </div>
         )}
       </Screen>
-    </PhoneFrame>
+    </AppFrame>
   );
 }

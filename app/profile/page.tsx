@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { useClerk, useUser } from '@clerk/nextjs';
-import { PhoneFrame, Screen } from '@/components/PhoneFrame';
+import { AppFrame, Screen } from '@/components/AppFrame';
 import { CaptionLookPreview } from '@/components/CaptionLookPreview';
 import { resolveCaptionSettings } from '@/lib/render/captionSettings';
 import { captionFont } from '@/lib/render/fonts';
@@ -79,7 +79,7 @@ export default function ProfilePage() {
   const sizingLine = [height, weight].filter(Boolean).join(' · ') || null;
 
   return (
-    <PhoneFrame>
+    <AppFrame>
       <Screen>
         <header style={{ display: 'flex', alignItems: 'center', gap: 14, padding: '14px 0 26px' }}>
           <span className="avatar" style={{ width: 60, height: 60, fontSize: 21 }}>
@@ -207,6 +207,6 @@ export default function ProfilePage() {
           Sequence v{process.env.NEXT_PUBLIC_APP_VERSION}
         </p>
       </Screen>
-    </PhoneFrame>
+    </AppFrame>
   );
 }
