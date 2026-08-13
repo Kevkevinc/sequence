@@ -27,6 +27,22 @@ export const metadata: Metadata = {
     title: 'Sequence',
     statusBarStyle: 'black-translucent',
   },
+  other: {
+    /*
+     * `capable: true` above emits the standard `mobile-web-app-capable`, which
+     * is the modern spelling and the one Android reads. iOS does not read it.
+     * Apple's rule is that `apple-mobile-web-app-status-bar-style` is honoured
+     * *only* when `apple-mobile-web-app-capable` is present, so without this
+     * line black-translucent is silently ignored, the installed app falls back
+     * to an inset web view, and an iPhone shows a black band above and below
+     * the app with the home indicator floating at the bottom of the inset
+     * rather than the bottom of the screen.
+     *
+     * Written out by hand because Next stopped emitting the tag when Apple
+     * deprecated it, and Apple never made the replacement work.
+     */
+    'apple-mobile-web-app-capable': 'yes',
+  },
 };
 
 /**
