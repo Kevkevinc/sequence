@@ -96,9 +96,25 @@ body {
   height: 100%;
 }
 
+/*
+ * The root paints the surface colour, and it is the root that covers the whole
+ * screen on a notched phone: anything the page itself fails to cover shows this
+ * rather than the browser's own black.
+ */
+html {
+  background: var(--surface);
+}
+
 body {
+  /*
+   * Deliberately not `background-attachment: fixed`. On iOS a fixed attachment
+   * is measured against a viewport that changes size as the toolbars move, and
+   * it leaves the safe areas unpainted, which is exactly the black band this
+   * layout must not have.
+   */
   background: radial-gradient(90% 60% at 50% 0%, #1a1a1a, #0a0a0a 70%);
-  background-attachment: fixed;
+  /* Stops the rubber-band bounce from revealing anything behind the app. */
+  overscroll-behavior: none;
   color: var(--text);
   font-family: var(--font-inter), system-ui, -apple-system, sans-serif;
   font-size: 15px;
@@ -142,17 +158,25 @@ button {
  * size, it is a broken one. So the column stops at a width those numbers still
  * hold at, and the desk gradient behind it does the rest.
  */
+/*
+ * Pinned to the screen rather than sized in viewport units.
+ *
+ * `100dvh` is a measurement, and on an installed iPhone app it is a
+ * measurement of the wrong thing: it left the app an inset rectangle with the
+ * status bar strip above it and the home indicator strip below it, both black.
+ * `position: fixed` with `inset: 0` is not a measurement. It is the screen,
+ * safe areas included, and the padding below puts the content back inside them.
+ */
 .app {
-  position: relative;
+  position: fixed;
+  inset: 0;
   display: flex;
   flex-direction: column;
-  width: 100%;
   max-width: 520px;
-  height: 100dvh;
   margin: 0 auto;
   overflow: hidden;
   background: var(--surface);
-  /* On a notched phone this is what keeps the first row clear of the camera. */
+  /* Keeps the first row clear of the camera without giving up the pixels. */
   padding-top: env(safe-area-inset-top);
 }
 
@@ -164,11 +188,14 @@ button {
   }
 }
 
-/* The scrolling body of a screen. 118px of bottom padding clears the nav. */
+/*
+ * The scrolling body of a screen. 118px of bottom padding clears the nav, plus
+ * whatever the home indicator takes, since the nav sits above it.
+ */
 .screen {
   flex: 1;
   min-height: 0;
-  padding: 8px 20px 118px;
+  padding: 8px 20px calc(118px + env(safe-area-inset-bottom));
   overflow-x: hidden;
   overflow-y: auto;
   -webkit-overflow-scrolling: touch;
