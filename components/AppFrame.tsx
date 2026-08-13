@@ -6,21 +6,53 @@ import { usePathname } from 'next/navigation';
 import { IconHome, IconPlus, IconUser, IconVideos } from '@/components/icons';
 
 /**
- * Works out whether the safe-area insets still need paying for.
+ * Works out whether the status bar still needs paying for.
  *
- * There are two ways an installed iOS app can be handed the screen, and they
- * need opposite treatment. Either it gets the whole thing, in which case the
- * app must keep its own content out of the status bar and the home indicator by
- * padding by the reported insets. Or the system keeps those strips for itself
- * and hands over what is left, while *still* reporting the insets, in which
- * case padding by them again leaves a gap twice the size at each end. That is
- * the case this measures: if the window is meaningfully shorter than the
- * screen, the room has already been taken, so the padding is zeroed and the
- * layout below reads the same two variables either way.
+ * An installed iOS app is either handed the whole screen, in which case it has
+ * to keep its own content out from under the clock, or handed everything below
+ * the status bar, in which case the system has already done that and padding by
+ * the reported inset would leave a second, empty status bar's worth of space.
+ * Both happen, and the app cannot know which in advance, so it measures: a
+ * window shorter than the screen means the room has already been taken.
+ *
+ * Only the top is decided this way. The home indicator strip sits inside the
+ * window in both arrangements, so its inset is always paid.
  */
-function useSafeAreaInsets() {
+export function useSafeAreaInsets() {
   useEffect(() => {
     const root = document.documentElement;
+
+    /*
+     * Read as pixels off a probe element rather than passed through as an
+     * `env()` expression.
+     *
+     * Storing `env(safe-area-inset-top)` in a custom property and substituting
+     * it with `var()` looks equivalent and is not: Safari does not resolve it,
+     * the declaration is dropped, and the padding silently computes to zero.
+     * That is why content sat under the clock on a device that was reporting a
+     * 59px inset perfectly well. Measuring the probe and writing back a plain
+     * number sidesteps the substitution entirely.
+     */
+    function readInsets() {
+      const probe = document.createElement('div');
+      probe.style.cssText = [
+        'position:fixed',
+        'top:0',
+        'left:0',
+        'visibility:hidden',
+        'pointer-events:none',
+        'padding-top:env(safe-area-inset-top)',
+        'padding-bottom:env(safe-area-inset-bottom)',
+      ].join(';');
+      document.body.appendChild(probe);
+      const style = getComputedStyle(probe);
+      const insets = {
+        top: parseFloat(style.paddingTop) || 0,
+        bottom: parseFloat(style.paddingBottom) || 0,
+      };
+      probe.remove();
+      return insets;
+    }
 
     function apply() {
       const standalone =
@@ -30,16 +62,11 @@ function useSafeAreaInsets() {
       // Only trusted while installed. A browser tab is legitimately shorter
       // than the screen, by however much the toolbars happen to be taking.
       const reserved = window.screen.height - window.innerHeight;
-      const alreadyReserved = standalone && reserved > 20;
+      const systemTookTheStatusBar = standalone && reserved > 20;
+      const insets = readInsets();
 
-      root.style.setProperty(
-        '--safe-top',
-        alreadyReserved ? '0px' : 'env(safe-area-inset-top)'
-      );
-      root.style.setProperty(
-        '--safe-bottom',
-        alreadyReserved ? '0px' : 'env(safe-area-inset-bottom)'
-      );
+      root.style.setProperty('--safe-top', systemTookTheStatusBar ? '0px' : `${insets.top}px`);
+      root.style.setProperty('--safe-bottom', `${insets.bottom}px`);
     }
 
     apply();

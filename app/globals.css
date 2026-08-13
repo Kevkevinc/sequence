@@ -53,15 +53,15 @@
   /*
    * How much room to leave for the status bar and the home indicator.
    *
-   * These default to the insets the device reports, which is right whenever the
-   * app has been handed the whole screen. It is not always. An installed iOS
-   * app is sometimes given a viewport that *already* excludes both strips while
-   * still reporting them as insets, and padding by them again doubles the gap
-   * at each end. AppFrame measures which of the two is happening and rewrites
-   * these two values, so the layout below never has to care.
+   * Written by AppFrame as plain pixel values, because how much room is needed
+   * depends on which way the system laid the app out and that can only be
+   * measured. Note the values below are deliberately zero rather than
+   * `env(safe-area-inset-*)`: Safari refuses to resolve an env() that arrives
+   * through a custom property, so writing one here would not be a fallback, it
+   * would be a declaration that silently computes to nothing.
    */
-  --safe-top: env(safe-area-inset-top);
-  --safe-bottom: env(safe-area-inset-bottom);
+  --safe-top: 0px;
+  --safe-bottom: 0px;
 
   /*
    * The two exposed controls from the handoff's glass system. Changing these

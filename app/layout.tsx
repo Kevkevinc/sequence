@@ -25,7 +25,21 @@ export const metadata: Metadata = {
     // home screen, which is the whole point of shipping this as a PWA.
     capable: true,
     title: 'Sequence',
-    statusBarStyle: 'black-translucent',
+    /*
+     * `black`, not `black-translucent`, and this is not a cosmetic choice.
+     *
+     * Measured on an iPhone 14 Pro Max: under black-translucent iOS reported a
+     * 932px screen and gave the app an 873px window, positioned at the top. The
+     * missing 59px is the height of the status bar, and it ended up as dead
+     * space at the *bottom* of the screen that the app cannot draw into, while
+     * content ran underneath the clock at the top. Both symptoms, one cause.
+     *
+     * Under `black` the system takes the status bar strip and hands the app
+     * everything below it, down to the true bottom edge. The strip it draws is
+     * black and the app's surface is #0c0c0c, so nothing about the look is lost
+     * at the top, and the dead band at the bottom goes away.
+     */
+    statusBarStyle: 'black',
   },
   other: {
     /*

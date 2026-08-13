@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
+import { AppFrame } from '@/components/AppFrame';
 
 /**
  * What this phone actually reports.
@@ -49,6 +50,19 @@ export default function DebugInsets() {
         value: window.visualViewport ? `${Math.round(window.visualViewport.height)}px` : 'n/a',
       },
       { label: 'App box height', value: `${document.querySelector('.app')?.clientHeight ?? 0}px` },
+      // Where the window sits on the screen. This is what says whether the
+      // pixels the window is missing were taken off the top or off the bottom.
+      { label: 'Window top', value: `${window.screenY ?? 0}px` },
+      {
+        label: 'Applied top pad',
+        value: getComputedStyle(document.documentElement).getPropertyValue('--safe-top').trim() || '0px',
+      },
+      {
+        label: 'Applied bottom pad',
+        value:
+          getComputedStyle(document.documentElement).getPropertyValue('--safe-bottom').trim() ||
+          '0px',
+      },
       { label: 'Pixel ratio', value: String(window.devicePixelRatio) },
     ]);
 
@@ -64,8 +78,10 @@ export default function DebugInsets() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Wrapped in the real shell, not a bare `.app` div: this page has to be laid
+  // out by the same code as every other screen, or it cannot report on it.
   return (
-    <div className="app">
+    <AppFrame showNav={false}>
       <div className="screen" data-flush="true">
         <h1 className="detailTitle" style={{ padding: '10px 0 16px' }}>
           Device numbers
@@ -89,6 +105,6 @@ export default function DebugInsets() {
           Back to Sequence
         </Link>
       </div>
-    </div>
+    </AppFrame>
   );
 }
