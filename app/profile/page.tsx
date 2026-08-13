@@ -203,8 +203,15 @@ export default function ProfilePage() {
           Sign out
         </button>
 
+        {/*
+          An installed app has no address bar, so a page that is only reachable
+          by typing a URL is not reachable at all. This is the way in.
+        */}
         <p className="footnote" style={{ marginTop: 14, textAlign: 'center' }}>
-          Sequence v{process.env.NEXT_PUBLIC_APP_VERSION}
+          Sequence v{process.env.NEXT_PUBLIC_APP_VERSION} ·{' '}
+          <Link href="/debug-insets" style={{ color: 'var(--text-meta)' }}>
+            Device info
+          </Link>
         </p>
       </Screen>
     </AppFrame>

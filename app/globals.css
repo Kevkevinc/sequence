@@ -51,6 +51,19 @@
   --hairline: rgba(255, 255, 255, 0.1);
 
   /*
+   * How much room to leave for the status bar and the home indicator.
+   *
+   * These default to the insets the device reports, which is right whenever the
+   * app has been handed the whole screen. It is not always. An installed iOS
+   * app is sometimes given a viewport that *already* excludes both strips while
+   * still reporting them as insets, and padding by them again doubles the gap
+   * at each end. AppFrame measures which of the two is happening and rewrites
+   * these two values, so the layout below never has to care.
+   */
+  --safe-top: env(safe-area-inset-top);
+  --safe-bottom: env(safe-area-inset-bottom);
+
+  /*
    * The two exposed controls from the handoff's glass system. Changing these
    * two numbers re-skins every surface in the app without touching layout.
    */
@@ -177,7 +190,7 @@ button {
   overflow: hidden;
   background: var(--surface);
   /* Keeps the first row clear of the camera without giving up the pixels. */
-  padding-top: env(safe-area-inset-top);
+  padding-top: var(--safe-top);
 }
 
 /* Wide enough for the column to have edges worth drawing. */
@@ -195,7 +208,7 @@ button {
 .screen {
   flex: 1;
   min-height: 0;
-  padding: 8px 20px calc(118px + env(safe-area-inset-bottom));
+  padding: 8px 20px calc(118px + var(--safe-bottom));
   overflow-x: hidden;
   overflow-y: auto;
   -webkit-overflow-scrolling: touch;
@@ -791,7 +804,7 @@ button {
   bottom: 0;
   left: 0;
   /* The inset clears the iPhone home bar; 18px is the floor everywhere else. */
-  padding: 0 18px max(env(safe-area-inset-bottom), 18px);
+  padding: 0 18px max(var(--safe-bottom), 18px);
   pointer-events: none;
 }
 
@@ -1033,7 +1046,7 @@ button {
 
 @media (max-width: 560px) {
   .flowFooter {
-    padding-bottom: max(env(safe-area-inset-bottom), 14px);
+    padding-bottom: max(var(--safe-bottom), 14px);
   }
 }
 

@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
+import Link from 'next/link';
 
 /**
  * What this phone actually reports.
@@ -16,7 +17,7 @@ type Row = { label: string; value: string };
 export default function DebugInsets() {
   const [rows, setRows] = useState<Row[]>([]);
 
-  useEffect(() => {
+  function measure() {
     // A probe element is the only way to read the env() values: they are usable
     // in CSS but are not exposed to script directly.
     const probe = document.createElement('div');
@@ -52,6 +53,15 @@ export default function DebugInsets() {
     ]);
 
     probe.remove();
+  }
+
+  useEffect(() => {
+    // Measured on the next frame rather than during the effect, so the numbers
+    // are read after the browser has settled the layout being asked about.
+    const frame = requestAnimationFrame(measure);
+    return () => cancelAnimationFrame(frame);
+    // `measure` reads only browser globals and setRows, both stable.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   return (
@@ -73,6 +83,11 @@ export default function DebugInsets() {
         <p className="footnote" style={{ marginTop: 16 }}>
           Screenshot this page from inside the installed app and send it over.
         </p>
+
+        {/* There is no browser back button in an installed app. */}
+        <Link href="/profile" className="btn btnOutline btnFull" style={{ marginTop: 20 }}>
+          Back to Sequence
+        </Link>
       </div>
     </div>
   );

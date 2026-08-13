@@ -1,8 +1,57 @@
 'use client';
 
+import { useEffect } from 'react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { IconHome, IconPlus, IconUser, IconVideos } from '@/components/icons';
+
+/**
+ * Works out whether the safe-area insets still need paying for.
+ *
+ * There are two ways an installed iOS app can be handed the screen, and they
+ * need opposite treatment. Either it gets the whole thing, in which case the
+ * app must keep its own content out of the status bar and the home indicator by
+ * padding by the reported insets. Or the system keeps those strips for itself
+ * and hands over what is left, while *still* reporting the insets, in which
+ * case padding by them again leaves a gap twice the size at each end. That is
+ * the case this measures: if the window is meaningfully shorter than the
+ * screen, the room has already been taken, so the padding is zeroed and the
+ * layout below reads the same two variables either way.
+ */
+function useSafeAreaInsets() {
+  useEffect(() => {
+    const root = document.documentElement;
+
+    function apply() {
+      const standalone =
+        window.matchMedia('(display-mode: standalone)').matches ||
+        (window.navigator as unknown as { standalone?: boolean }).standalone === true;
+
+      // Only trusted while installed. A browser tab is legitimately shorter
+      // than the screen, by however much the toolbars happen to be taking.
+      const reserved = window.screen.height - window.innerHeight;
+      const alreadyReserved = standalone && reserved > 20;
+
+      root.style.setProperty(
+        '--safe-top',
+        alreadyReserved ? '0px' : 'env(safe-area-inset-top)'
+      );
+      root.style.setProperty(
+        '--safe-bottom',
+        alreadyReserved ? '0px' : 'env(safe-area-inset-bottom)'
+      );
+    }
+
+    apply();
+    // Rotation and the iOS toolbars both change the answer.
+    window.addEventListener('resize', apply);
+    window.addEventListener('orientationchange', apply);
+    return () => {
+      window.removeEventListener('resize', apply);
+      window.removeEventListener('orientationchange', apply);
+    };
+  }, []);
+}
 
 /**
  * The app shell.
@@ -24,6 +73,8 @@ export function AppFrame({
   children: React.ReactNode;
   showNav?: boolean;
 }) {
+  useSafeAreaInsets();
+
   return (
     <div className="app">
       {children}
