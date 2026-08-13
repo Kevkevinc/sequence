@@ -13,7 +13,7 @@ import type { MetadataRoute } from 'next';
  */
 export default function manifest(): MetadataRoute.Manifest {
   return {
-    name: 'Sequence — UGC AI Editor',
+    name: 'Sequence',
     // Shown under the home-screen icon, where iOS truncates at ~12 characters.
     short_name: 'Sequence',
     description:
@@ -21,8 +21,8 @@ export default function manifest(): MetadataRoute.Manifest {
     start_url: '/',
     display: 'standalone',
     orientation: 'portrait',
-    background_color: '#0a0b10',
-    theme_color: '#0a0b10',
+    background_color: '#0c0c0c',
+    theme_color: '#0c0c0c',
     categories: ['productivity', 'photo', 'video'],
     icons: [
       { src: '/icons/icon-192.png', sizes: '192x192', type: 'image/png' },

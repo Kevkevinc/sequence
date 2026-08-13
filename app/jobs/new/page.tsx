@@ -1,15 +1,22 @@
 'use client';
 
-import { useEffect, useState } from 'react';
-import { CaptionPreview, type CaptionBlock } from '@/components/CaptionPreview';
-import { resolveCaptionSettings, type CaptionSettings } from '@/lib/render/captionSettings';
-import { CAPTION_FONTS } from '@/lib/render/fonts';
+import { useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { AppShell } from '@/components/AppShell';
-import { VideoTile } from '@/components/ui';
-import { IconCheck, IconImage, IconUpload } from '@/components/icons';
+import { PhoneFrame, Screen } from '@/components/PhoneFrame';
+import { CaptionEditor } from '@/components/CaptionEditor';
+import { Thumb } from '@/components/Thumb';
+import {
+  IconCheck,
+  IconChevronLeft,
+  IconClose,
+  IconUpload,
+  IconWarning,
+} from '@/components/icons';
+import { gradeFor } from '@/lib/jobView';
+import { resolveCaptionSettings, type CaptionSettings } from '@/lib/render/captionSettings';
 import {
   MAX_LENGTH_SECONDS,
+  MAX_VARIATION_COUNT,
   MIN_CLIP_SECONDS,
   MIN_LENGTH_SECONDS,
   checkClipDurations,
@@ -18,52 +25,38 @@ import {
 } from '@/lib/validation/job';
 
 /**
- * The hook shown in the preview.
+ * The four-step flow that creates a job.
  *
- * A representative line rather than the creator's real hook, which does not
- * exist yet — the AI writes it during planning. Chosen to be long enough to
- * wrap onto a second line at the default size, so the preview shows how a real
- * hook behaves rather than flattering the layout with one short word.
+ * It owns the whole screen: the nav is hidden, and the only ways out are the
+ * back chevron, Cancel, and the footer action. Every footer button is named
+ * after its outcome ("Add clips", "Make 10 videos") rather than Next, because
+ * on a phone the button is the only thing telling you what happens if you tap.
+ *
+ * Clips upload as soon as they are picked rather than at the end. A phone clip
+ * is 100MB+ and a five-clip job is minutes of transfer; doing it while the
+ * creator is still choosing pacing is time they were spending anyway, and it
+ * means the last screen's button starts the render instead of starting an
+ * upload.
  */
-const PREVIEW_HOOK = 'POV: you finally found the perfect fit';
 
-/** One labelled slider in the caption controls. */
-function CaptionSlider({
-  label,
-  value,
-  min,
-  max,
-  step,
-  onChange,
-  format,
-}: {
-  label: string;
-  value: number;
-  min: number;
-  max: number;
-  step: number;
-  onChange: (value: number) => void;
-  format?: (value: number) => string;
-}) {
-  return (
-    <div style={{ marginTop: 12 }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13 }}>
-        <span className="label" style={{ margin: 0 }}>{label}</span>
-        <span style={{ opacity: 0.7 }}>{format ? format(value) : Math.round(value)}</span>
-      </div>
-      <input
-        type="range"
-        className="range"
-        min={min}
-        max={max}
-        step={step}
-        value={value}
-        onChange={(e) => onChange(Number(e.target.value))}
-        style={{ ['--fill' as string]: `${((value - min) / (max - min)) * 100}%`, width: '100%' }}
-      />
-    </div>
-  );
-}
+const SIZES = ['XS', 'S', 'M', 'L', 'XL'];
+const PACINGS = ['slow', 'medium', 'fast'] as const;
+
+/** What each pacing means in seconds, mirroring the director's presets. */
+const PACING_HELP: Record<(typeof PACINGS)[number], string> = {
+  slow: 'Each cut holds 4 to 7 seconds.',
+  medium: 'Each cut holds 1.5 to 4 seconds.',
+  fast: 'Each cut holds 1 to 2 seconds.',
+};
+
+/**
+ * The hook shown on the caption stage.
+ *
+ * Representative, not the creator's real hook, which does not exist yet: the AI
+ * writes one per variation during planning. Long enough to show how a real line
+ * behaves at the default size.
+ */
+const PREVIEW_HOOK = 'THIS HOODIE ATE';
 
 type Style = {
   id: string;
@@ -71,40 +64,25 @@ type Style = {
   description: string;
   usesInspirationOverlay: boolean;
   usesFitInspoIntro: boolean;
-  /** The style's own caption look, previewed and applied when this style is picked. */
   captionSettings: Partial<CaptionSettings> | null;
 };
 
-/**
- * One Fit Inspo upload.
- *
- * Model shots only for now, per creator direction, so there is nothing to
- * classify or confirm — every upload is a person whose background gets removed.
- */
-type FitPic = {
+type Upload = {
+  id: string;
   file: File;
-  previewUrl: string;
+  sent: number;
+  status: 'uploading' | 'done' | 'failed';
+  storageKey?: string;
 };
 
+const STEP_TITLES = [
+  'What are you making?',
+  'Add your clips',
+  'How it gets cut',
+  'On-screen text',
+];
 
-const PACINGS = ['slow', 'medium', 'fast'] as const;
-
-/**
- * Cut lengths per preset, mirroring PACING_PRESET_SECONDS in the director.
- * Shown because "medium" means nothing on its own — the creator is choosing how
- * long each shot holds, and that is the number they actually care about.
- */
-const PACING_HELP: Record<(typeof PACINGS)[number], string> = {
-  slow: 'Each cut holds 4–7 seconds.',
-  medium: 'Each cut holds 1.5–4 seconds.',
-  fast: 'Each cut holds 1–2 seconds.',
-};
-
-/**
- * The playing length of a video File, read via a throwaway <video> element.
- * Resolves 0 on anything the browser can't decode, so a weird file never blocks
- * the footage hint.
- */
+/** The playing length of a video File, read via a throwaway <video> element. */
 function readVideoDuration(file: File): Promise<number> {
   return new Promise((resolve) => {
     const url = URL.createObjectURL(file);
@@ -122,925 +100,845 @@ function readVideoDuration(file: File): Promise<number> {
   });
 }
 
+/**
+ * PUTs one file to R2, reporting bytes as they go.
+ *
+ * XMLHttpRequest rather than fetch: fetch cannot report *upload* progress at
+ * all, which is why this screen used to sit silent for minutes on a phone while
+ * 100MB+ of 4K footage went up with no sign it was working.
+ */
+function putWithProgress(url: string, file: File, onProgress: (sent: number) => void) {
+  return new Promise<void>((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('PUT', url);
+    xhr.setRequestHeader('Content-Type', file.type);
+    xhr.upload.onprogress = (event) => {
+      if (event.lengthComputable) onProgress(event.loaded);
+    };
+    xhr.onload = () =>
+      xhr.status >= 200 && xhr.status < 300
+        ? resolve()
+        : reject(new Error(`Upload of ${file.name} failed with status ${xhr.status}.`));
+    xhr.onerror = () => reject(new Error(`Upload of ${file.name} failed.`));
+    xhr.onabort = () => reject(new Error(`Upload of ${file.name} was cancelled.`));
+    xhr.send(file);
+  });
+}
+
+async function uploadOne(file: File, onProgress: (sent: number) => void) {
+  const presign = await fetch('/api/uploads/presign', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ filename: file.name, contentType: file.type }),
+  });
+  if (!presign.ok) throw new Error(`Could not get an upload slot for ${file.name}.`);
+  const { url, storageKey } = await presign.json();
+  await putWithProgress(url, file, onProgress);
+  return storageKey as string;
+}
+
 export default function NewJobPage() {
   const router = useRouter();
-  const [mode, setMode] = useState<'custom' | 'style'>('custom');
-  /*
-   * Which editor this job goes through.
-   *
-   * `cuts` re-sequences silent footage into several variations for the creator
-   * to voice over; `talking` tightens one take of them speaking, keeps the
-   * audio and burns captions. They share the upload and almost nothing else,
-   * which is why the form hides most of its controls in talking mode rather
-   * than offering settings that do not apply.
-   */
-  const [jobKind, setJobKind] = useState<'cuts' | 'talking'>('cuts');
-  const isTalking = jobKind === 'talking';
-  const [styles, setStyles] = useState<Style[]>([]);
-  const [selectedStyleId, setSelectedStyleId] = useState<string | null>(null);
-  const [inspirationFile, setInspirationFile] = useState<File | null>(null);
-  const [fitPics, setFitPics] = useState<FitPic[]>([]);
+  const [step, setStep] = useState(1);
 
-  const [files, setFiles] = useState<File[]>([]);
-  /** Total seconds of raw footage selected, read from the files in the browser. */
-  const [footageSeconds, setFootageSeconds] = useState(0);
-  /** Names of clips dropped for being too short to cut from. */
-  const [skippedShortClips, setSkippedShortClips] = useState<string[]>([]);
   const [productName, setProductName] = useState('');
-  const [sizingOn, setSizingOn] = useState(false);
-  const [sizeWorn, setSizeWorn] = useState('');
-  const [lengthSeconds, setLengthSeconds] = useState<number>(30);
-  const [pacing, setPacing] = useState<'slow' | 'medium' | 'fast'>('medium');
-  const [variationCount, setVariationCount] = useState(5);
-  const [errors, setErrors] = useState<{ field: string; message: string }[]>([]);
-  const [submitting, setSubmitting] = useState(false);
-  /** Drives the upload progress bar: which stage, and how far through the bytes. */
-  const [phase, setPhase] = useState<'idle' | 'uploading' | 'creating'>('idle');
-  const [uploadedBytes, setUploadedBytes] = useState(0);
-  const [totalUploadBytes, setTotalUploadBytes] = useState(0);
+  const [kind, setKind] = useState<'cuts' | 'talking'>('cuts');
+  const isTalking = kind === 'talking';
 
-  // The preview rail shows the sizing overlay exactly as the renderer will
-  // build it, which means it needs the creator's stored measurements.
+  const [uploads, setUploads] = useState<Upload[]>([]);
+  const [skipped, setSkipped] = useState(0);
+  const [footageSeconds, setFootageSeconds] = useState(0);
+  const [uploadStartedAt, setUploadStartedAt] = useState<number | null>(null);
+  const [now, setNow] = useState<number | null>(null);
+
+  const [mode, setMode] = useState<'custom' | 'style'>('custom');
+  const [pacing, setPacing] = useState<(typeof PACINGS)[number]>('medium');
+  const [styles, setStyles] = useState<Style[]>([]);
+  const [styleId, setStyleId] = useState<string | null>(null);
+  const [inspirationFile, setInspirationFile] = useState<File | null>(null);
+  const [fitPics, setFitPics] = useState<File[]>([]);
+
+  const [lengthSeconds, setLengthSeconds] = useState(30);
+  const [variations, setVariations] = useState(10);
+  const [sizingOn, setSizingOn] = useState(false);
+  const [sizeWorn, setSizeWorn] = useState('M');
+
   const [profile, setProfile] = useState<{ height?: string; weight?: string }>({});
-  /**
-   * The caption look for this job.
-   *
-   * Seeded from the style (Style mode) or the creator's saved look (Custom
-   * mode) whenever that source changes, unless the creator has already tweaked
-   * something — `captionsTouched` is what stops switching style from silently
-   * discarding their edits.
-   */
-  const [tweakedCaptions, setTweakedCaptions] = useState<CaptionSettings | null>(null);
   const [savedCaptions, setSavedCaptions] = useState<unknown>(null);
-  const [savingCaptions, setSavingCaptions] = useState(false);
-  const [captionsSavedAt, setCaptionsSavedAt] = useState<number | null>(null);
-  const [selectedBlock, setSelectedBlock] = useState<CaptionBlock>('hook');
+  const [tweaked, setTweaked] = useState<CaptionSettings | null>(null);
+  const [hookText, setHookText] = useState(PREVIEW_HOOK);
+
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     fetch('/api/styles')
       .then((res) => (res.ok ? res.json() : []))
-      .then((data: Style[]) => setStyles(data))
+      .then((data: Style[]) => setStyles(Array.isArray(data) ? data : []))
       .catch(() => setStyles([]));
 
     fetch('/api/profile')
       .then((res) => (res.ok ? res.json() : null))
       .then((data) => {
-        if (data) {
-          setProfile({ height: data.height ?? '', weight: data.weight ?? '' });
-          setSavedCaptions(data.captionSettings ?? null);
-        }
+        if (!data) return;
+        setProfile({ height: data.height ?? '', weight: data.weight ?? '' });
+        setSavedCaptions(data.captionSettings ?? null);
       })
       .catch(() => {});
   }, []);
 
-  // Built the same way the director builds the real overlay — height, weight,
-  // then size worn — so the preview shows a block of the right shape and length.
-  const previewSizingText =
-    [profile.height, profile.weight, sizeWorn ? `Size ${sizeWorn}` : '']
-      .filter(Boolean)
-      .join(', ') || 'Size M';
+  // Keeps the transfer rate honest while bytes are moving; the upload callbacks
+  // themselves only fire on progress, which stalls the clock when one does.
+  useEffect(() => {
+    if (!uploads.some((upload) => upload.status === 'uploading')) return;
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [uploads]);
 
-  const selectedStyle = styles.find((s) => s.id === selectedStyleId) ?? null;
+  const selectedStyle = styles.find((style) => style.id === styleId) ?? null;
 
   /*
-   * Mirrors the renderer's layering, so what is drawn here is what will be
-   * burned in: style look in Style mode, personal look in Custom mode.
-   *
-   * Derived during render rather than copied into state by an effect. The
-   * effect version had to re-seed whenever the inherited look changed, which
-   * meant either stamping on the creator's edits or serialising an object into
-   * a dependency array to spot the change. Deriving makes "switching style
-   * updates the preview, unless you have taken over" fall out for free.
+   * Mirrors the renderer's layering: the style's look in Style mode, the
+   * creator's own in Custom mode, with anything they changed on top. Derived
+   * during render rather than copied into state, so switching style updates the
+   * stage unless the creator has already taken over.
    */
-  const inheritedCaptions = mode === 'style' ? selectedStyle?.captionSettings : savedCaptions;
-  const baseCaptions = resolveCaptionSettings(inheritedCaptions);
-  const captions = tweakedCaptions ?? baseCaptions;
-  const captionsTouched = tweakedCaptions !== null;
+  const inherited = mode === 'style' ? selectedStyle?.captionSettings : savedCaptions;
+  const captions = tweaked ?? resolveCaptionSettings(inherited);
 
-  /** Applies one caption change, taking over from the inherited look. */
-  function tweakCaptions(patch: Partial<CaptionSettings>) {
-    setTweakedCaptions((current) => ({ ...(current ?? baseCaptions), ...patch }));
-  }
-  const errorFor = (field: string) => errors.find((e) => e.field === field)?.message;
+  const sizingText = sizingOn
+    ? [profile.height, profile.weight, sizeWorn ? `wears ${sizeWorn}` : '']
+        .filter(Boolean)
+        .join(' · ') || null
+    : null;
 
-  /** Adds Fit Inspo images, capped at what the intro can show legibly. */
-  function addFitPics(files: File[]) {
-    setFitPics((current) =>
-      [...current, ...files.map((file) => ({ file, previewUrl: URL.createObjectURL(file) }))].slice(0, 4)
-    );
-  }
+  const done = uploads.filter((upload) => upload.status === 'done');
+  const failed = uploads.filter((upload) => upload.status === 'failed');
+  const uploading = uploads.filter((upload) => upload.status === 'uploading');
+  const totalBytes = uploads.reduce((sum, upload) => sum + upload.file.size, 0);
+  const sentBytes = uploads.reduce((sum, upload) => sum + upload.sent, 0);
+  const elapsed = uploadStartedAt && now ? (now - uploadStartedAt) / 1000 : 0;
+  const rate = elapsed > 1 ? sentBytes / elapsed : 0;
+
+  const neededSeconds = recommendedFootageSeconds(lengthSeconds, variations);
+  const supported = maxVariationsForFootage(footageSeconds, lengthSeconds);
+  const footageOk = footageSeconds === 0 || neededSeconds <= footageSeconds;
 
   /**
-   * Sets the clips and measures their combined duration in the browser, so the
-   * "enough footage?" hint is instant and no upload is wasted on a job that
-   * cannot make its variations.
-   */
-  function selectClips(selected: File[]) {
-    Promise.all(selected.map(readVideoDuration)).then((durations) => {
-      /*
-       * Clips too short to cut from are dropped here, before they upload.
-       *
-       * A clip barely longer than one cut offers exactly one legal cut, so
-       * every variation using it shows identical frames with nowhere to move
-       * them. Every editing failure on record came from an upload that was
-       * mostly clips like this, and each one cost three model calls and four
-       * minutes before saying so. Dropping them at selection is the difference
-       * between a job that cannot succeed and one that is never created.
-       */
-      const { tooShortIndexes } = checkClipDurations(durations);
-      const keep = selected.filter((_, index) => !tooShortIndexes.includes(index));
-      const keptDurations = durations.filter((_, index) => !tooShortIndexes.includes(index));
-
-      setSkippedShortClips(tooShortIndexes.map((index) => selected[index].name));
-      setFiles(keep);
-      setFootageSeconds(keptDurations.reduce((sum, d) => sum + d, 0));
-    });
-  }
-
-
-
-  const recommendedSeconds = recommendedFootageSeconds(lengthSeconds, variationCount);
-  const footageShort =
-    !isTalking && files.length > 0 && footageSeconds > 0 && footageSeconds < recommendedSeconds;
-  /*
-   * How many variations this upload can actually carry.
+   * Takes the picked clips, drops the ones too short to cut from, and starts
+   * uploading the rest two at a time.
    *
-   * The old hint only said "add more footage", which is easy to read past — a
-   * creator asked for ten 30s videos from 40s of footage, waited four minutes,
-   * and got a Zod rule name back. Naming the number their footage supports
-   * turns the warning into a decision they can make in one tap.
+   * Clips barely longer than one cut offer exactly one legal cut, so every
+   * variation using them shows identical frames. Every editing failure on
+   * record came from an upload that was mostly clips like this, and each one
+   * cost three model calls and four minutes before saying so. Dropping them
+   * here is the difference between a job that cannot succeed and one that is
+   * never created.
    */
-  const supportedVariations = maxVariationsForFootage(footageSeconds, lengthSeconds);
+  async function addClips(picked: File[]) {
+    if (picked.length === 0) return;
+    const durations = await Promise.all(picked.map(readVideoDuration));
+    const { tooShortIndexes } = checkClipDurations(durations);
 
-  const uploadPercent =
-    totalUploadBytes > 0 ? Math.min(100, Math.round((uploadedBytes / totalUploadBytes) * 100)) : 0;
-  const formatMb = (bytes: number) => Math.round(bytes / 1e6);
+    const keep = picked.filter((_, index) => !tooShortIndexes.includes(index));
+    const keptSeconds = durations
+      .filter((_, index) => !tooShortIndexes.includes(index))
+      .reduce((sum, seconds) => sum + seconds, 0);
 
-  /**
-   * PUTs one file to R2, reporting bytes as they go.
-   *
-   * XMLHttpRequest rather than fetch: fetch cannot report *upload* progress at
-   * all, which is why this screen used to sit silent for minutes on a phone
-   * while 100MB+ of 4K footage went up with no sign it was working.
-   */
-  function putWithProgress(
-    url: string,
-    file: File,
-    onProgress: (bytesSent: number) => void
-  ): Promise<void> {
-    return new Promise((resolve, reject) => {
-      const xhr = new XMLHttpRequest();
-      xhr.open('PUT', url);
-      xhr.setRequestHeader('Content-Type', file.type);
-      xhr.upload.onprogress = (event) => {
-        if (event.lengthComputable) onProgress(event.loaded);
-      };
-      xhr.onload = () =>
-        xhr.status >= 200 && xhr.status < 300
-          ? resolve()
-          : reject(new Error(`Upload of "${file.name}" failed (${xhr.status}).`));
-      xhr.onerror = () => reject(new Error(`Upload of "${file.name}" failed. Check your connection.`));
-      xhr.onabort = () => reject(new Error(`Upload of "${file.name}" was cancelled.`));
-      xhr.send(file);
-    });
-  }
+    setSkipped((current) => current + tooShortIndexes.length);
+    setFootageSeconds((current) => current + keptSeconds);
+    if (keep.length === 0) return;
 
-  async function uploadFile(
-    file: File,
-    onProgress: (bytesSent: number) => void = () => {}
-  ): Promise<{ storageKey: string; originalFilename: string }> {
-    const presignRes = await fetch('/api/uploads/presign', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ filename: file.name, contentType: file.type }),
-    });
-    if (!presignRes.ok) {
-      throw new Error(`Failed to get an upload URL for "${file.name}".`);
-    }
-    const { url, storageKey } = await presignRes.json();
+    const added: Upload[] = keep.map((file, index) => ({
+      id: `${Date.now()}-${index}-${file.name}`,
+      file,
+      sent: 0,
+      status: 'uploading',
+    }));
+    setUploads((current) => [...current, ...added]);
+    setUploadStartedAt((current) => current ?? Date.now());
 
-    await putWithProgress(url, file, onProgress);
-
-    return { storageKey, originalFilename: file.name };
-  }
-
-  /**
-   * Uploads with a ceiling on how many are in flight.
-   *
-   * Was strictly sequential, so three 130MB clips went up one after another on
-   * a phone connection. Two at a time keeps the pipe busy while the request
-   * bodies stay small enough not to stall a mobile uplink.
-   */
-  async function uploadAll(
-    toUpload: File[],
-    onProgress: (bytesSentPerFile: number[]) => void
-  ): Promise<{ storageKey: string; originalFilename: string }[]> {
-    const sent = new Array(toUpload.length).fill(0);
-    const results = new Array<{ storageKey: string; originalFilename: string }>(toUpload.length);
+    // Two at a time: strictly sequential left a phone uploading 130MB clips one
+    // after another, and more than two stalls a mobile uplink.
     let next = 0;
-
-    const workers = Array.from({ length: Math.min(2, toUpload.length) }, async () => {
-      for (let index = next++; index < toUpload.length; index = next++) {
-        results[index] = await uploadFile(toUpload[index], (bytes) => {
-          sent[index] = bytes;
-          onProgress([...sent]);
-        });
-        sent[index] = toUpload[index].size;
-        onProgress([...sent]);
+    const workers = Array.from({ length: Math.min(2, added.length) }, async () => {
+      for (let index = next++; index < added.length; index = next++) {
+        const upload = added[index];
+        try {
+          const storageKey = await uploadOne(upload.file, (sent) =>
+            setUploads((current) =>
+              current.map((row) => (row.id === upload.id ? { ...row, sent } : row))
+            )
+          );
+          setUploads((current) =>
+            current.map((row) =>
+              row.id === upload.id
+                ? { ...row, status: 'done', storageKey, sent: row.file.size }
+                : row
+            )
+          );
+        } catch {
+          setUploads((current) =>
+            current.map((row) => (row.id === upload.id ? { ...row, status: 'failed' } : row))
+          );
+        }
       }
     });
-
     await Promise.all(workers);
-    return results;
   }
 
-  async function handleSubmit() {
-    setSubmitting(true);
-    setErrors([]);
+  function cancel() {
+    router.push('/');
+  }
 
-    // Inspiration photos are tiny next to video; counting them would make the
-    // bar jump. They upload after, under the same "uploading" state.
-    const totalBytes = files.reduce((sum, file) => sum + file.size, 0);
-    setUploadedBytes(0);
-    setTotalUploadBytes(totalBytes);
-    setPhase('uploading');
+  function back() {
+    if (step === 1) {
+      cancel();
+      return;
+    }
+    setStep((current) => current - 1);
+  }
+
+  async function submit() {
+    setSubmitting(true);
+    setError(null);
 
     try {
-      const clips = await uploadAll(files, (perFile) =>
-        setUploadedBytes(perFile.reduce((a, b) => a + b, 0))
-      );
-
-      // Fit Inspo images ride the same presigned-upload path as the clips.
+      // Style extras are images, tiny next to video, so they ride the same
+      // presigned path at the end rather than blocking step 2.
       const inspirationImages: { storageKey: string; kind: 'person' }[] = [];
       if (mode === 'style' && selectedStyle?.usesFitInspoIntro) {
         for (const pic of fitPics) {
-          const uploaded = await uploadFile(pic.file);
-          inspirationImages.push({ storageKey: uploaded.storageKey, kind: 'person' });
+          inspirationImages.push({ storageKey: await uploadOne(pic, () => {}), kind: 'person' });
         }
       }
 
       let inspirationImage: { storageKey: string } | undefined;
       if (mode === 'style' && selectedStyle?.usesInspirationOverlay && inspirationFile) {
-        const uploaded = await uploadFile(inspirationFile);
-        inspirationImage = { storageKey: uploaded.storageKey };
+        inspirationImage = { storageKey: await uploadOne(inspirationFile, () => {}) };
       }
-
-      setPhase('creating');
 
       const res = await fetch('/api/jobs', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           productName,
+          kind,
           sizingOverlayEnabled: sizingOn,
           sizeWorn: sizingOn ? sizeWorn : undefined,
           lengthSeconds,
-          pacing: mode === 'custom' ? pacing : undefined,
-          styleId: mode === 'style' ? selectedStyleId : undefined,
-          variationCount: isTalking ? 1 : variationCount,
+          // Talking mode has no style and no pacing choice of its own, but the
+          // API needs exactly one of the two, so it goes through as Custom.
+          pacing: isTalking || mode === 'custom' ? pacing : undefined,
+          styleId: !isTalking && mode === 'style' ? styleId : undefined,
+          variationCount: isTalking ? 1 : variations,
           // Only sent when the creator actually changed something, so an
           // untouched job keeps inheriting from its style or profile later
           // rather than freezing today's defaults into the row.
-          captionSettings: captionsTouched ? captions : undefined,
-          kind: jobKind,
-          clips,
+          captionSettings: tweaked ?? undefined,
+          clips: done.map((upload) => ({
+            storageKey: upload.storageKey!,
+            originalFilename: upload.file.name,
+          })),
           inspirationImage,
           inspirationImages,
         }),
       });
 
       if (!res.ok) {
-        const body = await res.json();
-        setErrors(body.errors ?? [{ field: 'form', message: 'Something went wrong.' }]);
+        const body = await res.json().catch(() => null);
+        setError(
+          body?.errors?.[0]?.message ??
+            'That could not be started. Check your settings and try again.'
+        );
         setSubmitting(false);
-        setPhase('idle');
         return;
       }
 
       const job = await res.json();
       router.push(`/jobs/${job.id}`);
     } catch (err) {
-      setErrors([
-        { field: 'form', message: err instanceof Error ? err.message : 'Something went wrong.' },
-      ]);
+      setError(err instanceof Error ? err.message : 'Something went wrong.');
       setSubmitting(false);
-      setPhase('idle');
     }
   }
 
+  /* -------------------------------------------------- footer actions --- */
+
+  const canContinue =
+    step === 1
+      ? productName.trim().length > 0
+      : step === 2
+        ? done.length + uploading.length > 0
+        : step === 3
+          ? !(!isTalking && mode === 'style' && !styleId)
+          : done.length > 0 && uploading.length === 0;
+
+  const footerLabel =
+    step === 1
+      ? 'Add clips'
+      : step === 2
+        ? 'Choose how it cuts'
+        : step === 3
+          ? 'Set on-screen text'
+          : submitting
+            ? 'Starting'
+            : isTalking
+              ? 'Make my video'
+              : `Make ${variations} video${variations === 1 ? '' : 's'}`;
+
   return (
-    <AppShell
-      title="New video"
-      subtitle="Upload footage and let the AI cut it"
-      showNewVideoAction={false}
-    >
-      <div className="newVideoLayout">
-        <div>
-          <label className="dropzone glass">
-            <span className="dropzoneIcon">
-              <IconUpload size={22} />
-            </span>
-            <span className="dropzoneTitle">Drop your raw clips</span>
-            <span style={{ fontSize: 13, color: 'var(--text-3)', maxWidth: 280 }}>
-              Phone footage of you trying on / using the product
-            </span>
-            {files.length > 0 && (
-              <span className="pill" style={{ marginTop: 4 }}>
-                <IconCheck size={13} />
-                {files.length} clip{files.length === 1 ? '' : 's'} ready
-                {footageSeconds > 0 ? ` · ${Math.round(footageSeconds)}s` : ''}
-              </span>
-            )}
-            {skippedShortClips.length > 0 && (
-              <span
-                className="pill"
-                style={{ marginTop: 4, color: 'var(--status-failed)', borderColor: 'var(--status-failed)' }}
-              >
-                Skipped {skippedShortClips.length} clip
-                {skippedShortClips.length === 1 ? '' : 's'} under {MIN_CLIP_SECONDS}s —
-                too short to cut from. Record longer takes.
-              </span>
-            )}
-            {footageShort && (
-              <span
-                className="pill"
-                style={{ marginTop: 4, color: 'var(--status-queued)', borderColor: 'var(--status-queued)' }}
-              >
-                {Math.round(footageSeconds)}s of footage makes about {supportedVariations} good
-                variation{supportedVariations === 1 ? '' : 's'} at {lengthSeconds}s — {variationCount} needs
-                roughly {recommendedSeconds}s. Add clips, or drop to {supportedVariations}.
-              </span>
-            )}
-            <input
-              type="file"
-              multiple
-              accept="video/*"
-              onChange={(e) => selectClips(Array.from(e.target.files ?? []))}
-              style={{ display: 'none' }}
-            />
-          </label>
-          {errorFor('clips') && <p className="errorText">{errorFor('clips')}</p>}
-
-          <section className="glass card" style={{ marginTop: 20 }}>
-            <div className="formSection">
-              <label className="label" htmlFor="productName">
-                Product name
-              </label>
-              <input
-                id="productName"
-                className="input"
-                value={productName}
-                onChange={(e) => setProductName(e.target.value)}
-                placeholder="e.g. Streetwear Zip-Up Hoodie"
-              />
-              {errorFor('productName') ? (
-                <p className="errorText">{errorFor('productName')}</p>
-              ) : (
-                <p className="helper">
-                  Use the real product name — it feeds the AI-written hook.
-                </p>
-              )}
+    <PhoneFrame showNav={false}>
+      <header className="flowHeader">
+        <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
+          <button type="button" className="backButton" onClick={back} aria-label="Back">
+            <IconChevronLeft size={18} />
+          </button>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: 12, color: 'var(--text-meta)' }}>Step {step} of 4</div>
+            <div style={{ fontSize: 17, fontWeight: 600, letterSpacing: '-0.01em' }}>
+              {STEP_TITLES[step - 1]}
             </div>
+          </div>
+          <button
+            type="button"
+            onClick={cancel}
+            style={{ fontSize: 13.5, color: 'var(--text-meta)', minHeight: 44 }}
+          >
+            Cancel
+          </button>
+        </div>
 
-            <div className="formSection">
-              <div
-                style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 20 }}
-              >
-                <div>
-                  <div style={{ fontWeight: 700, fontSize: 14.5 }}>Show sizing info</div>
-                  <p className="helper" style={{ marginTop: 5 }}>
-                    Burns a small &quot;size worn&quot; overlay onto every video
+        <div className="stepBars" style={{ marginTop: 12 }}>
+          {[1, 2, 3, 4].map((n) => (
+            <span key={n} className="stepBar" data-on={n <= step} />
+          ))}
+        </div>
+      </header>
+
+      <Screen flush>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 22, paddingTop: 18 }}>
+          {step === 1 && (
+            <>
+              <div>
+                <label className="sectionLabel" htmlFor="productName" style={{ marginBottom: 10 }}>
+                  Product name
+                </label>
+                <input
+                  id="productName"
+                  className="field"
+                  value={productName}
+                  placeholder="Streetwear Zip-Up Hoodie"
+                  onChange={(e) => setProductName(e.target.value)}
+                />
+                <p className="footnote" style={{ marginTop: 8 }}>
+                  Use the real name. It feeds the hook the AI writes.
+                </p>
+              </div>
+
+              <div>
+                <p className="sectionLabel" style={{ marginBottom: 12 }}>
+                  What are you making?
+                </p>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                  <button
+                    type="button"
+                    className="selectCard"
+                    data-active={!isTalking}
+                    onClick={() => setKind('cuts')}
+                  >
+                    <span style={{ flex: 1, minWidth: 0 }}>
+                      <span className="optionTitle" style={{ display: 'block' }}>
+                        Silent cuts
+                      </span>
+                      <span className="cardDesc" style={{ display: 'block', marginTop: 6 }}>
+                        Many clips in, many edits out. No audio, so you record the voiceover in
+                        TikTok.
+                      </span>
+                    </span>
+                    <span className="selectRing" />
+                  </button>
+
+                  <button
+                    type="button"
+                    className="selectCard"
+                    data-active={isTalking}
+                    onClick={() => {
+                      setKind('talking');
+                      // One take, one edit: the audio fixes the order of the
+                      // cuts, so a second variation would be the same video.
+                      setVariations(1);
+                      setMode('custom');
+                    }}
+                  >
+                    <span style={{ flex: 1, minWidth: 0 }}>
+                      <span className="optionTitle" style={{ display: 'block' }}>
+                        Talking to camera
+                      </span>
+                      <span className="cardDesc" style={{ display: 'block', marginTop: 6 }}>
+                        One take of you talking. Dead air cut out, your audio kept, captions
+                        written for you. Always one video.
+                      </span>
+                    </span>
+                    <span className="selectRing" />
+                  </button>
+                </div>
+              </div>
+            </>
+          )}
+
+          {step === 2 && (
+            <>
+              <label className="dropzone">
+                <span className="dropzoneIcon">
+                  <IconUpload size={22} />
+                </span>
+                <span style={{ fontSize: 15.5, fontWeight: 600 }}>
+                  {isTalking ? 'Add your take' : 'Add your clips'}
+                </span>
+                <span className="cardDesc">MP4 or MOV, straight off your phone</span>
+                <input
+                  type="file"
+                  multiple={!isTalking}
+                  accept="video/*"
+                  style={{ display: 'none' }}
+                  onChange={(e) => {
+                    void addClips(Array.from(e.target.files ?? []));
+                    e.target.value = '';
+                  }}
+                />
+              </label>
+
+              {uploads.length > 0 && (
+                <div className="panel" data-tone="success" style={{ display: 'flex', gap: 10 }}>
+                  <IconCheck size={16} />
+                  <p className="panelText">
+                    {uploads.length} clip{uploads.length === 1 ? '' : 's'} ready
+                    {footageSeconds > 0 ? ` · ${Math.round(footageSeconds)}s` : ''}
                   </p>
                 </div>
-                <button
-                  type="button"
-                  className="toggle"
-                  data-on={sizingOn}
-                  aria-pressed={sizingOn}
-                  aria-label="Show sizing info"
-                  onClick={() => setSizingOn((on) => !on)}
-                >
-                  <span className="toggleKnob" />
-                </button>
-              </div>
+              )}
 
-              {sizingOn && (
-                <div style={{ marginTop: 16 }}>
-                  <label className="label" htmlFor="sizeWorn">
-                    Size worn
-                  </label>
-                  <input
-                    id="sizeWorn"
-                    className="input"
-                    value={sizeWorn}
-                    onChange={(e) => setSizeWorn(e.target.value)}
-                    placeholder='e.g. "M" or "runs small"'
-                  />
-                  {errorFor('sizeWorn') && <p className="errorText">{errorFor('sizeWorn')}</p>}
+              {skipped > 0 && (
+                <div className="panel" data-tone="warning" style={{ display: 'flex', gap: 10 }}>
+                  <IconWarning size={16} />
+                  <p className="panelText">
+                    Skipped {skipped} clip{skipped === 1 ? '' : 's'} under {MIN_CLIP_SECONDS}s.
+                    Anything shorter has nothing to cut into. Shoot longer takes.
+                  </p>
                 </div>
               )}
-            </div>
 
-            <div className="formSection">
-              <div className="labelRow">
-                <span className="label" style={{ marginBottom: 0 }}>
-                  Length
-                </span>
-                <span className="labelValue">{lengthSeconds}s</span>
-              </div>
-              <input
-                type="range"
-                className="slider"
-                min={MIN_LENGTH_SECONDS}
-                max={MAX_LENGTH_SECONDS}
-                step={1}
-                value={lengthSeconds}
-                onChange={(e) => setLengthSeconds(Number(e.target.value))}
-                aria-label="Video length in seconds"
-              />
-              <div className="sliderScale">
-                <span>{MIN_LENGTH_SECONDS}s</span>
-                <span>{MAX_LENGTH_SECONDS}s</span>
-              </div>
-              {errorFor('lengthSeconds') && (
-                <p className="errorText">{errorFor('lengthSeconds')}</p>
+              {failed.length > 0 && (
+                <div className="panel" data-tone="failure" style={{ display: 'flex', gap: 10 }}>
+                  <IconClose size={16} />
+                  <p className="panelText">
+                    {failed.length} clip{failed.length === 1 ? '' : 's'} did not upload. Remove
+                    them and add them again.
+                  </p>
+                </div>
               )}
-            </div>
 
-            <div className="formSection">
-              <span className="label">What are you making?</span>
-              <div style={{ display: 'flex', gap: 12 }}>
-                <button
-                  type="button"
-                  className="modeTab"
-                  data-active={!isTalking}
-                  onClick={() => setJobKind('cuts')}
-                >
-                  <div className="modeTabTitle">Silent cuts</div>
-                  <div className="modeTabSub">You add a voiceover after</div>
-                </button>
-                <button
-                  type="button"
-                  className="modeTab"
-                  data-active={isTalking}
-                  onClick={() => setJobKind('talking')}
-                >
-                  <div className="modeTabTitle">Talking to camera</div>
-                  <div className="modeTabSub">Keeps your audio, adds captions</div>
-                </button>
-              </div>
-              {isTalking && (
-                <p className="helper" style={{ marginTop: 10 }}>
-                  Upload one take of yourself talking. Pauses and dead air get cut out, your
-                  audio stays in sync, and captions are burned on automatically. One clean
-                  edit — no variations, because the audio fixes the order of the cuts.
+              {uploads.length > 0 && (
+                <div>
+                  <div className="sectionLabelRow" style={{ marginBottom: 12 }}>
+                    <span className="sectionLabel">
+                      {uploading.length > 0 ? 'Uploading' : 'Uploaded'}
+                    </span>
+                    <span className="meta">
+                      {done.length} of {uploads.length}
+                      {rate > 0 && uploading.length > 0
+                        ? ` · ${(rate / 1e6).toFixed(1)} MB/s`
+                        : ''}
+                    </span>
+                  </div>
+
+                  <div className="list">
+                    {uploads.map((upload, index) => {
+                      const percent =
+                        upload.status === 'done'
+                          ? 100
+                          : Math.min(
+                              99,
+                              Math.round((upload.sent / Math.max(1, upload.file.size)) * 100)
+                            );
+                      return (
+                        <div key={upload.id} className="glass transferRow">
+                          <Thumb grade={gradeFor(index)} width={34} />
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <div
+                              style={{
+                                display: 'flex',
+                                justifyContent: 'space-between',
+                                gap: 10,
+                                alignItems: 'baseline',
+                              }}
+                            >
+                              <span className="listCardTitle" style={{ fontSize: 13.5 }}>
+                                {upload.file.name}
+                              </span>
+                              <span
+                                style={{
+                                  fontSize: 12.5,
+                                  fontWeight: 500,
+                                  flexShrink: 0,
+                                  color:
+                                    upload.status === 'done'
+                                      ? 'var(--success)'
+                                      : upload.status === 'failed'
+                                        ? 'var(--failure)'
+                                        : 'var(--accent)',
+                                }}
+                              >
+                                {upload.status === 'done'
+                                  ? 'Done'
+                                  : upload.status === 'failed'
+                                    ? 'Failed'
+                                    : `${percent}%`}
+                              </span>
+                            </div>
+                            <div className="meta" style={{ marginBottom: 6 }}>
+                              {Math.round(upload.file.size / 1e6)} MB
+                            </div>
+                            <div className="progressTrack">
+                              <div
+                                className="progressFill"
+                                data-done={upload.status === 'done'}
+                                style={{ width: `${percent}%` }}
+                              />
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  <p className="footnote" style={{ marginTop: 12 }}>
+                    Keep this screen open until the last clip finishes. The render itself carries
+                    on if you close the app.
+                  </p>
+                </div>
+              )}
+
+              {totalBytes > 0 && uploading.length > 0 && (
+                <p className="footnote">
+                  {Math.round(sentBytes / 1e6)} of {Math.round(totalBytes / 1e6)} MB sent
                 </p>
               )}
-            </div>
+            </>
+          )}
 
-            <div className="formSection" style={{ display: isTalking ? 'none' : undefined }}>
-              <span className="label">How do you want to edit this?</span>
-              <div style={{ display: 'flex', gap: 12 }}>
-                <button
-                  type="button"
-                  className="modeTab"
-                  data-active={mode === 'custom'}
-                  onClick={() => setMode('custom')}
-                >
-                  <div className="modeTabTitle">Custom</div>
-                  <div className="modeTabSub">You set the pacing</div>
-                </button>
-                <button
-                  type="button"
-                  className="modeTab"
-                  data-active={mode === 'style'}
-                  onClick={() => setMode('style')}
-                >
-                  <div className="modeTabTitle">Style</div>
-                  <div className="modeTabSub">Named presets</div>
-                </button>
-              </div>
-
-              {mode === 'custom' && (
-                <div style={{ marginTop: 18 }}>
-                  <span className="label">Pacing</span>
+          {step === 3 && (
+            <>
+              {!isTalking && (
+                <div>
+                  <p className="sectionLabel" style={{ marginBottom: 12 }}>
+                    How do you want to edit this?
+                  </p>
                   <div className="segmented">
-                    {PACINGS.map((value) => (
+                    {(['custom', 'style'] as const).map((option) => (
                       <button
-                        key={value}
+                        key={option}
                         type="button"
                         className="segment"
-                        data-active={pacing === value}
-                        onClick={() => setPacing(value)}
-                        style={{ textTransform: 'capitalize' }}
+                        data-active={mode === option}
+                        onClick={() => setMode(option)}
                       >
-                        {value}
+                        {option === 'custom' ? 'Custom' : 'Style'}
                       </button>
                     ))}
                   </div>
-                  <p className="helper">{PACING_HELP[pacing]}</p>
                 </div>
               )}
 
-              {mode === 'style' && (
-                <div style={{ marginTop: 18, display: 'flex', flexDirection: 'column', gap: 10 }}>
-                  {styles.map((style) => (
+              {!isTalking && mode === 'custom' && (
+                <div>
+                  <p className="sectionLabel" style={{ marginBottom: 12 }}>
+                    Pacing
+                  </p>
+                  <div className="chipRow">
+                    {PACINGS.map((option) => (
+                      <button
+                        key={option}
+                        type="button"
+                        className="chip"
+                        style={{ flex: 1, textTransform: 'capitalize' }}
+                        data-active={pacing === option}
+                        onClick={() => setPacing(option)}
+                      >
+                        {option}
+                      </button>
+                    ))}
+                  </div>
+                  <p className="footnote" style={{ marginTop: 8 }}>
+                    {PACING_HELP[pacing]}
+                  </p>
+                </div>
+              )}
+
+              {!isTalking && mode === 'style' && (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                  {styles.length === 0 && (
+                    <p className="meta">No styles available yet. Custom mode works today.</p>
+                  )}
+                  {styles.map((style, index) => (
                     <button
                       key={style.id}
                       type="button"
-                      className="styleCard"
-                      data-active={selectedStyleId === style.id}
-                      onClick={() => setSelectedStyleId(style.id)}
+                      className="selectCard"
+                      data-active={styleId === style.id}
+                      onClick={() => setStyleId(style.id)}
                     >
-                      <span className="styleRadio">
-                        {selectedStyleId === style.id && <IconCheck size={12} />}
-                      </span>
-                      <span style={{ minWidth: 0 }}>
-                        <span className="styleName">{style.name}</span>
-                        <span className="styleDesc" style={{ display: 'block' }}>
+                      <Thumb grade={gradeFor(index)} width={42} />
+                      <span style={{ flex: 1, minWidth: 0 }}>
+                        <span className="optionTitle" style={{ display: 'block' }}>
+                          {style.name}
+                        </span>
+                        <span className="cardDesc" style={{ display: 'block', marginTop: 4 }}>
                           {style.description}
                         </span>
+                        {style.usesFitInspoIntro && (
+                          <span
+                            className="linkAccent"
+                            style={{ display: 'block', marginTop: 6 }}
+                          >
+                            Needs a few photos of the fit
+                          </span>
+                        )}
                         {style.usesInspirationOverlay && (
-                          <span className="tag">+ INSPIRATION PHOTO</span>
+                          <span
+                            className="linkAccent"
+                            style={{ display: 'block', marginTop: 6 }}
+                          >
+                            Needs one inspiration photo
+                          </span>
                         )}
                       </span>
+                      <span className="selectRing" />
                     </button>
                   ))}
 
-                  {errorFor('styleId') && <p className="errorText">{errorFor('styleId')}</p>}
-
                   {selectedStyle?.usesInspirationOverlay && (
-                    <label
-                      className="styleCard"
-                      style={{ cursor: 'pointer', alignItems: 'center' }}
-                    >
-                      <span className="styleRadio" style={{ border: 'none', background: 'none' }}>
-                        <IconImage size={18} />
-                      </span>
-                      <span style={{ minWidth: 0 }}>
-                        <span className="styleName">Inspiration photo</span>
-                        <span className="styleDesc" style={{ display: 'block' }}>
-                          {inspirationFile
-                            ? inspirationFile.name
-                            : 'Choose the photo this style composites in'}
+                    <label className="glass listCard" style={{ cursor: 'pointer' }}>
+                      <span style={{ flex: 1, minWidth: 0 }}>
+                        <span className="listCardTitle">Inspiration photo</span>
+                        <span className="meta" style={{ display: 'block' }}>
+                          {inspirationFile?.name ?? 'Choose the photo this style composites in'}
                         </span>
                       </span>
                       <input
                         type="file"
                         accept="image/*"
-                        onChange={(e) => setInspirationFile(e.target.files?.[0] ?? null)}
                         style={{ display: 'none' }}
+                        onChange={(e) => setInspirationFile(e.target.files?.[0] ?? null)}
                       />
                     </label>
                   )}
 
                   {selectedStyle?.usesFitInspoIntro && (
-                    <div style={{ marginTop: 4 }}>
-                      <label className="styleCard" style={{ cursor: 'pointer', alignItems: 'center' }}>
-                        <span className="styleRadio" style={{ border: 'none', background: 'none' }}>
-                          <IconImage size={18} />
+                    <label className="glass listCard" style={{ cursor: 'pointer' }}>
+                      <span style={{ flex: 1, minWidth: 0 }}>
+                        <span className="listCardTitle">Fit photos</span>
+                        <span className="meta" style={{ display: 'block' }}>
+                          {fitPics.length > 0
+                            ? `${fitPics.length} added, up to 4`
+                            : 'People wearing the fit, shown over the opening seconds'}
                         </span>
-                        <span style={{ minWidth: 0 }}>
-                          <span className="styleName">Fit inspo images</span>
-                          <span className="styleDesc" style={{ display: 'block' }}>
-                            {fitPics.length > 0
-                              ? `${fitPics.length} added — up to 4`
-                              : 'Photos of people wearing the fit, shown over the opening seconds'}
-                          </span>
-                        </span>
-                        <input
-                          type="file"
-                          accept="image/*"
-                          multiple
-                          onChange={(e) => addFitPics(Array.from(e.target.files ?? []))}
-                          style={{ display: 'none' }}
-                        />
-                      </label>
-
-                      {fitPics.length > 0 && (
-                        <div className="fitPicList">
-                          {fitPics.map((pic, index) => (
-                            <div className="fitPicRow" key={`${pic.file.name}-${index}`}>
-                              {/* eslint-disable-next-line @next/next/no-img-element */}
-                              <img src={pic.previewUrl} alt="" className="fitPicThumb" />
-                              <div style={{ minWidth: 0, flex: 1 }}>
-                                <div className="jobTitle" style={{ fontSize: 13.5 }}>
-                                  {pic.file.name}
-                                </div>
-                                <p className="helper" style={{ marginTop: 3 }}>
-                                  Background removed, shown {(1.5 + index * 0.35).toFixed(2)}s-4s
-                                </p>
-                              </div>
-                              <button
-                                type="button"
-                                className="btn btnGhost"
-                                onClick={() =>
-                                  setFitPics((current) => current.filter((_, i) => i !== index))
-                                }
-                              >
-                                Remove
-                              </button>
-                            </div>
-                          ))}
-                        </div>
-                      )}
-                    </div>
-                  )}
-
-                  {errorFor('inspirationImage') && (
-                    <p className="errorText">{errorFor('inspirationImage')}</p>
+                      </span>
+                      <input
+                        type="file"
+                        accept="image/*"
+                        multiple
+                        style={{ display: 'none' }}
+                        onChange={(e) =>
+                          setFitPics((current) =>
+                            [...current, ...Array.from(e.target.files ?? [])].slice(0, 4)
+                          )
+                        }
+                      />
+                    </label>
                   )}
                 </div>
               )}
-            </div>
 
-            {/* One take, one edit: the audio fixes the order of the cuts, so a
-                second "variation" would be the same video or a broken one. */}
-            <div className="formSection" style={{ display: isTalking ? 'none' : undefined }}>
-              <span className="label">Variations</span>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 18 }}>
+              <div>
+                <div className="sectionLabelRow" style={{ marginBottom: 4 }}>
+                  <span className="sectionLabel">Video length</span>
+                  <span className="sliderValue">{lengthSeconds}s</span>
+                </div>
                 <input
                   type="range"
-                  className="range"
-                  min={1}
-                  max={10}
-                  value={variationCount}
-                  onChange={(e) => setVariationCount(Number(e.target.value))}
-                  style={{ ['--fill' as string]: `${((variationCount - 1) / 9) * 100}%` }}
+                  className="slider"
+                  min={MIN_LENGTH_SECONDS}
+                  max={MAX_LENGTH_SECONDS}
+                  value={lengthSeconds}
+                  aria-label="Video length in seconds"
+                  onChange={(e) => setLengthSeconds(Number(e.target.value))}
                 />
-                <span className="display" style={{ fontSize: 26, minWidth: 32, textAlign: 'right' }}>
-                  {variationCount}
-                </span>
-              </div>
-              <p className="helper">Different edits generated from the same footage.</p>
-              {errorFor('variationCount') && (
-                <p className="errorText">{errorFor('variationCount')}</p>
-              )}
-            </div>
-          </section>
-
-          <section className="glass card" style={{ marginTop: 20 }}>
-            <label className="label">On-screen text</label>
-            <p className="helper" style={{ marginTop: 2 }}>
-              Drag the text on the preview, or use the sliders. The hook shown here is an
-              example — the AI writes the real one.
-            </p>
-
-            <div
-              style={{
-                display: 'flex',
-                gap: 18,
-                marginTop: 14,
-                flexWrap: 'wrap',
-                alignItems: 'flex-start',
-              }}
-            >
-              <CaptionPreview
-                settings={captions}
-                hookText={PREVIEW_HOOK}
-                sizingText={sizingOn ? previewSizingText : null}
-                clip={files[0] ?? null}
-                selected={selectedBlock}
-                onSelect={setSelectedBlock}
-                onMove={(block, x, y) =>
-                  tweakCaptions(
-                    block === 'hook' ? { hookX: x, hookY: y } : { sizingX: x, sizingY: y }
-                  )
-                }
-              />
-
-              <div style={{ flex: '1 1 260px', minWidth: 240 }}>
-                <label className="label" htmlFor="captionFont">Font</label>
-                <select
-                  id="captionFont"
-                  className="input"
-                  value={captions.fontId}
-                  onChange={(e) => tweakCaptions({ fontId: e.target.value as CaptionSettings['fontId'] })}
-                >
-                  {CAPTION_FONTS.map((font) => (
-                    <option key={font.id} value={font.id}>
-                      {font.label} — {font.description}
-                    </option>
-                  ))}
-                </select>
-
-                {/* Which block the sliders act on. The preview outlines it too. */}
-                <div style={{ display: 'flex', gap: 8, marginTop: 14 }}>
-                  {(['hook', 'sizing'] as CaptionBlock[]).map((block) => (
-                    <button
-                      key={block}
-                      type="button"
-                      className="btn"
-                      data-active={selectedBlock === block}
-                      disabled={block === 'sizing' && !sizingOn}
-                      onClick={() => setSelectedBlock(block)}
-                      style={{ flex: 1, opacity: block === 'sizing' && !sizingOn ? 0.45 : 1 }}
-                    >
-                      {block === 'hook' ? 'Hook text' : 'Sizing info'}
-                    </button>
-                  ))}
+                <div className="sliderBounds">
+                  <span>{MIN_LENGTH_SECONDS}s</span>
+                  <span>{MAX_LENGTH_SECONDS}s</span>
                 </div>
+              </div>
 
-                <CaptionSlider
-                  label="Size"
-                  value={selectedBlock === 'hook' ? captions.hookFontSize : captions.sizingFontSize}
-                  min={selectedBlock === 'hook' ? 20 : 16}
-                  max={selectedBlock === 'hook' ? 72 : 60}
-                  step={1}
-                  onChange={(value) =>
-                    tweakCaptions(
-                      selectedBlock === 'hook'
-                        ? { hookFontSize: value }
-                        : { sizingFontSize: value }
-                    )
-                  }
-                />
-                <CaptionSlider
-                  label="Across"
-                  value={selectedBlock === 'hook' ? captions.hookX : captions.sizingX}
-                  min={0}
-                  max={1}
-                  step={0.01}
-                  format={(v) => `${Math.round(v * 100)}%`}
-                  onChange={(value) =>
-                    tweakCaptions(selectedBlock === 'hook' ? { hookX: value } : { sizingX: value })
-                  }
-                />
-                <CaptionSlider
-                  label="Down"
-                  value={selectedBlock === 'hook' ? captions.hookY : captions.sizingY}
-                  min={0}
-                  max={1}
-                  step={0.01}
-                  format={(v) => `${Math.round(v * 100)}%`}
-                  onChange={(value) =>
-                    tweakCaptions(selectedBlock === 'hook' ? { hookY: value } : { sizingY: value })
-                  }
-                />
+              {!isTalking && (
+                <>
+                  <div>
+                    <div className="sectionLabelRow" style={{ marginBottom: 4 }}>
+                      <span className="sectionLabel">Variations</span>
+                      <span className="sliderValue">{variations}</span>
+                    </div>
+                    <input
+                      type="range"
+                      className="slider"
+                      min={1}
+                      max={MAX_VARIATION_COUNT}
+                      value={variations}
+                      aria-label="How many variations to make"
+                      onChange={(e) => setVariations(Number(e.target.value))}
+                    />
+                    <div className="sliderBounds">
+                      <span>1</span>
+                      <span>{MAX_VARIATION_COUNT}</span>
+                    </div>
+                  </div>
 
-                <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 12 }}>
-                  <label className="label" htmlFor="captionColor" style={{ margin: 0 }}>Colour</label>
-                  <input
-                    id="captionColor"
-                    type="color"
-                    value={captions.textColor}
-                    onChange={(e) => tweakCaptions({ textColor: e.target.value.toUpperCase() })}
-                    style={{ width: 44, height: 30, padding: 0, border: 'none', background: 'none' }}
-                  />
-                  {captionsTouched && (
-                    <div style={{ marginLeft: 'auto', display: 'flex', gap: 8 }}>
-                      <button type="button" className="btn" onClick={() => setTweakedCaptions(null)}>
-                        Reset
-                      </button>
-                      {/* Saving is offered only in Custom mode: in Style mode the
-                          look belongs to the style, and writing it to the profile
-                          would have no effect on the job being created. */}
-                      {mode === 'custom' && (
-                        <button
-                          type="button"
-                          className="btn"
-                          disabled={savingCaptions}
-                          onClick={async () => {
-                            setSavingCaptions(true);
-                            try {
-                              const res = await fetch('/api/profile', {
-                                method: 'PATCH',
-                                headers: { 'Content-Type': 'application/json' },
-                                body: JSON.stringify({ captionSettings: captions }),
-                              });
-                              if (res.ok) {
-                                setSavedCaptions(captions);
-                                setCaptionsSavedAt(Date.now());
-                              }
-                            } finally {
-                              setSavingCaptions(false);
-                            }
-                          }}
-                        >
-                          {savingCaptions ? 'Saving…' : 'Save as my default'}
-                        </button>
-                      )}
+                  {footageSeconds > 0 && (
+                    <div
+                      className="panel"
+                      data-tone={footageOk ? 'success' : 'warning'}
+                      style={{ display: 'flex', gap: 10 }}
+                    >
+                      {footageOk ? <IconCheck size={16} /> : <IconWarning size={16} />}
+                      <p className="panelText">
+                        {footageOk
+                          ? `${Math.round(footageSeconds)}s of footage covers ${variations} video${
+                              variations === 1 ? '' : 's'
+                            } at ${lengthSeconds}s.`
+                          : `${Math.round(footageSeconds)}s of footage makes about ${supported} good variation${
+                              supported === 1 ? '' : 's'
+                            } at ${lengthSeconds}s. ${variations} needs roughly ${neededSeconds}s, so add more clips or drop to ${supported}.`}
+                      </p>
                     </div>
                   )}
+                </>
+              )}
+
+              <div>
+                <div
+                  className="glass"
+                  style={{ display: 'flex', gap: 14, alignItems: 'center', padding: 16 }}
+                >
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: 15, fontWeight: 600 }}>Sizing info</div>
+                    <p className="cardDesc" style={{ marginTop: 4 }}>
+                      Stamps your height, weight and size worn onto every cut.
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    className="toggle"
+                    data-on={sizingOn}
+                    aria-pressed={sizingOn}
+                    aria-label="Show sizing info"
+                    onClick={() => setSizingOn((on) => !on)}
+                  >
+                    <span className="toggleKnob" />
+                  </button>
                 </div>
-                {captionsSavedAt !== null && (
-                  <p className="helper" style={{ marginTop: 8 }}>
-                    Saved. New Custom-mode videos will start from this look.
-                  </p>
+
+                {sizingOn && (
+                  <div style={{ marginTop: 14 }}>
+                    <p className="sectionLabel" style={{ marginBottom: 10 }}>
+                      Size worn
+                    </p>
+                    <div className="chipRow">
+                      {SIZES.map((size) => (
+                        <button
+                          key={size}
+                          type="button"
+                          className="chip"
+                          data-square="true"
+                          data-active={sizeWorn === size}
+                          onClick={() => setSizeWorn(size)}
+                        >
+                          {size}
+                        </button>
+                      ))}
+                    </div>
+                    {!profile.height && !profile.weight && (
+                      <p className="footnote" style={{ marginTop: 8 }}>
+                        Add your height and weight on Profile and they go on every video too.
+                      </p>
+                    )}
+                  </div>
                 )}
               </div>
-            </div>
-          </section>
+            </>
+          )}
 
-          {errorFor('form') && (
-            <div className="banner" data-tone="failed" style={{ marginTop: 16 }}>
-              {errorFor('form')}
+          {step === 4 && (
+            <CaptionEditor
+              settings={captions}
+              onChange={(patch) => setTweaked({ ...captions, ...patch })}
+              hookText={hookText}
+              onHookTextChange={setHookText}
+              sizingText={sizingText}
+              clip={done[0]?.file ?? uploads[0]?.file ?? null}
+              clipLabel={uploads.length > 0 ? 'Frame from clip 1' : undefined}
+              footer={
+                <div style={{ display: 'flex', gap: 10 }}>
+                  <button
+                    type="button"
+                    className="btn btnOutline btnFull btnSmall"
+                    onClick={() => setTweaked(null)}
+                  >
+                    Reset
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btnOutline btnFull btnSmall"
+                    onClick={() => {
+                      void fetch('/api/profile', {
+                        method: 'PATCH',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ captionSettings: captions }),
+                      }).then(() => setSavedCaptions(captions));
+                    }}
+                  >
+                    Save as default
+                  </button>
+                </div>
+              }
+            />
+          )}
+
+          {error && (
+            <div className="panel" data-tone="failure">
+              <p className="panelText">{error}</p>
             </div>
           )}
-        </div>
 
-        <aside className="summaryRail">
-          <div className="glass card">
-            <span
-              className="mono"
-              style={{ fontSize: 10.5, letterSpacing: '0.18em', color: 'var(--text-3)' }}
-            >
-              PREVIEW
-            </span>
-
-            <div style={{ margin: '14px auto 0', width: 174 }}>
-              <VideoTile
-                hue={268}
-                hook={productName || 'your hook lands here'}
-                sizing={
-                  sizingOn
-                    ? {
-                        height: profile.height,
-                        weight: profile.weight,
-                        sizeWorn,
-                        side: selectedStyle?.usesInspirationOverlay ? 'left' : 'right',
-                      }
-                    : null
-                }
-              />
-            </div>
-
-            <dl style={{ marginTop: 20, display: 'grid', gap: 10 }}>
-              <SummaryRow label="Length" value={`${lengthSeconds}s`} />
-              <SummaryRow label="Editor" value={isTalking ? 'Talking to camera' : 'Silent cuts'} />
-              {!isTalking && (
-                <SummaryRow label="Mode" value={mode === 'custom' ? 'Custom' : 'Style'} />
-              )}
-              <SummaryRow
-                label={mode === 'custom' ? 'Pacing' : 'Style'}
-                value={mode === 'custom' ? pacing : selectedStyle?.name ?? 'none picked'}
-              />
-              <SummaryRow label="Variations" value={String(variationCount)} />
-              <SummaryRow
-                label="Sizing"
-                value={sizingOn ? sizeWorn.trim() || 'on' : 'off'}
-              />
-            </dl>
-
-            <button
-              className="btn btnAccent btnFull"
-              style={{ marginTop: 20 }}
-              onClick={handleSubmit}
-              disabled={submitting}
-            >
-              {phase === 'uploading'
-                ? `Uploading… ${uploadPercent}%`
-                : phase === 'creating'
-                  ? 'Starting…'
-                  : 'Generate videos'}
-            </button>
-
-            {phase === 'uploading' && (
-              /*
-               * Phone footage is 100MB+ per clip, so this runs for minutes on a
-               * mobile uplink. Showing real bytes is the difference between
-               * "it's working" and "it's frozen".
-               */
-              <div style={{ marginTop: 12 }}>
-                <div className="progressTrack">
-                  <div className="progressFill" style={{ width: `${uploadPercent}%` }} />
-                </div>
-                <p className="helper" style={{ textAlign: 'center', marginTop: 6 }}>
-                  {formatMb(uploadedBytes)} of {formatMb(totalUploadBytes)} MB
-                  {files.length > 1 ? ` · ${files.length} clips` : ''}
-                </p>
-              </div>
-            )}
-
-            <p className="helper" style={{ textAlign: 'center' }}>
-              {phase === 'uploading'
-                ? 'Keep this tab open until the upload finishes.'
-                : "Renders in the background. You'll see live progress."}
+          {step === 4 && uploading.length > 0 && (
+            <p className="footnote">
+              Still sending {uploading.length} clip{uploading.length === 1 ? '' : 's'}. The button
+              wakes up as soon as they land.
             </p>
-          </div>
-        </aside>
-      </div>
-    </AppShell>
-  );
-}
+          )}
+        </div>
+      </Screen>
 
-function SummaryRow({ label, value }: { label: string; value: string }) {
-  return (
-    <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, fontSize: 13 }}>
-      <dt style={{ color: 'var(--text-3)' }}>{label}</dt>
-      <dd
-        style={{
-          fontWeight: 700,
-          textTransform: 'capitalize',
-          textAlign: 'right',
-          minWidth: 0,
-          overflow: 'hidden',
-          textOverflow: 'ellipsis',
-          whiteSpace: 'nowrap',
-        }}
-      >
-        {value}
-      </dd>
-    </div>
+      <footer className="flowFooter">
+        <button
+          type="button"
+          className="btn btnFull"
+          data-pill="true"
+          disabled={!canContinue || submitting}
+          onClick={() => (step === 4 ? submit() : setStep(step + 1))}
+        >
+          {footerLabel}
+        </button>
+      </footer>
+    </PhoneFrame>
   );
 }

@@ -190,6 +190,9 @@ export async function GET(request: Request, context: { params: Promise<{ jobId: 
     id: job.id,
     productName: job.productName,
     status: job.status,
+    // Which editor made this. The detail screen labels a talking job by that
+    // rather than by a pacing it does not have.
+    kind: job.kind,
     lengthSeconds: job.lengthSeconds,
     pacing: job.pacing,
     styleName: style?.name ?? null,

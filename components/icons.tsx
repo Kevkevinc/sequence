@@ -68,13 +68,6 @@ export const IconImage = (p: IconProps) => (
   </Svg>
 );
 
-export const IconClock = (p: IconProps) => (
-  <Svg {...p}>
-    <circle cx="12" cy="12" r="9" />
-    <path d="M12 7v5.5l3.5 2" />
-  </Svg>
-);
-
 export const IconDownload = (p: IconProps) => (
   <Svg {...p}>
     <path d="M12 4v11" />
@@ -95,22 +88,7 @@ export const IconChevronLeft = (p: IconProps) => (
   </Svg>
 );
 
-export const IconMute = (p: IconProps) => (
-  <Svg {...p}>
-    <path d="M11 5 6.5 9H3v6h3.5L11 19z" />
-    <path d="m16 9.5 5 5M21 9.5l-5 5" />
-  </Svg>
-);
-
 export const IconWarning = (p: IconProps) => (
-  <Svg {...p}>
-    <path d="M12 3.5 22 20H2z" />
-    <path d="M12 9.5v4.5" />
-    <circle cx="12" cy="17" r="0.6" fill="currentColor" />
-  </Svg>
-);
-
-export const IconError = (p: IconProps) => (
   <Svg {...p}>
     <circle cx="12" cy="12" r="9" />
     <path d="M12 7.5V13" />
@@ -128,7 +106,7 @@ export const IconInfo = (p: IconProps) => (
 
 export const IconPlay = (p: IconProps) => (
   <Svg {...p}>
-    <path d="M9 6.5v11l9-5.5z" fill="currentColor" />
+    <path d="M9 6.5v11l9-5.5z" fill="currentColor" stroke="none" />
   </Svg>
 );
 
@@ -136,4 +114,75 @@ export const IconCheck = (p: IconProps) => (
   <Svg {...p}>
     <path d="m5 12.5 4.5 4.5L19 7.5" />
   </Svg>
+);
+
+export const IconClose = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M6 6l12 12M18 6 6 18" />
+  </Svg>
+);
+
+export const IconBell = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M6 9a6 6 0 0 1 12 0c0 4 1.5 5.5 1.5 5.5h-15S6 13 6 9" />
+    <path d="M10.5 18a1.8 1.8 0 0 0 3 0" />
+  </Svg>
+);
+
+/**
+ * The Sequence mark: four blades closing on a centre, which is what the editor
+ * does to a clip. Drawn as filled shapes rather than strokes so it holds its
+ * weight at 30px, where a 2px stroke would read as a scratch.
+ */
+export const LogoMark = ({ size = 30 }: IconProps) => (
+  <svg
+    width={size}
+    height={size}
+    viewBox="0 0 30 30"
+    fill="none"
+    aria-hidden="true"
+    focusable="false"
+    style={{ flexShrink: 0 }}
+  >
+    <path
+      d="M15 1c2.2 3.1 3.3 6 3.3 9.2 0 .6-.1 1.2-.2 1.7 .5-.1 1.1-.2 1.7-.2 3.2 0 6.1 1.1 9.2 3.3-3.1 2.2-6 3.3-9.2 3.3-.6 0-1.2-.1-1.7-.2 .1.5.2 1.1.2 1.7 0 3.2-1.1 6.1-3.3 9.2-2.2-3.1-3.3-6-3.3-9.2 0-.6.1-1.2.2-1.7-.5.1-1.1.2-1.7.2-3.2 0-6.1-1.1-9.2-3.3 3.1-2.2 6-3.3 9.2-3.3 .6 0 1.2.1 1.7.2-.1-.5-.2-1.1-.2-1.7C11.7 7 12.8 4.1 15 1z"
+      fill="#fff"
+    />
+    <circle cx="15" cy="15" r="2.4" fill="#0c0c0c" />
+  </svg>
+);
+
+/* ------------------------------------------------- status bar glyphs --- */
+
+export const IconSignal = () => (
+  <svg width="17" height="11" viewBox="0 0 17 11" aria-hidden="true" focusable="false">
+    {[0, 1, 2, 3].map((bar) => (
+      <rect
+        key={bar}
+        x={bar * 4.4}
+        y={8 - bar * 2.4}
+        width="3"
+        height={3 + bar * 2.4}
+        rx="1"
+        fill="#fff"
+      />
+    ))}
+  </svg>
+);
+
+export const IconWifi = () => (
+  <svg width="16" height="11" viewBox="0 0 16 11" aria-hidden="true" focusable="false">
+    <path
+      d="M8 9.6 5.9 7.4a3 3 0 0 1 4.2 0zM8 4.6a6 6 0 0 0-4.3 1.8L2.3 5A8 8 0 0 1 8 2.6 8 8 0 0 1 13.7 5l-1.4 1.4A6 6 0 0 0 8 4.6z"
+      fill="#fff"
+    />
+  </svg>
+);
+
+export const IconBattery = () => (
+  <svg width="25" height="12" viewBox="0 0 25 12" aria-hidden="true" focusable="false">
+    <rect x="0.5" y="0.5" width="21" height="11" rx="3" stroke="#fff" strokeOpacity="0.4" fill="none" />
+    <rect x="2" y="2" width="16" height="8" rx="1.6" fill="#fff" />
+    <path d="M23 4.2v3.6a2 2 0 0 0 0-3.6z" fill="#fff" fillOpacity="0.4" />
+  </svg>
 );

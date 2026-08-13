@@ -1,15 +1,16 @@
 'use client';
 
 import { useCallback, useEffect, useState } from 'react';
+import { IconBell } from '@/components/icons';
 
 /**
  * Asks to send "your videos are ready", and registers the phone if allowed.
  *
  * Deliberately not asked on first load. A permission prompt fired at somebody
  * who has not yet seen what the product does is the fastest way to a permanent
- * "no" — and once denied, the browser will not ask again, so the channel is
- * gone for good on that device. This renders where the creator has just started
- * a render and has an obvious reason to want to be told when it finishes.
+ * no, and once denied the browser will not ask again, so the channel is gone
+ * for good on that device. This renders on a job that is actually rendering,
+ * where the creator has an obvious reason to want to be told.
  */
 
 /**
@@ -43,7 +44,7 @@ export function NotifyWhenReady() {
     /*
      * iPhone only allows notifications for a site added to the home screen.
      * Asking before that produces an error rather than a prompt, so the creator
-     * is told what to do instead — this is the one step of installing a web app
+     * is told what to do instead: this is the one step of installing a web app
      * that a phone will not do on its own.
      */
     const isIos = /iphone|ipad|ipod/i.test(navigator.userAgent);
@@ -115,30 +116,54 @@ export function NotifyWhenReady() {
 
   if (state === 'not-installed') {
     return (
-      <p className="helper" style={{ marginTop: 10 }}>
-        Want to be told when your videos are ready? Tap Share, then <b>Add to Home Screen</b>, and
-        open Sequence from your home screen.
+      <p className="footnote">
+        On iPhone, notifications need Sequence added to your home screen. Tap Share, then Add to
+        Home Screen, and open it from there.
       </p>
     );
   }
 
   if (state === 'blocked') {
     return (
-      <p className="helper" style={{ marginTop: 10 }}>
-        Notifications are turned off for Sequence in your phone&rsquo;s settings.
+      <p className="footnote">
+        Notifications are turned off for Sequence in your phone settings. Turn them back on there
+        and we can tell you when a video is ready.
       </p>
     );
   }
 
   return (
-    <button
-      type="button"
-      className="btn"
-      onClick={turnOn}
-      disabled={state === 'asking'}
-      style={{ marginTop: 12 }}
-    >
-      {state === 'asking' ? 'Just a sec…' : 'Notify me when this is ready'}
-    </button>
+    <div className="panel" data-tone="accent" style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
+      <span
+        style={{
+          display: 'grid',
+          placeItems: 'center',
+          width: 34,
+          height: 34,
+          flexShrink: 0,
+          borderRadius: 11,
+          background: 'rgba(0,210,255,0.12)',
+          color: 'var(--accent)',
+        }}
+      >
+        <IconBell size={18} />
+      </span>
+      <span style={{ flex: 1, minWidth: 0 }}>
+        <span style={{ display: 'block', fontSize: 13.5, fontWeight: 600 }}>
+          Ping me when it is done
+        </span>
+        <span className="panelText" style={{ display: 'block', color: 'var(--text-sub)' }}>
+          Takes 10 to 15 minutes. Close the app and we will ping you.
+        </span>
+      </span>
+      <button
+        type="button"
+        className="btn btnSmall"
+        onClick={turnOn}
+        disabled={state === 'asking'}
+      >
+        {state === 'asking' ? 'One sec' : 'Allow'}
+      </button>
+    </div>
   );
 }

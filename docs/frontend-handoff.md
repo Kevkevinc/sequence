@@ -6,6 +6,12 @@
 
 ---
 
+> **Status: answered.** The design this brief asked for landed as
+> `Claude Designs/sequence pwa design v1/handoff/Sequence-Handoff.md`, and the
+> interface described below is now built to it (13 August 2026). That document
+> is the reference for how anything should *look*; this one remains the
+> reference for what each screen has to *do*.
+
 ## What this document is and isn't
 
 This describes **what each screen has to do** — its purpose, what it shows, and

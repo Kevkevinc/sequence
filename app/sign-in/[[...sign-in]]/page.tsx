@@ -1,9 +1,10 @@
-import { SignIn } from "@clerk/nextjs";
+import { SignIn } from '@clerk/nextjs';
+import { AuthScreen, clerkAppearance } from '@/components/AuthScreen';
 
 export default function SignInPage() {
   return (
-    <div style={{ display: "flex", minHeight: "100vh", alignItems: "center", justifyContent: "center" }}>
-      <SignIn />
-    </div>
+    <AuthScreen>
+      <SignIn appearance={clerkAppearance} />
+    </AuthScreen>
   );
 }

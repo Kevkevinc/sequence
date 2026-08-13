@@ -1,5 +1,5 @@
 import { auth } from '@clerk/nextjs/server';
-import { and, eq, inArray } from 'drizzle-orm';
+import { eq, inArray } from 'drizzle-orm';
 import { db } from '@/db/client';
 import { editPlans, renders } from '@/db/schema';
 import { createDownloadUrl, thumbnailKeyFor } from '@/lib/storage';
@@ -147,33 +147,54 @@ export async function GET() {
   const styles = await listStyles();
   const styleNameById = new Map(styles.map((style) => [style.id, style.name]));
 
-  // Card thumbnails are a real frame of the finished video, not a stand-in, so
-  // the list needs one playable URL per job. One query for every finished
-  // render across all of this creator's jobs, keeping the earliest variation
-  // per job, rather than a query per card.
-  const finishedByJobId = new Map<string, string>();
+  /*
+   * Card thumbnails are a real frame of the finished video, not a stand-in, so
+   * the list needs one playable URL per job. The same pass counts how many of
+   * each job's videos have landed and how many did not, which is what the list
+   * and the Home screen label every card with ("4 of 10 ready") and what fills
+   * the tick bars on the running card. One query for every render across all of
+   * this creator's jobs, rather than a query per card.
+   */
+  const firstFinishedByJobId = new Map<string, string>();
+  const doneByJobId = new Map<string, Set<string>>();
+  const failedByJobId = new Map<string, Set<string>>();
+
   if (jobs.length > 0) {
-    const finished = await db
-      .select({ jobId: renders.jobId, storageKey: renders.storageKey })
+    const rows = await db
+      .select({
+        jobId: renders.jobId,
+        id: renders.id,
+        editPlanId: renders.editPlanId,
+        status: renders.status,
+        storageKey: renders.storageKey,
+      })
       .from(renders)
       // Left join, not inner: a talking-head render has no edit plan, and an
       // inner join silently drops it — the job would show as finished with no
       // video to play.
       .leftJoin(editPlans, eq(renders.editPlanId, editPlans.id))
       .where(
-        and(
-          inArray(
-            renders.jobId,
-            jobs.map((job) => job.id)
-          ),
-          eq(renders.status, 'done')
+        inArray(
+          renders.jobId,
+          jobs.map((job) => job.id)
         )
       )
       .orderBy(editPlans.variationNumber);
 
-    for (const row of finished) {
-      if (row.storageKey && !finishedByJobId.has(row.jobId)) {
-        finishedByJobId.set(row.jobId, row.storageKey);
+    for (const row of rows) {
+      // Counted per variation, not per row: a re-run writes a second render for
+      // the same plan, and counting rows would report more finished videos than
+      // the job ever asked for.
+      const key = row.editPlanId ?? row.id;
+      if (row.status === 'done') {
+        if (!doneByJobId.has(row.jobId)) doneByJobId.set(row.jobId, new Set());
+        doneByJobId.get(row.jobId)!.add(key);
+        if (row.storageKey && !firstFinishedByJobId.has(row.jobId)) {
+          firstFinishedByJobId.set(row.jobId, row.storageKey);
+        }
+      } else if (row.status === 'failed') {
+        if (!failedByJobId.has(row.jobId)) failedByJobId.set(row.jobId, new Set());
+        failedByJobId.get(row.jobId)!.add(key);
       }
     }
   }
@@ -181,10 +202,16 @@ export async function GET() {
   return Response.json(
     await Promise.all(
       jobs.map(async (job) => {
-        const storageKey = finishedByJobId.get(job.id);
+        const storageKey = firstFinishedByJobId.get(job.id);
+        const done = doneByJobId.get(job.id) ?? new Set<string>();
+        const failed = failedByJobId.get(job.id) ?? new Set<string>();
         return {
           ...job,
           styleName: job.styleId ? styleNameById.get(job.styleId) ?? null : null,
+          doneCount: done.size,
+          // A variation that failed and was then re-rendered successfully is
+          // not a failure any more, so anything present in both counts as done.
+          failedCount: [...failed].filter((key) => !done.has(key)).length,
           // Presigning a key that may not exist is fine: renders made before
           // thumbnails existed 404 on fetch, and the card falls back to its
           // placeholder rather than showing a broken image.
