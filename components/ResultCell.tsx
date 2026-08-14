@@ -1,8 +1,10 @@
 'use client';
 
+import { useState } from 'react';
 import { Thumb } from '@/components/Thumb';
 import { IconClose, IconDownload, IconPlay } from '@/components/icons';
 import { gradeFor, type Variation } from '@/lib/jobView';
+import { saveVideo } from '@/lib/saveVideo';
 
 /**
  * One cell of the results grid, in whichever of its three states applies.
@@ -13,15 +15,20 @@ import { gradeFor, type Variation } from '@/lib/jobView';
  */
 export function ResultCell({
   variation,
+  fileName,
   playing,
   onPlay,
   onStop,
 }: {
   variation: Variation;
+  /** Human name for the saved file, e.g. "Cloud Slides v2". */
+  fileName: string;
   playing: boolean;
   onPlay: () => void;
   onStop: () => void;
 }) {
+  const [saving, setSaving] = useState(false);
+
   if (variation.status === 'done' && variation.playbackUrl) {
     return (
       <div>
@@ -88,19 +95,34 @@ export function ResultCell({
           )}
         </div>
 
-        <a
+        <button
+          type="button"
           /*
-           * No `download` attribute: it is ignored cross-origin, and R2 is a
-           * different origin. The presigned URL carries the attachment
-           * disposition instead, which is what makes this work on a phone.
+           * Not a link to R2: a cross-origin navigation bounces a standalone PWA
+           * out to an in-app browser. This hands the video to the OS share sheet
+           * instead — "Save Video" to Photos — and only falls back to a direct
+           * download where sharing is unavailable. See {@link saveVideo}.
            */
-          href={variation.downloadUrl ?? undefined}
           className="btn btnOutline btnFull btnSmall"
           style={{ marginTop: 8 }}
+          disabled={saving || !variation.playbackUrl}
+          onClick={async () => {
+            if (!variation.playbackUrl) return;
+            setSaving(true);
+            try {
+              await saveVideo({
+                url: variation.playbackUrl,
+                downloadUrl: variation.downloadUrl,
+                name: fileName,
+              });
+            } finally {
+              setSaving(false);
+            }
+          }}
         >
           <IconDownload size={14} />
-          Download
-        </a>
+          {saving ? 'Saving…' : 'Download'}
+        </button>
       </div>
     );
   }

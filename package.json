@@ -9,7 +9,8 @@
     "lint": "eslint",
     "test": "vitest run",
     "worker": "tsx --env-file-if-exists=.env.local worker.ts",
-    "seed:styles": "tsx --env-file-if-exists=.env.local db/seed-styles.ts"
+    "seed:styles": "tsx --env-file-if-exists=.env.local db/seed-styles.ts",
+    "set-r2-cors": "tsx --env-file-if-exists=.env.local scripts/set-r2-cors.ts"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1096.0",

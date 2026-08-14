@@ -10,6 +10,7 @@ import { ResultCell } from '@/components/ResultCell';
 import { NotifyWhenReady } from '@/components/NotifyWhenReady';
 import { IconChevronLeft } from '@/components/icons';
 import { displayStatus, isRunning, type JobDetail } from '@/lib/jobView';
+import { saveVideos } from '@/lib/saveVideo';
 
 const POLL_MS = 5000;
 
@@ -18,6 +19,7 @@ export default function JobDetailPage() {
   const [job, setJob] = useState<JobDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [playing, setPlaying] = useState<number | null>(null);
+  const [savingAll, setSavingAll] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -108,15 +110,28 @@ export default function JobDetailPage() {
   ].join(' · ');
 
   /*
-   * Opens every finished video at once. Mobile browsers block windows after the
-   * first, so this is a convenience on desktop and each cell keeps its own
-   * Download button, which is what works on a phone. A server-side zip would be
-   * one request but lands as a 300MB archive in Files that still has to be
-   * unzipped and saved to Photos one video at a time, which is worse.
+   * Saves every finished video in one action. On a phone the OS share sheet
+   * takes them all together — one "Save N Videos" to Photos — rather than the
+   * old per-file `window.open`, which mobile browsers blocked after the first.
+   * A server-side zip would be one request but lands as a 300MB archive in
+   * Files that still has to be unzipped and saved to Photos one video at a
+   * time, which is worse. See {@link saveVideos}.
    */
-  function downloadAll() {
-    for (const variation of done) {
-      if (variation.downloadUrl) window.open(variation.downloadUrl, '_blank');
+  async function downloadAll() {
+    if (!job) return;
+    setSavingAll(true);
+    try {
+      await saveVideos(
+        done
+          .filter((variation) => variation.playbackUrl)
+          .map((variation) => ({
+            url: variation.playbackUrl as string,
+            downloadUrl: variation.downloadUrl,
+            name: `${job.productName} v${variation.variationNumber}`,
+          }))
+      );
+    } finally {
+      setSavingAll(false);
     }
   }
 
@@ -175,8 +190,13 @@ export default function JobDetailPage() {
               <div className="sectionLabelRow" style={{ marginBottom: 14 }}>
                 <span className="sectionLabel">{gridTitle}</span>
                 {(status === 'done' || status === 'partial') && done.length > 1 && (
-                  <button type="button" className="btn btnSmall" onClick={downloadAll}>
-                    All
+                  <button
+                    type="button"
+                    className="btn btnSmall"
+                    onClick={downloadAll}
+                    disabled={savingAll}
+                  >
+                    {savingAll ? 'Saving…' : 'All'}
                   </button>
                 )}
               </div>
@@ -191,6 +211,7 @@ export default function JobDetailPage() {
                     <ResultCell
                       key={variation.variationNumber}
                       variation={variation}
+                      fileName={`${job.productName} v${variation.variationNumber}`}
                       playing={playing === variation.variationNumber}
                       onPlay={() => setPlaying(variation.variationNumber)}
                       onStop={() => setPlaying(null)}
