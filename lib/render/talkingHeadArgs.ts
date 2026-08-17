@@ -93,6 +93,7 @@ export function buildTalkingHeadArgs(input: {
     '-filter_complex', filterComplex,
     '-map', '[v]', '-map', '[ac]',
     '-c:v', 'libx264', '-preset', 'veryfast', '-crf', profile.finalCrf,
+    ...profile.encodeArgs,
     '-pix_fmt', 'yuv420p',
     // Tag the picture as what every tester clip measured — tv-range BT.709 —
     // rather than leaving an upload pipeline to guess and shift the colour.

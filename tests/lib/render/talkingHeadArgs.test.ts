@@ -68,13 +68,15 @@ describe('buildTalkingHeadArgs', () => {
       ...base,
       runs: [{ startSeconds: 0, endSeconds: 2 }],
     });
-    // The 1080p path must be exactly what it was before quality was an option.
+    // The 1080p path must be exactly what it was before quality was an option,
+    // including keeping ffmpeg's fast thread defaults (1080p never OOM'd).
     expect(graphOf(args)).toContain('scale=1080:1920');
     expect(graphOf(args)).toContain('crop=1080:1920');
     expect(crfOf(args)).toBe('13');
+    expect(args).not.toContain('-threads');
   });
 
-  it('renders at native 4K with the 4K CRF when the 4K profile is passed', () => {
+  it('renders at native 4K with the 4K CRF and a capped thread count', () => {
     const args = buildTalkingHeadArgs({
       ...base,
       runs: [{ startSeconds: 0, endSeconds: 2 }],
@@ -83,6 +85,9 @@ describe('buildTalkingHeadArgs', () => {
     expect(graphOf(args)).toContain('scale=2160:3840');
     expect(graphOf(args)).toContain('crop=2160:3840');
     expect(crfOf(args)).toBe('14');
+    // The memory fix: 4K must cap libx264's threads, or a container that sees
+    // every host CPU fans out to ~2.5GB of frame buffers and is OOM-killed.
+    expect(args[args.indexOf('-threads') + 1]).toBe('2');
   });
 
   it('cleans background noise by default but leaves it when asked', () => {

@@ -507,6 +507,7 @@ export async function overlayText(input: {
        * larger file.
        */
       '-c:v', 'libx264', '-preset', 'veryfast', '-crf', profile.finalCrf,
+      ...profile.encodeArgs,
       '-pix_fmt', 'yuv420p',
       // Tag what the picture actually is rather than leaving it to be inferred.
       // Every tester clip measured tv-range BT.709; an untagged 4K file invites

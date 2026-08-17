@@ -367,6 +367,7 @@ export async function normaliseCut(input: {
       ? ['-map', '[a]', '-c:a', 'aac', '-b:a', AUDIO_BITRATE, '-ar', String(AUDIO_RATE), '-ac', String(AUDIO_CHANNELS)]
       : ['-an']),
     '-c:v', 'libx264', '-preset', 'superfast', '-crf', profile.intermediateCrf,
+    ...profile.encodeArgs,
     '-pix_fmt', 'yuv420p',
     // Carried explicitly so the cut is tagged the same way the source was
     // (measured: every tester clip is tv-range BT.709). Untagged parts would

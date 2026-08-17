@@ -94,6 +94,20 @@ export type QualityProfile = {
   intermediateCrf: string;
   /** CRF for the delivered encode. */
   finalCrf: string;
+  /**
+   * Extra ffmpeg args spliced into every libx264 command for this profile,
+   * right after the CRF.
+   *
+   * This is where 4K's memory is kept in check. Left to itself, libx264 opens
+   * roughly 1.5 frame-threads per CPU, and in a container it sees every host
+   * core — so a 4K encode fans out to a couple dozen threads, each holding its
+   * own full 2160×3840 frame, and peaks around 2.5GB. Sharing the box with the
+   * ~1GB worker process, that is an OOM-kill (measured: renders died with
+   * SIGKILL at the final encode). Capping threads brings the same encode to
+   * ~1.1GB; the low lookahead trims a little more. 1080p frames are a quarter
+   * the size and never came close, so it keeps ffmpeg's fast defaults.
+   */
+  encodeArgs: string[];
   /** Scales a length authored at the 1080-wide reference frame to this profile. */
   scaled(lengthAtReferenceWidth: number): number;
 };
@@ -103,7 +117,8 @@ function makeProfile(
   width: number,
   height: number,
   intermediateCrf: string,
-  finalCrf: string
+  finalCrf: string,
+  encodeArgs: string[]
 ): QualityProfile {
   return {
     quality,
@@ -112,16 +127,22 @@ function makeProfile(
     fps: FPS,
     intermediateCrf,
     finalCrf,
+    encodeArgs,
     scaled: (lengthAtReferenceWidth) =>
       Math.round((lengthAtReferenceWidth * width) / REFERENCE_WIDTH),
   };
 }
 
 export const QUALITY_PROFILES: Record<RenderQuality, QualityProfile> = {
-  // Exactly the previous behaviour: 1080×1920, the CRFs the render layer shipped.
-  '1080p': makeProfile('1080p', WIDTH, HEIGHT, '11', '13'),
-  // Native 4K portrait, at the CRFs the frame-size investigation measured.
-  '4k': makeProfile('4k', 2160, 3840, '12', '14'),
+  // Exactly the previous behaviour: 1080×1920, the CRFs the render layer
+  // shipped, and ffmpeg's own thread defaults — 1080p never threatened memory.
+  '1080p': makeProfile('1080p', WIDTH, HEIGHT, '11', '13', []),
+  // Native 4K portrait, at the CRFs the frame-size investigation measured, with
+  // libx264 held to 2 threads and a short lookahead so the encode fits in RAM.
+  '4k': makeProfile('4k', 2160, 3840, '12', '14', [
+    '-threads', '2',
+    '-x264-params', 'sync-lookahead=0:rc-lookahead=10',
+  ]),
 };
 
 /** The default every un-updated caller and every pre-4K job renders at. */
