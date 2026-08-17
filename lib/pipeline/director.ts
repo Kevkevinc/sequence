@@ -542,9 +542,16 @@ function withItemSlotIfNamed(hooks: string[], job: Job): string[] {
   return job.productName?.trim() ? hooks : hooksWithoutItemSlot(hooks);
 }
 
-function shortProductNoun(productName: string): string {
+export function shortProductNoun(productName: string): string {
   const words = productName.trim().split(/\s+/).filter(Boolean);
-  return (words[words.length - 1] ?? productName).toLowerCase();
+  // The item noun is normally the last word ("streetwear zip-up hoodie" ->
+  // "hoodie"). But a trailing model number or SKU — "#1", "v2", "(black)" — is
+  // not what the item *is*, and picking it makes every hook say "#1". Prefer the
+  // last plain word (letters only) and fall back to the raw last word only when
+  // there is no real word at all.
+  const plainWords = words.filter((w) => /^[a-z][a-z'-]*$/i.test(w));
+  const chosen = plainWords[plainWords.length - 1] ?? words[words.length - 1] ?? productName;
+  return chosen.toLowerCase();
 }
 
 function round2(seconds: number): number {
