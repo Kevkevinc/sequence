@@ -28,6 +28,7 @@ export function ResultCell({
   onStop: () => void;
 }) {
   const [saving, setSaving] = useState(false);
+  const [progress, setProgress] = useState<number | null>(null);
 
   if (variation.status === 'done' && variation.playbackUrl) {
     return (
@@ -109,19 +110,28 @@ export function ResultCell({
           onClick={async () => {
             if (!variation.playbackUrl) return;
             setSaving(true);
+            setProgress(null);
             try {
-              await saveVideo({
-                url: variation.playbackUrl,
-                downloadUrl: variation.downloadUrl,
-                name: fileName,
-              });
+              await saveVideo(
+                {
+                  url: variation.playbackUrl,
+                  downloadUrl: variation.downloadUrl,
+                  name: fileName,
+                },
+                (fraction) => setProgress(fraction)
+              );
             } finally {
               setSaving(false);
+              setProgress(null);
             }
           }}
         >
           <IconDownload size={14} />
-          {saving ? 'Saving…' : 'Download'}
+          {saving
+            ? progress !== null
+              ? `Saving ${Math.round(progress * 100)}%`
+              : 'Saving…'
+            : 'Download'}
         </button>
       </div>
     );

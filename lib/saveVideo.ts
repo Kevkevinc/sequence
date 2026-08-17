@@ -1,40 +1,47 @@
 /**
  * Saving a finished video from the installed app.
  *
- * The videos live on R2, a different origin from the app. That single fact
- * shapes everything here:
+ * The videos live on R2, a different origin from the app, which shapes
+ * everything here. Two ways to get a video onto the phone:
  *
- *  - The HTML `download` attribute is ignored cross-origin, so a plain link to
- *    R2 cannot force a save — it just *navigates* there. Inside a standalone
- *    PWA a top-level navigation to another origin is bounced out to an in-app
- *    browser (the "Cloudflare page" a creator sees), where they then have to
- *    save by hand. That is the detour this module exists to avoid.
- *  - `window.open` per file is worse still: mobile browsers block every popup
- *    after the first, so "save them all" saved at most one.
- *
- * The native path on a phone is the OS share sheet: fetch the video's bytes,
- * wrap them in a `File`, and hand it to {@link navigator.share}. That surfaces
- * "Save Video" (to Photos) and every share target — TikTok included — without
- * ever leaving the app, and takes several files in a single action.
+ *  - **Share sheet** (`navigator.share({ files })`): the nice one — "Save Video"
+ *    straight to Photos, or share to TikTok, without leaving the app. But it
+ *    needs the whole video *in memory* first, and iOS refuses files past a few
+ *    hundred MB. A 4K video is ~25MB/s (a 30s clip ≈ 800MB), so the share sheet
+ *    both takes forever to load and then silently rejects it. So this path is
+ *    only used for videos small enough to actually go through it (1080p).
+ *  - **Direct download** (a link to the presigned attachment URL): the browser
+ *    streams it to Files with its own progress UI — no in-memory copy, any size.
+ *    Used for large videos and as the fallback whenever the share sheet is
+ *    unavailable or fails. Lands in Files rather than Photos, which for a
+ *    several-hundred-MB 4K master is the only place iOS will put it anyway.
  *
  * Fetching the bytes cross-origin needs the bucket to allow it; see
- * `scripts/set-r2-cors.ts`. Where the share sheet is unavailable (desktop) or
- * anything fails, we fall back to a direct download from the presigned
- * attachment URL, which is exactly what the app did before — degraded, but
- * never silent.
+ * `scripts/set-r2-cors.ts`.
  */
+
+/**
+ * Largest video handed to the OS share sheet. Above this iOS tends to reject
+ * the file (and buffering it in memory is slow and can crash the tab), so a
+ * bigger video goes straight to a direct download instead. 1080p exports sit
+ * well under this; 4K exports sit well over it.
+ */
+const SHARE_MAX_BYTES = 150 * 1024 * 1024;
 
 export type SaveableVideo = {
   /** Presigned URL the bytes are fetched from (the inline playback URL is fine). */
   url: string;
   /**
-   * Presigned URL whose response is an attachment. Used for the desktop / no-
-   * share fallback, where the browser downloads it directly.
+   * Presigned URL whose response is an attachment. The direct-download path
+   * points the browser at this so it saves rather than plays.
    */
   downloadUrl?: string | null;
   /** Human name for the saved file, without extension. */
   name: string;
 };
+
+/** Reports 0..1 download progress, for a button that would otherwise look dead. */
+export type ProgressFn = (fraction: number) => void;
 
 /** A filesystem-safe `.mp4` name; the share sheet and Files app show this. */
 function fileNameFor(name: string): string {
@@ -46,13 +53,7 @@ function fileNameFor(name: string): string {
   return `${base || 'video'}.mp4`;
 }
 
-/**
- * Whether this browser can hand video files to the OS share sheet.
- *
- * Probed with an empty placeholder file so we test the capability *before*
- * fetching megabytes we might not be able to use — on a desktop browser with no
- * file sharing this returns false and we never download the video at all.
- */
+/** Whether this browser can hand video files to the OS share sheet at all. */
 function canShareVideos(count: number): boolean {
   if (typeof navigator === 'undefined' || typeof navigator.canShare !== 'function') {
     return false;
@@ -68,20 +69,38 @@ function canShareVideos(count: number): boolean {
   }
 }
 
-async function fetchAsFile(video: SaveableVideo): Promise<File> {
-  const res = await fetch(video.url);
-  if (!res.ok) throw new Error(`Could not fetch the video (${res.status})`);
-  const blob = await res.blob();
-  return new File([blob], fileNameFor(video.name), { type: blob.type || 'video/mp4' });
+/**
+ * Reads a response body into a File, reporting progress as it goes.
+ *
+ * Streamed rather than `res.blob()` so the button can show real progress on a
+ * large file instead of a spinner that looks stuck.
+ */
+async function readToFile(res: Response, name: string, onProgress?: ProgressFn): Promise<File> {
+  const total = Number(res.headers.get('content-length')) || 0;
+  const reader = res.body?.getReader();
+  if (!reader) {
+    // No streaming reader (very old browser): fall back to a plain blob.
+    return new File([await res.blob()], fileNameFor(name), { type: 'video/mp4' });
+  }
+  const chunks: BlobPart[] = [];
+  let loaded = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value);
+    loaded += value.byteLength;
+    if (total > 0) onProgress?.(loaded / total);
+  }
+  return new File(chunks, fileNameFor(name), { type: 'video/mp4' });
 }
 
-/** The cross-origin-safe direct download the app used before the share sheet. */
-function anchorDownload(video: SaveableVideo): void {
+/** The cross-origin-safe direct download: the browser streams it to Files itself. */
+function directDownload(video: SaveableVideo): void {
   const anchor = document.createElement('a');
   anchor.href = video.downloadUrl ?? video.url;
   anchor.rel = 'noopener';
   // Honoured same-origin; cross-origin the presigned attachment disposition
-  // carries the filename instead. Harmless either way.
+  // carries the filename and forces the save instead.
   anchor.download = fileNameFor(video.name);
   document.body.appendChild(anchor);
   anchor.click();
@@ -94,33 +113,45 @@ function isShareCancel(err: unknown): boolean {
 }
 
 /**
- * Saves one video: share sheet where possible, direct download otherwise.
+ * Saves one video: share sheet for small ones, direct download otherwise.
  *
- * Resolves once the sheet is shown (or the download begins); it does not wait
- * for the creator to pick a target.
+ * `onProgress` reports the fetch of a shareable video (0..1). A direct download
+ * has no in-app progress — the browser shows its own — so it is not reported.
+ * Resolves once the share sheet is shown or the download has started.
  */
-export async function saveVideo(video: SaveableVideo): Promise<void> {
+export async function saveVideo(video: SaveableVideo, onProgress?: ProgressFn): Promise<void> {
   if (canShareVideos(1)) {
+    const controller = new AbortController();
     try {
-      const file = await fetchAsFile(video);
-      if (navigator.canShare({ files: [file] })) {
-        await navigator.share({ files: [file] });
-        return;
+      const res = await fetch(video.url, { signal: controller.signal });
+      if (!res.ok) throw new Error(`Could not fetch the video (${res.status})`);
+
+      const total = Number(res.headers.get('content-length')) || 0;
+      if (total > 0 && total <= SHARE_MAX_BYTES) {
+        const file = await readToFile(res, video.name, onProgress);
+        if (navigator.canShare({ files: [file] })) {
+          await navigator.share({ files: [file] });
+          return;
+        }
+      } else {
+        // Too big for the share sheet (or unknown size): don't spend minutes
+        // buffering a file iOS will reject — stop the fetch and download direct.
+        controller.abort();
       }
     } catch (err) {
       if (isShareCancel(err)) return;
-      // Any other failure (offline, expired URL, bucket not yet CORS-enabled)
-      // drops through to the download below rather than leaving a dead button.
+      // Anything else (offline, expired URL, share refused) drops to a download.
     }
   }
-  anchorDownload(video);
+  directDownload(video);
 }
 
 /**
- * Saves several videos in one action.
+ * Saves several videos at once.
  *
- * The share sheet takes them all at once — one "Save N Videos" on a phone.
- * Without it, each falls back to its own direct download.
+ * When they are all small enough, the share sheet takes them together — one
+ * "Save N Videos". Otherwise each is downloaded directly, which is also what
+ * happens for 4K, where the files are far too big to share.
  */
 export async function saveVideos(videos: SaveableVideo[]): Promise<void> {
   if (videos.length === 0) return;
@@ -128,7 +159,16 @@ export async function saveVideos(videos: SaveableVideo[]): Promise<void> {
 
   if (canShareVideos(videos.length)) {
     try {
-      const files = await Promise.all(videos.map(fetchAsFile));
+      const files: File[] = [];
+      for (const video of videos) {
+        const res = await fetch(video.url);
+        if (!res.ok) throw new Error(`Could not fetch the video (${res.status})`);
+        const total = Number(res.headers.get('content-length')) || 0;
+        // If any one is too big to share, sharing the batch will fail too —
+        // bail out to per-file downloads rather than buffer them all.
+        if (total === 0 || total > SHARE_MAX_BYTES) throw new Error('too large to share');
+        files.push(await readToFile(res, video.name));
+      }
       if (navigator.canShare({ files })) {
         await navigator.share({ files });
         return;
@@ -138,5 +178,5 @@ export async function saveVideos(videos: SaveableVideo[]): Promise<void> {
       // Fall through to per-file downloads.
     }
   }
-  for (const video of videos) anchorDownload(video);
+  for (const video of videos) directDownload(video);
 }
