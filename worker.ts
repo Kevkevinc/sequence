@@ -444,10 +444,19 @@ type RenderOutcome = { variationNumber: number; success: boolean; error?: string
  * Generous on purpose. A real variation is ~2-3 minutes on the deployed worker,
  * so 20 leaves room for a slow container and a big download without ever
  * tripping on healthy work.
+ *
+ * 4K renders take ~5× as long, so {@link renderJob} triples this for them —
+ * enough headroom that a slow 4K variation is never abandoned mid-encode while
+ * a genuinely stuck one still fails in bounded time.
  */
 const VARIATION_TIMEOUT_MS = 20 * 60 * 1000;
+const FOUR_K_TIMEOUT_MULTIPLIER = 3;
 
-async function renderVariation(jobId: string, plan: typeof editPlans.$inferSelect): Promise<RenderOutcome> {
+async function renderVariation(
+  jobId: string,
+  plan: typeof editPlans.$inferSelect,
+  timeoutMs: number = VARIATION_TIMEOUT_MS
+): Promise<RenderOutcome> {
   let renderRowId: string | undefined;
   try {
     const [renderRow] = await db
@@ -460,8 +469,8 @@ async function renderVariation(jobId: string, plan: typeof editPlans.$inferSelec
       renderPlan(plan.id),
       new Promise<never>((_, reject) =>
         setTimeout(
-          () => reject(new Error(`Rendering this variation exceeded ${VARIATION_TIMEOUT_MS / 60000} minutes and was abandoned.`)),
-          VARIATION_TIMEOUT_MS
+          () => reject(new Error(`Rendering this variation exceeded ${Math.round(timeoutMs / 60000)} minutes and was abandoned.`)),
+          timeoutMs
         )
       ),
     ]);
@@ -625,6 +634,11 @@ export async function renderJob(jobId: string): Promise<void> {
       return;
     }
 
+    // 4K variations render ~5× slower, so they get a longer leash before the
+    // backstop abandons them.
+    const variationTimeout =
+      job.quality === '4k' ? VARIATION_TIMEOUT_MS * FOUR_K_TIMEOUT_MULTIPLIER : VARIATION_TIMEOUT_MS;
+
     const outcomes: RenderOutcome[] = [];
     for (const plan of plans) {
       // Not wrapped in timed(): renderVariation returns failure instead of
@@ -633,7 +647,7 @@ export async function renderJob(jobId: string): Promise<void> {
       // outcome instead.
       const startedAt = Date.now();
       log(`  Rendering variation ${plan.variationNumber} of ${plans.length}...`);
-      const outcome = await renderVariation(jobId, plan);
+      const outcome = await renderVariation(jobId, plan, variationTimeout);
       log(
         outcome.success
           ? `  Variation ${plan.variationNumber} done in ${since(startedAt)}`

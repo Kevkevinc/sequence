@@ -38,6 +38,7 @@ export function StageTimeline({ job, doneCount }: { job: JobDetail; doneCount: n
       variationCount: job.variationCount,
       doneCount,
       clipCount: job.clipCount,
+      quality: job.quality,
     },
     now
   );

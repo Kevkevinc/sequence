@@ -1,4 +1,4 @@
-import { HEIGHT, WIDTH, scaled as scaleToFrame } from '@/lib/render/frame';
+import { DEFAULT_PROFILE, type QualityProfile } from '@/lib/render/frame';
 import { captionFont } from '@/lib/render/fonts';
 import type { CaptionSettings } from '@/lib/render/captionSettings';
 import type { CaptionCue } from '@/lib/pipeline/align';
@@ -68,12 +68,13 @@ export function escapeAssText(text: string): string {
 export function buildAssFile(
   cues: CaptionCue[],
   settings: CaptionSettings,
-  options: { position?: { x: number; y: number } } = {}
+  options: { position?: { x: number; y: number }; profile?: QualityProfile } = {}
 ): string {
+  const profile = options.profile ?? DEFAULT_PROFILE;
   const font = captionFont(settings.fontId);
-  const fontSize = scaleToFrame(settings.sizingFontSize);
-  const x = Math.round((options.position?.x ?? 0.5) * WIDTH);
-  const y = Math.round((options.position?.y ?? 0.78) * HEIGHT);
+  const fontSize = profile.scaled(settings.sizingFontSize);
+  const x = Math.round((options.position?.x ?? 0.5) * profile.width);
+  const y = Math.round((options.position?.y ?? 0.78) * profile.height);
 
   // Matches the burned-in hook: white fill over a dark outline, no drop shadow.
   // The outline is what keeps a caption readable over arbitrary footage.
@@ -84,8 +85,8 @@ export function buildAssFile(
     'ScriptType: v4.00+',
     'WrapStyle: 0',
     'ScaledBorderAndShadow: yes',
-    `PlayResX: ${WIDTH}`,
-    `PlayResY: ${HEIGHT}`,
+    `PlayResX: ${profile.width}`,
+    `PlayResY: ${profile.height}`,
     '',
     '[V4+ Styles]',
     'Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour,' +

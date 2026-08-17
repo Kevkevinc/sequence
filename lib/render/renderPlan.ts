@@ -24,6 +24,7 @@ import {
 import { normaliseCut } from '@/lib/render/normalise';
 import { concatCuts } from '@/lib/render/concat';
 import { overlayText } from '@/lib/render/text';
+import { profileForQuality } from '@/lib/render/frame';
 import { probeDuration, runFfmpeg } from '@/lib/render/ffmpeg';
 import type { OverlayPlacement } from '@/lib/editPlan';
 import { StyleConfigSchema } from '@/lib/styles';
@@ -84,6 +85,11 @@ export async function renderPlan(editPlanId: string): Promise<RenderPlanResult> 
     if (!job) {
       return { success: false, error: `Job ${plan.jobId} for edit plan ${editPlanId} was not found` };
     }
+
+    // The resolution the creator chose. Everything the render draws — the
+    // reframe, the caption metrics, the intro cutouts, the final CRF — sizes
+    // itself from this.
+    const profile = profileForQuality(job.quality);
 
     /*
      * The look this job's captions start from.
@@ -176,7 +182,7 @@ export async function renderPlan(editPlanId: string): Promise<RenderPlanResult> 
       // image). Best effort, like everything else derived from the style here:
       // a failure costs the intro, not the whole video.
       try {
-        fitInspoLayers = await prepareFitInspoLayers(fitInspoSources, tempDir);
+        fitInspoLayers = await prepareFitInspoLayers(fitInspoSources, tempDir, profile);
       } catch (error) {
         console.warn(
           `Render ${plan.id}: Fit Inspo intro failed, rendering without it: ` +
@@ -207,6 +213,7 @@ export async function renderPlan(editPlanId: string): Promise<RenderPlanResult> 
         startSeconds: segment.startSeconds,
         endSeconds: segment.endSeconds,
         outputPath: partPath,
+        profile,
       });
       if (!result.success) {
         return {
@@ -260,6 +267,7 @@ export async function renderPlan(editPlanId: string): Promise<RenderPlanResult> 
       captionSettings,
       inspirationImagePath: inspirationImageClip?.path,
       fitInspoLayers,
+      profile,
     });
     if (!textResult.success) {
       return { success: false, error: `Failed to add on-screen text: ${textResult.error}` };

@@ -2,7 +2,7 @@ import { readFile, writeFile } from 'fs/promises';
 import path from 'path';
 import { pathToFileURL } from 'url';
 import { removeBackground } from '@imgly/background-removal-node';
-import { HEIGHT, WIDTH } from '@/lib/render/frame';
+import { DEFAULT_PROFILE, type QualityProfile } from '@/lib/render/frame';
 
 /**
  * The Fit Inspo intro: reference images stacking up over the opening footage
@@ -88,7 +88,13 @@ export type FitInspoLayer = {
  * reads as a hand-placed stack rather than a list. Ratios rather than pixels so
  * this survives a change of output resolution.
  */
-function placementFor(index: number, count: number, width: number, height: number) {
+function placementFor(
+  index: number,
+  count: number,
+  width: number,
+  height: number,
+  profile: QualityProfile
+) {
   const laneCentreX = [0.28, 0.34, 0.24, 0.32][index % 4];
   // Spread the stack down the upper two-thirds: below that it collides with the
   // sizing overlay, which lives in a bottom quadrant.
@@ -99,12 +105,12 @@ function placementFor(index: number, count: number, width: number, height: numbe
 
   // Clamped rather than trusted: the lane centres assume a portrait-ish image,
   // and a wide one placed on centre alone hangs off the side of the frame.
-  const margin = Math.round(WIDTH * FIT_INSPO.marginRatio);
+  const margin = Math.round(profile.width * FIT_INSPO.marginRatio);
   const clamp = (value: number, max: number) => Math.max(margin, Math.min(value, max - margin));
 
   return {
-    x: clamp(Math.round(WIDTH * laneCentreX - width / 2), WIDTH - width),
-    y: clamp(Math.round(HEIGHT * centreY - height / 2), HEIGHT - height),
+    x: clamp(Math.round(profile.width * laneCentreX - width / 2), profile.width - width),
+    y: clamp(Math.round(profile.height * centreY - height / 2), profile.height - height),
   };
 }
 
@@ -137,7 +143,8 @@ async function removeBackgroundBounded(url: string, timeoutMs: number): Promise<
 
 export async function prepareFitInspoLayers(
   sources: FitInspoSource[],
-  workingDir: string
+  workingDir: string,
+  profile: QualityProfile = DEFAULT_PROFILE
 ): Promise<FitInspoLayer[]> {
   const used = sources.slice(0, FIT_INSPO.maxImages);
   const layers: FitInspoLayer[] = [];
@@ -164,8 +171,8 @@ export async function prepareFitInspoLayers(
       }
     }
 
-    const { width, height } = await scaledSize(file, used.length);
-    const { x, y } = placementFor(index, used.length, width, height);
+    const { width, height } = await scaledSize(file, used.length, profile);
+    const { x, y } = placementFor(index, used.length, width, height, profile);
 
     layers.push({
       file,
@@ -189,16 +196,17 @@ export async function prepareFitInspoLayers(
  */
 async function scaledSize(
   file: string,
-  count: number
+  count: number,
+  profile: QualityProfile
 ): Promise<{ width: number; height: number }> {
   const { loadImage } = await import('@napi-rs/canvas');
   const image = await loadImage(await readFile(file));
   const aspect = image.width / image.height;
   const ratio = FIT_INSPO.heightRatioFor[count] ?? FIT_INSPO.heightRatioFor[4];
-  let height = Math.round(HEIGHT * ratio);
+  let height = Math.round(profile.height * ratio);
   let width = Math.round(aspect * height);
 
-  const maxWidth = Math.round(WIDTH * FIT_INSPO.maxWidthRatio);
+  const maxWidth = Math.round(profile.width * FIT_INSPO.maxWidthRatio);
   if (width > maxWidth) {
     width = maxWidth;
     height = Math.round(maxWidth / aspect);

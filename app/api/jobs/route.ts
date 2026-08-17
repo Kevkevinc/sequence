@@ -125,6 +125,9 @@ export async function POST(req: Request) {
     // something cosmetic.
     captionSettings: CaptionSettingsSchema.safeParse(body.captionSettings).data,
     kind: body.kind === 'talking' ? 'talking' : 'cuts',
+    // Coerced, not trusted: anything but the explicit '4k' opt-in falls back to
+    // the 1080p default rather than failing job creation over a bad value.
+    quality: body.quality === '4k' ? '4k' : '1080p',
     clips: body.clips,
     inspirationImage: hasInspirationImage ? { storageKey: inspirationImage.storageKey } : undefined,
     inspirationImages: fitInspoImages,

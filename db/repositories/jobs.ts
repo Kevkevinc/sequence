@@ -23,6 +23,8 @@ export type CreateJobInput = {
   captionSettings?: CaptionSettings;
   /** Which editor runs this job. Defaults to the original silent pipeline. */
   kind?: 'cuts' | 'talking';
+  /** Output resolution. Defaults to 1080p. */
+  quality?: '1080p' | '4k';
   clips: { storageKey: string; originalFilename: string }[];
   inspirationImage?: { storageKey: string };
   /**
@@ -48,6 +50,7 @@ export async function createJob(input: CreateJobInput) {
         variationCount: input.variationCount,
         captionSettings: input.captionSettings ?? null,
         kind: input.kind ?? 'cuts',
+        quality: input.quality ?? '1080p',
       })
       .returning();
 

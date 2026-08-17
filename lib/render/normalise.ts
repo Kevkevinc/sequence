@@ -4,7 +4,7 @@ import { promisify } from 'util';
 import ffmpegPath from 'ffmpeg-static';
 import { probeMedia, type MediaInfo, runFfmpeg } from '@/lib/render/ffmpeg';
 
-import { FPS, HEIGHT, WIDTH } from '@/lib/render/frame';
+import { FPS, DEFAULT_PROFILE, type QualityProfile } from '@/lib/render/frame';
 
 const execFileAsync = promisify(execFile);
 
@@ -34,9 +34,19 @@ const execFileAsync = promisify(execFile);
  */
 const DOWNSCALE_SHARPEN = 'unsharp=5:5:0.8:5:5:0.0';
 
-const REFRAME =
-  `scale=${WIDTH}:${HEIGHT}:force_original_aspect_ratio=increase:flags=lanczos,` +
-  `crop=${WIDTH}:${HEIGHT},${DOWNSCALE_SHARPEN},setsar=1,fps=${FPS}`;
+/**
+ * The scale-crop-sharpen chain that fits any source into one output frame.
+ *
+ * A function of the profile rather than a constant, so a job's chosen
+ * resolution reaches the picture. At 1080p it produces exactly the string this
+ * was before; at 4K the same chain fills a 2160×3840 frame instead.
+ */
+export function reframeFor(profile: QualityProfile): string {
+  return (
+    `scale=${profile.width}:${profile.height}:force_original_aspect_ratio=increase:flags=lanczos,` +
+    `crop=${profile.width}:${profile.height},${DOWNSCALE_SHARPEN},setsar=1,fps=${profile.fps}`
+  );
+}
 
 /**
  * Quality of the per-cut intermediate.
@@ -51,8 +61,10 @@ const REFRAME =
  * job is to make every cut agree on codec, size and frame rate so
  * {@link concatCuts} can stream-copy them — so encoder effort here buys
  * nothing the final pass keeps, and the faster preset costs only disk.
+ *
+ * The value now comes from the job's {@link QualityProfile} (11 at 1080p, 12 at
+ * 4K) rather than a constant here.
  */
-const INTERMEDIATE_CRF = '11';
 
 /**
  * Rounds a time to the nearest frame boundary.
@@ -63,7 +75,7 @@ const INTERMEDIATE_CRF = '11';
  * (the `-t` passed to ffmpeg, the length concat expects) is one the video can
  * actually land on exactly, rather than one ffmpeg silently rounds away from.
  */
-function snapToFrame(seconds: number): number {
+export function snapToFrame(seconds: number): number {
   return Math.round(seconds * FPS) / FPS;
 }
 
@@ -75,8 +87,8 @@ function snapToFrame(seconds: number): number {
  * `setpts=N/FRAME_RATE/TB` renumbers what is left as consecutive frames from
  * zero, so the stream is the snapped length with no timestamp gaps.
  */
-function videoChain(seconds: string): string {
-  return `[0:v:0]${REFRAME},trim=duration=${seconds},setpts=N/FRAME_RATE/TB[v]`;
+function videoChain(seconds: string, profile: QualityProfile): string {
+  return `[0:v:0]${reframeFor(profile)},trim=duration=${seconds},setpts=N/FRAME_RATE/TB[v]`;
 }
 
 /**
@@ -84,9 +96,9 @@ function videoChain(seconds: string): string {
  * together. Concatenation by copy needs identical codec, rate and layout —
  * exactly the same precondition the video side already satisfies.
  */
-const AUDIO_RATE = 48_000;
-const AUDIO_CHANNELS = 2;
-const AUDIO_BITRATE = '192k';
+export const AUDIO_RATE = 48_000;
+export const AUDIO_CHANNELS = 2;
+export const AUDIO_BITRATE = '192k';
 
 /**
  * Cleans up the recording before it is cut.
@@ -113,7 +125,7 @@ const AUDIO_BITRATE = '192k';
  * cut. With tracking on, each cut would adapt to its own few seconds and the
  * background would shift audibly at every splice.
  */
-const AUDIO_CLEANUP = 'highpass=f=85,afftdn=nf=-25:tn=0';
+export const AUDIO_CLEANUP = 'highpass=f=85,afftdn=nf=-25:tn=0';
 
 /**
  * How far under the louder channel a channel counts as carrying nothing.
@@ -181,7 +193,7 @@ ${withOutput.stderr ?? ''}`;
  * is no stereo image in that to protect, and half the audience is listening on
  * one earbud or a phone speaker where a hard-panned anything is a defect.
  */
-function centreChannels(balance: ChannelBalance): string {
+export function centreChannels(balance: ChannelBalance): string {
   if (balance === 'left-only') return 'pan=stereo|c0=c0|c1=c0,';
   if (balance === 'right-only') return 'pan=stereo|c0=c1|c1=c1,';
   return 'pan=stereo|c0=0.5*c0+0.5*c1|c1=0.5*c0+0.5*c1,';
@@ -270,7 +282,13 @@ export async function normaliseCut(input: {
    * the same trap as noise tracking, and just as audible at the splice.
    */
   channelBalance?: ChannelBalance;
+  /**
+   * Output resolution and CRF. Defaults to 1080p so callers that predate the
+   * quality option render exactly as before.
+   */
+  profile?: QualityProfile;
 }): Promise<{ success: true } | { success: false; error: string }> {
+  const profile = input.profile ?? DEFAULT_PROFILE;
   const requested = input.endSeconds - input.startSeconds;
   if (!Number.isFinite(requested) || requested <= 0) {
     return { success: false, error: `Cut has non-positive duration (${requested}s)` };
@@ -342,13 +360,13 @@ export async function normaliseCut(input: {
     '-xerror',
     '-ss', formatSeconds(start), '-t', seconds, '-i', input.sourcePath,
     '-filter_complex', keepAudio
-      ? `${videoChain(seconds)};${audioChain(seconds, input.cleanUpAudio !== false, input.channelBalance ?? 'stereo')}`
-      : videoChain(seconds),
+      ? `${videoChain(seconds, profile)};${audioChain(seconds, input.cleanUpAudio !== false, input.channelBalance ?? 'stereo')}`
+      : videoChain(seconds, profile),
     '-map', '[v]',
     ...(keepAudio
       ? ['-map', '[a]', '-c:a', 'aac', '-b:a', AUDIO_BITRATE, '-ar', String(AUDIO_RATE), '-ac', String(AUDIO_CHANNELS)]
       : ['-an']),
-    '-c:v', 'libx264', '-preset', 'superfast', '-crf', INTERMEDIATE_CRF,
+    '-c:v', 'libx264', '-preset', 'superfast', '-crf', profile.intermediateCrf,
     '-pix_fmt', 'yuv420p',
     // Carried explicitly so the cut is tagged the same way the source was
     // (measured: every tester clip is tv-range BT.709). Untagged parts would

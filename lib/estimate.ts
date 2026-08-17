@@ -16,6 +16,12 @@ import type { JobStatus } from '@/lib/jobView';
 const TAGGING_SECONDS_PER_CLIP = 55;
 const PLANNING_SECONDS = 12;
 const RENDER_SECONDS_PER_VARIATION = 150;
+/**
+ * 4K renders take roughly five times as long per variation — measured, see
+ * lib/render/frame.ts. Tagging and planning are unchanged: they analyse the
+ * source clips, which are the same footage whatever the output resolution.
+ */
+const FOUR_K_RENDER_MULTIPLIER = 5;
 /** Used where the clip count is not to hand, which is every list screen. */
 const ASSUMED_CLIPS = 4;
 
@@ -26,6 +32,7 @@ export function estimateRemainingSeconds(
     variationCount: number;
     doneCount: number;
     clipCount?: number;
+    quality?: '1080p' | '4k';
   },
   now: number
 ): number | null {
@@ -33,6 +40,8 @@ export function estimateRemainingSeconds(
 
   const elapsed = (now - new Date(job.createdAt).getTime()) / 1000;
   const remaining = Math.max(0, job.variationCount - job.doneCount);
+  const renderPerVariation =
+    RENDER_SECONDS_PER_VARIATION * (job.quality === '4k' ? FOUR_K_RENDER_MULTIPLIER : 1);
 
   /*
    * Once videos start landing, the measured pace of *this* job replaces the
@@ -42,7 +51,7 @@ export function estimateRemainingSeconds(
    */
   if (job.status === 'rendering' && job.doneCount > 0) {
     const perVariation = elapsed / job.doneCount;
-    return Math.round(remaining * Math.min(perVariation, RENDER_SECONDS_PER_VARIATION * 3));
+    return Math.round(remaining * Math.min(perVariation, renderPerVariation * 3));
   }
 
   const clips = job.clipCount ?? ASSUMED_CLIPS;
@@ -50,7 +59,7 @@ export function estimateRemainingSeconds(
   const aiRemaining =
     job.status === 'rendering' || job.status === 'planned' ? 0 : Math.max(0, aiTotal - elapsed);
 
-  return Math.round(aiRemaining + remaining * RENDER_SECONDS_PER_VARIATION);
+  return Math.round(aiRemaining + remaining * renderPerVariation);
 }
 
 /** "about 6 min left". Coarse on purpose. */

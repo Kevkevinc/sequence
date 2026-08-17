@@ -99,6 +99,13 @@
       "when": 1786490786158,
       "tag": "0013_lovely_flatman",
       "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "7",
+      "when": 1786925005762,
+      "tag": "0014_add_render_quality",
+      "breakpoints": true
     }
   ]
 }

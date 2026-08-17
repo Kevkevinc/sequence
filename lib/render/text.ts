@@ -6,7 +6,7 @@ import { getEnvWithDefault } from '@/lib/env';
 import { runFfmpeg } from '@/lib/render/ffmpeg';
 import type { FitInspoLayer } from '@/lib/render/fitInspo';
 
-import { HEIGHT, WIDTH, scaled as scaleToFrame } from '@/lib/render/frame';
+import { DEFAULT_PROFILE, type QualityProfile } from '@/lib/render/frame';
 import { captionFont } from '@/lib/render/fonts';
 import {
   DEFAULT_CAPTION_SETTINGS,
@@ -32,24 +32,25 @@ const FONT_FAMILY = 'UgcHookFont';
 const DEFAULT_FONT_FILE = path.join(process.cwd(), 'assets', 'fonts', 'Roboto-Bold.ttf');
 
 const HOOK = {
-  fontSize: scaleToFrame(36),
   lineHeightRatio: 1.18,
-  /** Leaves 60px of breathing room each side for the outline and the frame. */
-  maxWidth: WIDTH - scaleToFrame(120),
-  /**
-   * Fraction of frame height where the block's vertical CENTER lands, not
-   * its top — a little higher than dead centre (0.5), per creator direction.
-   */
-  centerAt: 0.44,
   /** Seconds the hook stays up, from the start. */
   seconds: 3,
 };
 
 const SIZING = {
-  fontSize: scaleToFrame(34),
   lineHeightRatio: 1.2,
-  maxWidth: WIDTH - scaleToFrame(120),
 };
+
+/**
+ * Text-block width for a profile.
+ *
+ * Leaves 60px of breathing room each side (at the reference width) for the
+ * outline and the frame edge, scaled with the frame so 4K keeps the same
+ * proportion rather than a margin that shrinks to a hairline.
+ */
+function textBlockMaxWidth(profile: QualityProfile): number {
+  return profile.width - profile.scaled(120);
+}
 
 /**
  * Longer than any video this product renders (`lengthSeconds` tops out at
@@ -121,10 +122,10 @@ const STROKE_RATIO = 0.12;
  * drawn before the fill so the fill covers the stroke's inner half rather than
  * the stroke biting into the glyph.
  */
-function renderLayer(options: LayerOptions): TextLayer {
+function renderLayer(options: LayerOptions, profile: QualityProfile): TextLayer {
   const family = registerFont(options.fontId);
 
-  const canvas = createCanvas(WIDTH, HEIGHT);
+  const canvas = createCanvas(profile.width, profile.height);
   const ctx = canvas.getContext('2d');
   ctx.font = `${options.fontSize}px "${family}"`;
   ctx.textAlign = 'center';
@@ -151,9 +152,9 @@ function renderLayer(options: LayerOptions): TextLayer {
     centreYFraction: options.centreYFraction,
     blockWidth: blockWidth(lines, measure),
     blockHeight,
-    frameWidth: WIDTH,
-    frameHeight: HEIGHT,
-    marginPx: scaleToFrame(24),
+    frameWidth: profile.width,
+    frameHeight: profile.height,
+    marginPx: profile.scaled(24),
   });
 
   for (const [index, line] of lines.entries()) {
@@ -175,18 +176,22 @@ function renderLayer(options: LayerOptions): TextLayer {
  */
 export function renderHookLayer(
   text: string,
-  settings: CaptionSettings = DEFAULT_CAPTION_SETTINGS
+  settings: CaptionSettings = DEFAULT_CAPTION_SETTINGS,
+  profile: QualityProfile = DEFAULT_PROFILE
 ): TextLayer {
-  return renderLayer({
-    text,
-    fontId: settings.fontId,
-    fontSize: scaleToFrame(settings.hookFontSize),
-    lineHeightRatio: HOOK.lineHeightRatio,
-    maxWidth: HOOK.maxWidth,
-    centreXFraction: settings.hookX,
-    centreYFraction: settings.hookY,
-    textColor: settings.textColor,
-  });
+  return renderLayer(
+    {
+      text,
+      fontId: settings.fontId,
+      fontSize: profile.scaled(settings.hookFontSize),
+      lineHeightRatio: HOOK.lineHeightRatio,
+      maxWidth: textBlockMaxWidth(profile),
+      centreXFraction: settings.hookX,
+      centreYFraction: settings.hookY,
+      textColor: settings.textColor,
+    },
+    profile
+  );
 }
 
 /**
@@ -199,18 +204,22 @@ export function renderHookLayer(
  */
 export function renderSizingLayer(
   text: string,
-  settings: CaptionSettings = DEFAULT_CAPTION_SETTINGS
+  settings: CaptionSettings = DEFAULT_CAPTION_SETTINGS,
+  profile: QualityProfile = DEFAULT_PROFILE
 ): TextLayer {
-  return renderLayer({
-    text,
-    fontId: settings.fontId,
-    fontSize: scaleToFrame(settings.sizingFontSize),
-    lineHeightRatio: SIZING.lineHeightRatio,
-    maxWidth: SIZING.maxWidth,
-    centreXFraction: settings.sizingX,
-    centreYFraction: settings.sizingY,
-    textColor: settings.textColor,
-  });
+  return renderLayer(
+    {
+      text,
+      fontId: settings.fontId,
+      fontSize: profile.scaled(settings.sizingFontSize),
+      lineHeightRatio: SIZING.lineHeightRatio,
+      maxWidth: textBlockMaxWidth(profile),
+      centreXFraction: settings.sizingX,
+      centreYFraction: settings.sizingY,
+      textColor: settings.textColor,
+    },
+    profile
+  );
 }
 
 /** Fixed-point seconds: ffmpeg cannot parse the exponent form of a small float. */
@@ -230,21 +239,29 @@ type PreparedLayer = { file: string; from: number; to: number };
  * Exported so tests can assert against the exact box the filter graph draws
  * (and its border) instead of duplicating these numbers.
  */
-export const INSPIRATION_IMAGE = {
-  seconds: 4,
-  /** Fixed thumbnail box in the upper-left, clear of the frame edge. */
-  width: scaleToFrame(320),
-  height: scaleToFrame(480),
-  margin: scaleToFrame(40),
-  /**
-   * Border thickness, scaled like every other metric here.
-   *
-   * Was a literal `4` in the filter string, which read correctly only at the
-   * 1080-wide frame it was written for — at 4K the same 4 pixels is a hairline
-   * the card visibly loses.
-   */
-  borderThickness: scaleToFrame(4),
-};
+/**
+ * The pop-up inspiration photo's box, for a given output resolution.
+ *
+ * Every length scales with the frame — including the border, which was once a
+ * literal `4` that read correctly only at 1080 wide and became a hairline the
+ * card visibly lost at 4K.
+ */
+export function inspirationImageBox(profile: QualityProfile = DEFAULT_PROFILE) {
+  return {
+    seconds: 4,
+    /** Fixed thumbnail box in the upper-left, clear of the frame edge. */
+    width: profile.scaled(320),
+    height: profile.scaled(480),
+    margin: profile.scaled(40),
+    borderThickness: profile.scaled(4),
+  };
+}
+
+/**
+ * The 1080p box. Kept as a value for tests that assert against it; the renderer
+ * uses {@link inspirationImageBox} with the job's own profile.
+ */
+export const INSPIRATION_IMAGE = inspirationImageBox(DEFAULT_PROFILE);
 
 /**
  * Burns the hook and the sizing overlay into a video.
@@ -284,7 +301,11 @@ export async function overlayText(input: {
    * stay readable while the stack builds up behind it.
    */
   fitInspoLayers?: FitInspoLayer[];
+  /** Output resolution and CRF. Defaults to 1080p. */
+  profile?: QualityProfile;
 }): Promise<{ success: true } | { success: false; error: string }> {
+  const profile = input.profile ?? DEFAULT_PROFILE;
+  const inspirationBox = inspirationImageBox(profile);
   const layers: PreparedLayer[] = [];
   const unique = `${path.basename(input.outputPath, path.extname(input.outputPath))}-${process.pid}`;
   const imageLayers: { file: string; from: number; to: number }[] = [];
@@ -307,7 +328,7 @@ export async function overlayText(input: {
     // Each layer is recorded *before* it is written, so the cleanup below also
     // removes a PNG whose write failed halfway through.
     if (input.hookText.trim()) {
-      const png = renderHookLayer(input.hookText, captions).png;
+      const png = renderHookLayer(input.hookText, captions, profile).png;
       const file = path.join(input.tempDir, `hook-${unique}.png`);
       layers.push({ file, from: 0, to: hookEndsAt });
       await writeFile(file, png);
@@ -317,12 +338,16 @@ export async function overlayText(input: {
       // The director's per-variation placement still decides where the sizing
       // block goes unless the creator has positioned it themselves, so it is
       // folded in as a layer beneath their settings rather than ignored.
-      const png = renderSizingLayer(input.sizing.text, {
-        ...captions,
-        ...(input.captionSettings
-          ? {}
-          : positionForPlacement(input.sizing.placement)),
-      }).png;
+      const png = renderSizingLayer(
+        input.sizing.text,
+        {
+          ...captions,
+          ...(input.captionSettings
+            ? {}
+            : positionForPlacement(input.sizing.placement)),
+        },
+        profile
+      ).png;
       /*
        * Starts the instant the hook's own window ends, per creator direction,
        * rather than overlapping it or waiting an arbitrary further delay, and
@@ -348,7 +373,7 @@ export async function overlayText(input: {
       imageLayers.push({
         file: input.inspirationImagePath,
         from: imageFrom,
-        to: imageFrom + INSPIRATION_IMAGE.seconds,
+        to: imageFrom + inspirationBox.seconds,
       });
     }
 
@@ -423,12 +448,12 @@ export async function overlayText(input: {
     for (const layer of imageLayers) {
       const scaled = `[img${inputIndex}]`;
       filters.push(
-        `[${inputIndex}:v]scale=${INSPIRATION_IMAGE.width}:${INSPIRATION_IMAGE.height}${scaled}`
+        `[${inputIndex}:v]scale=${inspirationBox.width}:${inspirationBox.height}${scaled}`
       );
       const label = `[t${inputIndex}]`;
       const window = `between(t,${formatSeconds(layer.from)},${formatSeconds(layer.to)})`;
       filters.push(
-        `${current}${scaled}overlay=${INSPIRATION_IMAGE.margin}:${INSPIRATION_IMAGE.margin}:enable='${window}'${label}`
+        `${current}${scaled}overlay=${inspirationBox.margin}:${inspirationBox.margin}:enable='${window}'${label}`
       );
       current = label;
       inputIndex += 1;
@@ -442,7 +467,7 @@ export async function overlayText(input: {
       // thickness", default "3" — fill requires the literal string "fill",
       // not a number).
       filters.push(
-        `${current}drawbox=x=${INSPIRATION_IMAGE.margin}:y=${INSPIRATION_IMAGE.margin}:w=${INSPIRATION_IMAGE.width}:h=${INSPIRATION_IMAGE.height}:color=white:t=${INSPIRATION_IMAGE.borderThickness}:enable='${window}'[v]`
+        `${current}drawbox=x=${inspirationBox.margin}:y=${inspirationBox.margin}:w=${inspirationBox.width}:h=${inspirationBox.height}:color=white:t=${inspirationBox.borderThickness}:enable='${window}'[v]`
       );
       chainEndsAtV = true;
     }
@@ -481,7 +506,7 @@ export async function overlayText(input: {
        * memory and finishes faster at the same CRF; the only cost is a
        * larger file.
        */
-      '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '13',
+      '-c:v', 'libx264', '-preset', 'veryfast', '-crf', profile.finalCrf,
       '-pix_fmt', 'yuv420p',
       // Tag what the picture actually is rather than leaving it to be inferred.
       // Every tester clip measured tv-range BT.709; an untagged 4K file invites

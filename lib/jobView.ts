@@ -32,6 +32,8 @@ export type JobSummary = {
   styleName?: string | null;
   variationCount: number;
   kind: 'cuts' | 'talking';
+  /** Output resolution. Drives the render-time estimate (4K is ~5× slower). */
+  quality: '1080p' | '4k';
   /** Renders that finished, and renders that failed. Supplied by /api/jobs. */
   doneCount: number;
   failedCount: number;
@@ -61,6 +63,8 @@ export type JobDetail = {
   pacing: 'slow' | 'medium' | 'fast' | null;
   styleName: string | null;
   variationCount: number;
+  /** Output resolution. Drives the render-time estimate (4K is ~5× slower). */
+  quality: '1080p' | '4k';
   /** Drives the time estimate: tagging is one model call per clip. */
   clipCount: number;
   warning: string | null;

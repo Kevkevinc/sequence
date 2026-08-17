@@ -159,6 +159,7 @@ export default function NewJobPage() {
   const [fitPics, setFitPics] = useState<File[]>([]);
 
   const [lengthSeconds, setLengthSeconds] = useState(30);
+  const [quality, setQuality] = useState<'1080p' | '4k'>('1080p');
   const [variations, setVariations] = useState(10);
   const [sizingOn, setSizingOn] = useState(false);
   const [sizeWorn, setSizeWorn] = useState('M');
@@ -327,6 +328,7 @@ export default function NewJobPage() {
           sizingOverlayEnabled: sizingOn,
           sizeWorn: sizingOn ? sizeWorn : undefined,
           lengthSeconds,
+          quality,
           // Talking mode has no style and no pacing choice of its own, but the
           // API needs exactly one of the two, so it goes through as Custom.
           pacing: isTalking || mode === 'custom' ? pacing : undefined,
@@ -779,6 +781,30 @@ export default function NewJobPage() {
                   <span>{MIN_LENGTH_SECONDS}s</span>
                   <span>{MAX_LENGTH_SECONDS}s</span>
                 </div>
+              </div>
+
+              <div>
+                <p className="sectionLabel" style={{ marginBottom: 12 }}>
+                  Quality
+                </p>
+                <div className="segmented">
+                  {(['1080p', '4k'] as const).map((option) => (
+                    <button
+                      key={option}
+                      type="button"
+                      className="segment"
+                      data-active={quality === option}
+                      onClick={() => setQuality(option)}
+                    >
+                      {option === '1080p' ? '1080p' : '4K'}
+                    </button>
+                  ))}
+                </div>
+                <p className="footnote" style={{ marginTop: 8 }}>
+                  {quality === '4k'
+                    ? 'Sharpest, using your footage at full resolution. Takes several times longer to render.'
+                    : 'Standard TikTok quality. Fastest to render.'}
+                </p>
               </div>
 
               {!isTalking && (

@@ -21,6 +21,16 @@ export const renderStatusEnum = pgEnum('render_status', ['rendering', 'done', 'f
 export const jobKindEnum = pgEnum('job_kind', ['cuts', 'talking']);
 
 /**
+ * Output resolution the creator chose for a job.
+ *
+ * `1080p` is the default and reproduces exactly what every job rendered before
+ * this existed. `4k` renders at the source phone footage's native 2160×3840 —
+ * sharper, but ~5× the render time and ~3× the file, so it is opt-in per job.
+ * A column, not a flag, because the render layer sizes every metric from it.
+ */
+export const renderQualityEnum = pgEnum('render_quality', ['1080p', '4k']);
+
+/**
  * Which intake a creator arrived through. Recorded once, at sign-up, and never
  * rewritten: someone who joined during the beta stays a beta tester after the
  * doors open, which is the whole point of knowing.
@@ -107,6 +117,11 @@ export const jobs = pgTable('jobs', {
    * which is what they are.
    */
   kind: jobKindEnum('kind').notNull().default('cuts'),
+  /**
+   * Output resolution. Defaulted to `1080p` so every job written before 4K
+   * existed reads as the resolution it was actually rendered at.
+   */
+  quality: renderQualityEnum('quality').notNull().default('1080p'),
   /** What was said, stored once so a re-render never re-pays for transcription. */
   transcript: text('transcript'),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),

@@ -10,6 +10,7 @@ import { alignWordsToRuns, buildCaptionCues, type CaptionCue } from '@/lib/pipel
 import { transcribeClip, wordsOf } from '@/lib/pipeline/transcribe';
 import { detectSpeechRuns, mergeShortGaps, padRuns } from '@/lib/pipeline/speech';
 import { renderTalkingHead } from '@/lib/render/renderTalkingHead';
+import { profileForQuality } from '@/lib/render/frame';
 import { resolveCaptionSettings } from '@/lib/render/captionSettings';
 import { THUMBNAIL } from '@/lib/render/renderPlan';
 import { runFfmpeg } from '@/lib/render/ffmpeg';
@@ -160,6 +161,7 @@ export async function renderTalkingJob(jobId: string): Promise<TalkingHeadResult
       outputPath,
       captionSettings,
       captionPosition: TALKING_DEFAULTS.captionPosition,
+      profile: profileForQuality(job.quality),
     });
     if (!rendered.success) return { success: false, error: rendered.error };
 

@@ -1,9 +1,10 @@
-import { mkdir, writeFile } from 'fs/promises';
+import { writeFile } from 'fs/promises';
 import path from 'path';
-import { concatCuts } from '@/lib/render/concat';
-import { buildAssFile, escapeFilterPath } from '@/lib/render/captions';
-import { measureChannelBalance, normaliseCut } from '@/lib/render/normalise';
+import { buildAssFile } from '@/lib/render/captions';
+import { measureChannelBalance } from '@/lib/render/normalise';
+import { buildTalkingHeadArgs } from '@/lib/render/talkingHeadArgs';
 import { probeDuration, runFfmpeg } from '@/lib/render/ffmpeg';
+import { DEFAULT_PROFILE, type QualityProfile } from '@/lib/render/frame';
 import { DEFAULT_CAPTION_SETTINGS, type CaptionSettings } from '@/lib/render/captionSettings';
 import type { CaptionCue } from '@/lib/pipeline/align';
 import type { SpeechRun } from '@/lib/pipeline/speech';
@@ -18,10 +19,12 @@ import type { SpeechRun } from '@/lib/pipeline/speech';
  * spoken and carry the audio in sync — and threading that through one function
  * would leave both harder to reason about than either is now.
  *
- * The shape is deliberately the same, though: cut the parts, stream-copy them
- * together, then one final pass for text and the delivery encode. That is the
- * arrangement the silent path already proved out, including keeping peak disk
- * down by dropping the parts as soon as they are joined.
+ * The whole edit is rendered in a single ffmpeg pass — every run trimmed,
+ * reframed and cleaned, joined with the concat filter, and the captions burned
+ * over the join — so the picture is compressed exactly once. The older shape
+ * encoded each run to an intermediate and re-encoded the join to add text,
+ * which spent a second generation of compression on detail phone footage can
+ * least afford to lose. See {@link buildTalkingHeadArgs}.
  */
 
 export type TalkingRenderResult =
@@ -70,8 +73,11 @@ export async function renderTalkingHead(input: {
   captionSettings?: CaptionSettings;
   /** Where captions sit, as fractions of the frame. Low by default, clear of the face. */
   captionPosition?: { x: number; y: number };
+  /** Output resolution and CRF. Defaults to 1080p. */
+  profile?: QualityProfile;
 }): Promise<TalkingRenderResult> {
   const captions = input.captionSettings ?? DEFAULT_CAPTION_SETTINGS;
+  const profile = input.profile ?? DEFAULT_PROFILE;
 
   if (input.runs.length === 0) {
     return {
@@ -80,68 +86,35 @@ export async function renderTalkingHead(input: {
     };
   }
 
-  // Measured once on the whole recording, so every cut is treated identically.
+  // Measured once on the whole recording, so every cut is treated identically —
+  // a per-cut measurement could classify two cuts of one take differently and
+  // shift the background audibly at a splice.
   const channelBalance = await measureChannelBalance(input.sourcePath);
-
-  const cutsDir = path.join(input.workingDir, 'talking-cuts');
-  await mkdir(cutsDir, { recursive: true });
-
-  const parts: string[] = [];
-  for (const [index, run] of input.runs.entries()) {
-    const partPath = path.join(cutsDir, `part-${String(index).padStart(3, '0')}.mp4`);
-    const result = await normaliseCut({
-      sourcePath: input.sourcePath,
-      startSeconds: run.startSeconds,
-      endSeconds: run.endSeconds,
-      outputPath: partPath,
-      keepAudio: true,
-      channelBalance,
-    });
-    if (!result.success) {
-      return {
-        success: false,
-        error: `Failed to cut speech section ${index + 1}/${input.runs.length}: ${result.error}`,
-      };
-    }
-    parts.push(partPath);
-  }
-
-  const joinedPath = path.join(input.workingDir, 'talking-joined.mp4');
-  const joined = await concatCuts(parts, joinedPath);
-  if (!joined.success) {
-    return { success: false, error: `Failed to join the speech sections: ${joined.error}` };
-  }
 
   const assPath = path.join(input.workingDir, 'captions.ass');
   await writeFile(
     assPath,
     buildAssFile(shiftCuesToEditedTimeline(input.cues, input.runs), captions, {
       position: input.captionPosition,
+      profile,
     }),
     'utf8'
   );
 
-  /*
-   * Video is re-encoded to burn the captions in; audio is copied.
-   *
-   * The parts were already encoded to the delivery audio format, so re-encoding
-   * here would be a second generation of lossy audio for no gain — and on a
-   * talking video the audio *is* the content.
-   */
   const fontsDir = path.join(process.cwd(), 'assets', 'fonts');
-  const burned = await runFfmpeg([
-    '-i', joinedPath,
-    '-vf', `subtitles='${escapeFilterPath(assPath)}':fontsdir='${escapeFilterPath(fontsDir)}'`,
-    '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '13',
-    '-pix_fmt', 'yuv420p',
-    '-colorspace', 'bt709', '-color_primaries', 'bt709', '-color_trc', 'bt709',
-    '-color_range', 'tv',
-    '-c:a', 'copy',
-    '-movflags', '+faststart',
-    input.outputPath,
-  ]);
-  if (!burned.success) {
-    return { success: false, error: `Failed to burn in the captions: ${burned.error}` };
+  const rendered = await runFfmpeg(
+    buildTalkingHeadArgs({
+      sourcePath: input.sourcePath,
+      runs: input.runs,
+      assPath,
+      fontsDir,
+      outputPath: input.outputPath,
+      channelBalance,
+      profile,
+    })
+  );
+  if (!rendered.success) {
+    return { success: false, error: `Failed to render the talking-head edit: ${rendered.error}` };
   }
 
   return {

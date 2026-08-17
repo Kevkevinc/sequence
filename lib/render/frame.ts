@@ -63,3 +63,71 @@ const REFERENCE_WIDTH = 1080;
 export function scaled(lengthAtReferenceWidth: number): number {
   return Math.round((lengthAtReferenceWidth * WIDTH) / REFERENCE_WIDTH);
 }
+
+export type RenderQuality = '1080p' | '4k';
+
+/**
+ * Everything the render layer needs to know about one output resolution.
+ *
+ * Resolution used to be the two module constants above, read directly wherever
+ * a pixel value was needed. That is exactly right when there is one output
+ * size; it stops working the moment a creator can pick per job. So the same
+ * numbers are bundled here and threaded through the render functions instead —
+ * `frame.ts` stays the one place a resolution is defined, but a job now carries
+ * *which* one.
+ *
+ * `scaled` is the per-profile twin of {@link scaled}: a metric authored at the
+ * 1080-wide reference frame, scaled to this profile. At 1080p it is the
+ * identity (width === reference width), which is why the 1080p profile
+ * reproduces the old constants exactly — every `scaled(n)` was already just `n`.
+ *
+ * The CRF pair comes straight from the measured comparison in the block above:
+ * 1080p delivers at 13 over an 11 intermediate; 4K at 14 over a 12, the point
+ * on that table where the extra resolution stops paying for itself.
+ */
+export type QualityProfile = {
+  quality: RenderQuality;
+  width: number;
+  height: number;
+  fps: number;
+  /** CRF for the throwaway per-cut intermediate (silent pipeline only). */
+  intermediateCrf: string;
+  /** CRF for the delivered encode. */
+  finalCrf: string;
+  /** Scales a length authored at the 1080-wide reference frame to this profile. */
+  scaled(lengthAtReferenceWidth: number): number;
+};
+
+function makeProfile(
+  quality: RenderQuality,
+  width: number,
+  height: number,
+  intermediateCrf: string,
+  finalCrf: string
+): QualityProfile {
+  return {
+    quality,
+    width,
+    height,
+    fps: FPS,
+    intermediateCrf,
+    finalCrf,
+    scaled: (lengthAtReferenceWidth) =>
+      Math.round((lengthAtReferenceWidth * width) / REFERENCE_WIDTH),
+  };
+}
+
+export const QUALITY_PROFILES: Record<RenderQuality, QualityProfile> = {
+  // Exactly the previous behaviour: 1080×1920, the CRFs the render layer shipped.
+  '1080p': makeProfile('1080p', WIDTH, HEIGHT, '11', '13'),
+  // Native 4K portrait, at the CRFs the frame-size investigation measured.
+  '4k': makeProfile('4k', 2160, 3840, '12', '14'),
+};
+
+/** The default every un-updated caller and every pre-4K job renders at. */
+export const DEFAULT_PROFILE = QUALITY_PROFILES['1080p'];
+
+/** Resolves a stored `jobs.quality` value to its profile, defaulting to 1080p. */
+export function profileForQuality(quality: string | null | undefined): QualityProfile {
+  return quality === '4k' ? QUALITY_PROFILES['4k'] : QUALITY_PROFILES['1080p'];
+}

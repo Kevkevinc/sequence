@@ -197,6 +197,7 @@ export async function GET(request: Request, context: { params: Promise<{ jobId: 
     pacing: job.pacing,
     styleName: style?.name ?? null,
     variationCount: job.variationCount,
+    quality: job.quality,
     clipCount: clips.length,
     warning: job.warning,
     failureReason: job.failureReason,
