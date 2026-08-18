@@ -59,6 +59,17 @@ export const creators = pgTable('creators', {
    */
   cohort: creatorCohortEnum('cohort').notNull().default('beta'),
   audience: creatorAudienceEnum('audience').notNull().default('any'),
+  /**
+   * Hook lines the creator has switched off in Settings, stored as the exact
+   * library text of each (the raw string, `[item]` slot and all — see
+   * lib/pipeline/hookLibrary.ts). The director drops these before offering the
+   * library to the model, so a line the creator dislikes never gets written.
+   *
+   * A list of the *excluded* lines rather than the kept ones on purpose: the
+   * library grows over time, and storing exclusions means a hook added later is
+   * on by default for everyone instead of missing for every existing creator.
+   */
+  disabledHooks: jsonb('disabled_hooks').$type<string[]>().notNull().default([]),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   /**
    * The creator's own caption look, used as the starting point in Custom mode.

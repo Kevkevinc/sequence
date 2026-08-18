@@ -53,6 +53,8 @@ export async function updateCreatorProfile(
      * mode. Style mode takes its captions from the style instead.
      */
     captionSettings?: CaptionSettings;
+    /** Exact library text of every hook line the creator has switched off. */
+    disabledHooks?: string[];
   }
 ) {
   const [updated] = await db

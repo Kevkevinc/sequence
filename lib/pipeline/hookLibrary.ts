@@ -247,6 +247,89 @@ export function hooksForAudience(audience: HookAudience): string[] {
 }
 
 /**
+ * The whole library, grouped for a human to browse in Settings.
+ *
+ * This is the same set of lines the director draws from — the named groups
+ * above, verbatim, not a second copy — arranged into labelled sections so a
+ * creator can look through what the AI pulls from and switch off the ones they
+ * don't like. Order is roughly most-general first.
+ *
+ * Style-specific one-off lines (the handful defined inline in db/seed-styles.ts)
+ * are not listed here; this is the shared catalogue every mode and every style
+ * builds on. A creator's switch-off still applies to those too, because the
+ * director filters by exact text (see {@link removeDisabledHooks}) — it just
+ * isn't browsable from this list.
+ */
+export type HookCategory = { id: string; label: string; hooks: readonly Hook[] };
+
+export const HOOK_CATALOG: readonly HookCategory[] = [
+  { id: 'general', label: 'General', hooks: NEUTRAL_HOOKS },
+  { id: 'short', label: 'Short & punchy', hooks: MENS_SHORT },
+  { id: 'fit', label: 'Fit', hooks: MENS_FIT },
+  { id: 'product', label: 'The product', hooks: MENS_PRODUCT },
+  { id: 'pickup', label: 'Pickups', hooks: MENS_PICKUP },
+  { id: 'value', label: 'Price & value', hooks: MENS_VALUE },
+  { id: 'seasonal', label: 'Occasion & season', hooks: MENS_SEASONAL },
+  { id: 'curiosity', label: 'Curiosity', hooks: MENS_CURIOSITY },
+  { id: 'reaction', label: 'Reaction', hooks: WOMENS_HOOKS },
+];
+
+/** Every distinct line in the browsable catalogue, for validating a save. */
+export const CATALOG_HOOK_TEXTS: ReadonlySet<string> = new Set(
+  HOOK_CATALOG.flatMap((category) => category.hooks.map((hook) => hook.text))
+);
+
+/**
+ * The catalogue narrowed to the lines this creator would actually be offered,
+ * by the same audience rule the director uses ({@link hooksForAudience}).
+ *
+ * A men's creator never gets women's-cadence lines, so showing them in that
+ * creator's Settings would only invite switching off something that was never
+ * going to appear. Empty sections are dropped.
+ */
+export function hookCatalogForAudience(
+  audience: HookAudience
+): { id: string; label: string; hooks: Hook[] }[] {
+  return HOOK_CATALOG.map((category) => ({
+    id: category.id,
+    label: category.label,
+    hooks: category.hooks.filter(
+      (hook) => hook.audience === 'any' || hook.audience === audience
+    ),
+  })).filter((category) => category.hooks.length > 0);
+}
+
+/**
+ * How a hook reads in the browsing UI, where there is no product to fill the
+ * `[item]` slot. The literal token is swapped for a plain `[product]` so the
+ * line reads as "the [product] on this >" rather than exposing the internal
+ * placeholder name. The stored/matched value is always the raw text.
+ */
+export function displayHookText(text: string): string {
+  return text.replace(/\[item\]/gi, '[product]');
+}
+
+/**
+ * Removes the creator's switched-off lines from a resolved hook library.
+ *
+ * Applied to the final assembled library (custom-mode or a style's), and
+ * matched on exact text, so a disabled line is gone no matter which mode or
+ * style surfaced it.
+ *
+ * If switching off would empty the library entirely — a creator who turned
+ * everything off, or a style whose whole library happens to be disabled — the
+ * disable is ignored and the full library is kept. An empty library gives the
+ * director nothing to imitate and is worse than honouring a preference to the
+ * letter; the same "a reference beats no reference" call is made in
+ * `hooksForCreator`.
+ */
+export function removeDisabledHooks(hooks: string[], disabled: ReadonlySet<string>): string[] {
+  if (disabled.size === 0) return hooks;
+  const kept = hooks.filter((hook) => !disabled.has(hook));
+  return kept.length > 0 ? kept : hooks;
+}
+
+/**
  * Drops the `[item]` lines when there is nothing to fill the slot with.
  *
  * Offering "crazy [item]" with no product name is how the placeholder gets

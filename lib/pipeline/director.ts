@@ -11,6 +11,7 @@ import { StyleConfigSchema, type StyleConfig } from '@/lib/styles';
 import {
   hooksForAudience,
   hooksWithoutItemSlot,
+  removeDisabledHooks,
   type HookAudience,
 } from '@/lib/pipeline/hookLibrary';
 import { describeCause, MAX_CAUSE_LENGTH } from '@/lib/pipeline/errors';
@@ -406,15 +407,17 @@ type EffectivePreset = {
 function resolvePreset(
   job: Job,
   style: { name: string; config: StyleConfig } | undefined,
-  audience: HookAudience
+  audience: HookAudience,
+  /** Lines this creator switched off in Settings, dropped before the model sees them. */
+  disabledHooks: ReadonlySet<string>
 ): EffectivePreset {
   if (style) {
     return {
       ideal: { min: style.config.cutMinSeconds, max: style.config.cutMaxSeconds },
       label: `the "${style.name}" style`,
-      hookStyleLibrary: withItemSlotIfNamed(
-        hooksForCreator(style.config.hookStyleLibrary, audience),
-        job
+      hookStyleLibrary: removeDisabledHooks(
+        withItemSlotIfNamed(hooksForCreator(style.config.hookStyleLibrary, audience), job),
+        disabledHooks
       ),
       sizingPlacementOverride: style.config.sizingPlacement ?? null,
       variesClipOrder: style.config.variesClipOrder,
@@ -424,7 +427,10 @@ function resolvePreset(
   return {
     ideal: PACING_PRESET_SECONDS[job.pacing!],
     label: `"${job.pacing}" pacing`,
-    hookStyleLibrary: withItemSlotIfNamed(hooksForAudience(audience), job),
+    hookStyleLibrary: removeDisabledHooks(
+      withItemSlotIfNamed(hooksForAudience(audience), job),
+      disabledHooks
+    ),
     /*
      * Pinned, not left to the model.
      *
@@ -1706,7 +1712,12 @@ export async function planJob(
     // The per-cut length the job's preset asks for, used to build the prompt,
     // to validate the response, and to judge what the pool can reach.
     // The creator's audience picks the register of the hook, not its topic.
-    const preset = resolvePreset(job, resolvedStyle, creator.audience);
+    const preset = resolvePreset(
+      job,
+      resolvedStyle,
+      creator.audience,
+      new Set(creator.disabledHooks ?? [])
+    );
     const band = bandForPreset(preset.ideal);
 
     // Established before the model is asked for anything: whether the creator's

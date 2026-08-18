@@ -1,0 +1,1 @@
+ALTER TABLE "creators" ADD COLUMN "disabled_hooks" jsonb DEFAULT '[]'::jsonb NOT NULL;

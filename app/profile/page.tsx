@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { useClerk, useUser } from '@clerk/nextjs';
 import { AppFrame, Screen } from '@/components/AppFrame';
+import { IconChevronRight } from '@/components/icons';
 import { CaptionLookPreview } from '@/components/CaptionLookPreview';
 import { resolveCaptionSettings } from '@/lib/render/captionSettings';
 import { captionFont } from '@/lib/render/fonts';
@@ -169,6 +170,19 @@ export default function ProfilePage() {
         <p className="footnote" style={{ marginTop: 10 }}>
           Sets how the AI writes your hooks. Not sure? Leave it on Any and you get neutral lines.
         </p>
+
+        <p className="overline" style={{ margin: '26px 0 14px' }}>
+          Hooks
+        </p>
+        <Link href="/profile/hooks" className="groupedList" style={{ display: 'block' }}>
+          <div className="groupedRow">
+            <span style={{ fontSize: 14, fontWeight: 500 }}>Hook library</span>
+            <span className="groupedValue" style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+              Choose which lines the AI uses
+              <IconChevronRight size={15} />
+            </span>
+          </div>
+        </Link>
 
         <p className="overline" style={{ margin: '26px 0 14px' }}>
           Saved caption look
