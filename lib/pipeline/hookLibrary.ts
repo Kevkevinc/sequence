@@ -205,7 +205,19 @@ export const NEUTRAL_HOOKS = neutral(
   'this >>>',
   'i get it now',
   'this is so underrated',
-  'no notes'
+  'no notes',
+  // Product-name lines that carry no cadence and no clothing assumption, so
+  // they read as naturally on a candle or a kitchen gadget as on a hoodie. This
+  // is the only place the `[item]` slot appears in the neutral set, which is
+  // what lets a creator who has not set an audience still get product-named
+  // hooks in Custom mode -- every other `[item]` line is coded men's.
+  'my new favorite [item]',
+  "best [item] i've bought all year",
+  'this [item] was so worth it',
+  'how did i not have this [item] sooner',
+  "don't sleep on this [item]",
+  'this might be the best [item] i own',
+  'no notes on this [item]'
 );
 
 /** The coded cadences, kept for the creators they actually fit. */
