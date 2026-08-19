@@ -95,7 +95,16 @@ function money(value: number): string {
 }
 
 const CSS = `
-.st { max-width: 720px; margin: 0 auto; padding: 16px 14px 64px; }
+/*
+ * The app locks the body (globals.css: body { overflow: hidden }) so the main
+ * interface scrolls an inner region, not the page. This standalone admin page
+ * never used that region, so its taller-than-the-screen content was clipped
+ * with no way to scroll — the "can't scroll down / not responding" report. It
+ * owns its own scroll container instead, mirroring the app's proven approach:
+ * position: fixed is the screen where an installed iPhone's 100dvh is not.
+ */
+.st-scroll { position: fixed; inset: 0; overflow-y: auto; -webkit-overflow-scrolling: touch; }
+.st { max-width: 720px; margin: 0 auto; padding: calc(16px + env(safe-area-inset-top)) 14px calc(64px + env(safe-area-inset-bottom)); }
 .st-h { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 14px; }
 .st-h1 { font-size: 20px; font-weight: 700; margin: 0; }
 .st-sub { font-size: 12px; opacity: .6; }
@@ -183,8 +192,9 @@ export function StatusDashboard() {
   }, [load]);
 
   return (
-    <div className="st">
+    <div className="st-scroll">
       <style dangerouslySetInnerHTML={{ __html: CSS }} />
+      <div className="st">
       <div className="st-h">
         <h1 className="st-h1">Status</h1>
         <button className="st-btn" onClick={load} disabled={loading}>
@@ -352,6 +362,7 @@ export function StatusDashboard() {
           </div>
         </>
       )}
+      </div>
     </div>
   );
 }
