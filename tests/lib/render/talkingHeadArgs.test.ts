@@ -88,6 +88,10 @@ describe('buildTalkingHeadArgs', () => {
     // The memory fix: 4K must cap libx264's threads, or a container that sees
     // every host CPU fans out to ~2.5GB of frame buffers and is OOM-killed.
     expect(args[args.indexOf('-threads') + 1]).toBe('2');
+    // The delivered 4K file must also carry a bitrate cap, or it is too big for
+    // the phone to save — sized from the run lengths. See deliveryBitrateArgs.
+    expect(args).toContain('-maxrate');
+    expect(args).toContain('-bufsize');
   });
 
   it('cleans background noise by default but leaves it when asked', () => {

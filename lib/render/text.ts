@@ -6,7 +6,7 @@ import { getEnvWithDefault } from '@/lib/env';
 import { runFfmpeg } from '@/lib/render/ffmpeg';
 import type { FitInspoLayer } from '@/lib/render/fitInspo';
 
-import { DEFAULT_PROFILE, type QualityProfile } from '@/lib/render/frame';
+import { DEFAULT_PROFILE, deliveryBitrateArgs, type QualityProfile } from '@/lib/render/frame';
 import { captionFont } from '@/lib/render/fonts';
 import {
   DEFAULT_CAPTION_SETTINGS,
@@ -303,6 +303,12 @@ export async function overlayText(input: {
   fitInspoLayers?: FitInspoLayer[];
   /** Output resolution and CRF. Defaults to 1080p. */
   profile?: QualityProfile;
+  /**
+   * Length of the delivered video, in seconds. Sizes the 4K bitrate cap so the
+   * file stays small enough for the phone to save; see {@link deliveryBitrateArgs}.
+   * Omitted (older callers) means no cap — safe, just larger 4K files.
+   */
+  deliverySeconds?: number;
 }): Promise<{ success: true } | { success: false; error: string }> {
   const profile = input.profile ?? DEFAULT_PROFILE;
   const inspirationBox = inspirationImageBox(profile);
@@ -508,6 +514,10 @@ export async function overlayText(input: {
        */
       '-c:v', 'libx264', '-preset', 'veryfast', '-crf', profile.finalCrf,
       ...profile.encodeArgs,
+      // Bound the delivered file so the phone can actually save it. Sized to the
+      // clip length: a typical clip keeps full quality, only a long one is
+      // throttled. See {@link deliveryBitrateArgs}.
+      ...deliveryBitrateArgs(profile, input.deliverySeconds ?? 0),
       '-pix_fmt', 'yuv420p',
       // Tag what the picture actually is rather than leaving it to be inferred.
       // Every tester clip measured tv-range BT.709; an untagged 4K file invites

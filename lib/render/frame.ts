@@ -98,14 +98,18 @@ export type QualityProfile = {
    * Extra ffmpeg args spliced into every libx264 command for this profile,
    * right after the CRF.
    *
-   * This is where 4K's memory is kept in check. Left to itself, libx264 opens
-   * roughly 1.5 frame-threads per CPU, and in a container it sees every host
-   * core — so a 4K encode fans out to a couple dozen threads, each holding its
-   * own full 2160×3840 frame, and peaks around 2.5GB. Sharing the box with the
-   * ~1GB worker process, that is an OOM-kill (measured: renders died with
+   * This is where 4K's *render* memory is kept in check. Left to itself, libx264
+   * opens roughly 1.5 frame-threads per CPU, and in a container it sees every
+   * host core — so a 4K encode fans out to a couple dozen threads, each holding
+   * its own full 2160×3840 frame, and peaks around 2.5GB. Sharing the box with
+   * the ~1GB worker process, that is an OOM-kill (measured: renders died with
    * SIGKILL at the final encode). Capping threads brings the same encode to
    * ~1.1GB; the low lookahead trims a little more. 1080p frames are a quarter
    * the size and never came close, so it keeps ffmpeg's fast defaults.
+   *
+   * The *download* memory limit — how big the delivered file may be before the
+   * phone cannot save it — is a separate, per-clip concern; see
+   * {@link deliveryBitrateArgs}.
    */
   encodeArgs: string[];
   /** Scales a length authored at the 1080-wide reference frame to this profile. */
@@ -139,11 +143,54 @@ export const QUALITY_PROFILES: Record<RenderQuality, QualityProfile> = {
   '1080p': makeProfile('1080p', WIDTH, HEIGHT, '11', '13', []),
   // Native 4K portrait, at the CRFs the frame-size investigation measured, with
   // libx264 held to 2 threads and a short lookahead so the encode fits in RAM.
+  // The delivered file's size cap is applied per clip at encode time, not here;
+  // see {@link deliveryBitrateArgs}.
   '4k': makeProfile('4k', 2160, 3840, '12', '14', [
     '-threads', '2',
     '-x264-params', 'sync-lookahead=0:rc-lookahead=10',
   ]),
 };
+
+/**
+ * The largest a delivered file may be before the installed app cannot save it.
+ *
+ * To save a video the PWA fetches the whole thing into memory and hands it to
+ * the iOS share sheet; a file past a few hundred MB buffers over WebKit's
+ * per-tab ceiling and kills the tab mid-download ("a problem repeatedly
+ * occurred"), reliably after a clip or two as the bytes stack up. Kept well
+ * under that, with headroom for buffering several in a row.
+ */
+export const DELIVERY_TARGET_BYTES = 150_000_000;
+
+/**
+ * The best 4K bitrate spent even on a short clip. 40 Mbps is a good rate for
+ * 4K/30 — visibly sharper than the 1080p TikTok ultimately delivers — and short
+ * clips at this rate are comfortably under {@link DELIVERY_TARGET_BYTES}, so the
+ * common case pays no quality tax at all.
+ */
+export const DELIVERY_MAX_MBPS = 40;
+
+/**
+ * The `-maxrate`/`-bufsize` VBV cap for the *delivered* encode, chosen per clip.
+ *
+ * A near-lossless `-crf 14` 4K encode rides ~114 Mbps: a 30s clip is ~430MB and
+ * a 60s one (the longest a creator can ask for) ~860MB — far too big for the
+ * phone to save, which is what crashed the download. A single flat bitrate can't
+ * fix that: one low enough to keep a 60s clip saveable would needlessly starve
+ * the 30s clip that is most of the traffic. So the ceiling is picked from the
+ * clip's own length to hold the file near {@link DELIVERY_TARGET_BYTES} — every
+ * clip up to ~30s gets the full {@link DELIVERY_MAX_MBPS}, and only longer ones
+ * are throttled (a 60s clip lands ~20 Mbps) to stay under the limit.
+ *
+ * 1080p is a quarter the pixels and never threatened the ceiling, so it is left
+ * to CRF's own sizing and gets no cap.
+ */
+export function deliveryBitrateArgs(profile: QualityProfile, seconds: number): string[] {
+  if (profile.quality !== '4k' || !Number.isFinite(seconds) || seconds <= 0) return [];
+  const fitsTargetMbps = (DELIVERY_TARGET_BYTES * 8) / (seconds * 1_000_000);
+  const mbps = Math.max(8, Math.min(DELIVERY_MAX_MBPS, Math.floor(fitsTargetMbps)));
+  return ['-maxrate', `${mbps}M`, '-bufsize', `${Math.round(mbps * 1.25)}M`];
+}
 
 /** The default every un-updated caller and every pre-4K job renders at. */
 export const DEFAULT_PROFILE = QUALITY_PROFILES['1080p'];

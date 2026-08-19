@@ -1,5 +1,5 @@
 import { escapeFilterPath } from '@/lib/render/captions';
-import { DEFAULT_PROFILE, type QualityProfile } from '@/lib/render/frame';
+import { DEFAULT_PROFILE, deliveryBitrateArgs, type QualityProfile } from '@/lib/render/frame';
 import {
   AUDIO_BITRATE,
   AUDIO_CHANNELS,
@@ -88,12 +88,21 @@ export function buildTalkingHeadArgs(input: {
 
   const filterComplex = [...segments, concat, captions].join(';');
 
+  // The edit is exactly the kept runs joined, so its length is their snapped
+  // durations summed — which sizes the 4K download-bitrate cap so the delivered
+  // file stays small enough for the phone to save. See {@link deliveryBitrateArgs}.
+  const deliverySeconds = input.runs.reduce(
+    (total, run) => total + snapToFrame(run.endSeconds - run.startSeconds),
+    0
+  );
+
   return [
     '-i', input.sourcePath,
     '-filter_complex', filterComplex,
     '-map', '[v]', '-map', '[ac]',
     '-c:v', 'libx264', '-preset', 'veryfast', '-crf', profile.finalCrf,
     ...profile.encodeArgs,
+    ...deliveryBitrateArgs(profile, deliverySeconds),
     '-pix_fmt', 'yuv420p',
     // Tag the picture as what every tester clip measured — tv-range BT.709 —
     // rather than leaving an upload pipeline to guess and shift the colour.

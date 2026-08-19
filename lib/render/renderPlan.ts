@@ -252,10 +252,16 @@ export async function renderPlan(editPlanId: string): Promise<RenderPlanResult> 
       job.captionSettings
     );
 
+    // The joined cuts are the same length as the final render (text overlays do
+    // not change duration), so this sizes the 4K download-bitrate cap without
+    // waiting for the final encode it has to be set on.
+    const deliverySeconds = await probeDuration(concatPath);
+
     const finalPath = path.join(tempDir, 'final.mp4');
     const textResult = await overlayText({
       sourcePath: concatPath,
       outputPath: finalPath,
+      deliverySeconds,
       hookText: plan.hookText,
       sizing: plan.sizingOverlayText
         ? {
