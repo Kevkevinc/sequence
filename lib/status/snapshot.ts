@@ -30,6 +30,7 @@ export async function buildStatusSnapshot() {
     queueCounts,
     activeJobs,
     recentFailedJobs,
+    recentDoneJobs,
     recentFailedRenders,
     doneCounts,
     usageRows,
@@ -76,10 +77,27 @@ export async function buildStatusSnapshot() {
         failureReason: jobs.failureReason,
         attempts: jobs.attempts,
         createdAt: jobs.createdAt,
+        completedAt: jobs.completedAt,
       })
       .from(jobs)
       .where(and(eq(jobs.status, 'failed'), gte(jobs.createdAt, day)))
       .orderBy(desc(jobs.createdAt))
+      .limit(15),
+
+    // Jobs that finished successfully in the window, newest first — the other
+    // half of "what happened today", so the dashboard can show a start and a
+    // finish time for each rather than only a count.
+    db
+      .select({
+        id: jobs.id,
+        productName: jobs.productName,
+        variationCount: jobs.variationCount,
+        createdAt: jobs.createdAt,
+        completedAt: jobs.completedAt,
+      })
+      .from(jobs)
+      .where(and(eq(jobs.status, 'done'), gte(jobs.createdAt, day)))
+      .orderBy(desc(jobs.completedAt))
       .limit(15),
 
     db
@@ -190,6 +208,7 @@ export async function buildStatusSnapshot() {
     last24h: {
       jobsDone: doneCounts[0]?.jobsDone ?? 0,
       jobsFailed: doneCounts[0]?.jobsFailed ?? 0,
+      doneJobs: recentDoneJobs,
       failedJobs: recentFailedJobs,
       failedRenders: recentFailedRenders,
     },

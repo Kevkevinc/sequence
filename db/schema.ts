@@ -136,6 +136,15 @@ export const jobs = pgTable('jobs', {
   /** What was said, stored once so a re-render never re-pays for transcription. */
   transcript: text('transcript'),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  /**
+   * When the job reached a terminal state (`done` or `failed`).
+   *
+   * Nullable: a running job has not finished, and every job written before this
+   * column existed has no recorded finish. Set once, at the transition to a
+   * terminal status, so the operations dashboard can show how long a job took
+   * and when it landed. `createdAt` is the start; this is the end.
+   */
+  completedAt: timestamp('completed_at', { withTimezone: true }),
 });
 
 export const rawClips = pgTable('raw_clips', {

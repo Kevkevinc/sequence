@@ -293,7 +293,7 @@ async function failJob(jobId: string, reason: string): Promise<void> {
   try {
     await db
       .update(jobs)
-      .set({ status: 'failed', failureReason: reason })
+      .set({ status: 'failed', failureReason: reason, completedAt: new Date() })
       .where(eq(jobs.id, jobId));
   } catch (error) {
     console.error(`Could not record failure for job ${jobId}: ${describeCause(error)}`);
@@ -589,7 +589,10 @@ async function renderTalkingHeadJob(jobId: string): Promise<void> {
     })
     .where(eq(renders.id, render.id));
 
-  await db.update(jobs).set({ status: 'done', failureReason: null }).where(eq(jobs.id, jobId));
+  await db
+    .update(jobs)
+    .set({ status: 'done', failureReason: null, completedAt: new Date() })
+    .where(eq(jobs.id, jobId));
   await announceFinishedJob(jobId, 1);
   log(
     `  Talking edit done in ${since(startedAt)}: ${result.durationSeconds.toFixed(1)}s kept, ` +
@@ -673,7 +676,10 @@ export async function renderJob(jobId: string): Promise<void> {
     }
 
     try {
-      await db.update(jobs).set({ status: 'done', failureReason: null }).where(eq(jobs.id, jobId));
+      await db
+        .update(jobs)
+        .set({ status: 'done', failureReason: null, completedAt: new Date() })
+        .where(eq(jobs.id, jobId));
       await announceFinishedJob(jobId, succeeded);
     } catch (error) {
       // Every render row is already correctly `done`/`failed` by this point —

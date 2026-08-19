@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 
 /**
  * Operations dashboard.
@@ -40,12 +40,14 @@ type Status = {
       rendersDone: number;
       rendersFailed: number;
       waitingSeconds: number;
+      createdAt: string;
     }>;
   };
   last24h: {
     jobsDone: number;
     jobsFailed: number;
-    failedJobs: Array<{ id: string; productName: string; failureReason: string | null; attempts: number; createdAt: string }>;
+    doneJobs: Array<{ id: string; productName: string; variationCount: number; createdAt: string; completedAt: string | null }>;
+    failedJobs: Array<{ id: string; productName: string; failureReason: string | null; attempts: number; createdAt: string; completedAt: string | null }>;
     failedRenders: Array<{ id: string; jobId: string; failureReason: string | null; createdAt: string }>;
   };
   api: {
@@ -63,6 +65,26 @@ function duration(seconds: number): string {
   if (seconds < 3600) return `${Math.floor(seconds / 60)}m`;
   if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`;
   return `${Math.floor(seconds / 86400)}d`;
+}
+
+/**
+ * A timestamp in Pacific time, 12-hour with AM/PM — never 24-hour. The whole
+ * team reads this dashboard against wall-clock PT, so every time on the page is
+ * rendered in that one zone rather than the viewer's, which would make two
+ * people compare notes on different clocks.
+ */
+function ptTime(iso: string | null | undefined): string {
+  if (!iso) return '—';
+  const when = new Date(iso);
+  if (Number.isNaN(when.getTime())) return '—';
+  return when.toLocaleString('en-US', {
+    timeZone: 'America/Los_Angeles',
+    month: 'short',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+    hour12: true,
+  });
 }
 
 function money(value: number): string {
@@ -93,6 +115,8 @@ const CSS = `
 .st-bar > i { display: block; height: 100%; background: #16a34a; }
 .st-err { font-size: 12px; opacity: .85; margin-top: 3px; word-break: break-word; }
 .st-empty { font-size: 13px; opacity: .55; padding: 6px 0; }
+.st-time { font-size: 12px; opacity: .6; margin-top: 2px; }
+.st-time b { font-weight: 600; opacity: .85; }
 .st-btn { border: 1px solid rgba(128,128,128,.4); background: transparent; color: inherit; border-radius: 8px; padding: 6px 12px; font-size: 13px; cursor: pointer; }
 `;
 
@@ -100,11 +124,22 @@ export function StatusDashboard() {
   const [data, setData] = useState<Status | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  // A poll that has not come back yet. Guards against the 10s interval stacking
+  // requests on top of a slow one, and — with the timeout below — is why a
+  // wedged endpoint surfaces as an error instead of a spinner that never stops.
+  const inFlight = useRef(false);
 
   const load = useCallback(async () => {
+    if (inFlight.current) return;
+    inFlight.current = true;
     setLoading(true);
+    // The snapshot fans out to the database and a third-party billing API; if
+    // any of that wedges, the request must still end so the page can say so
+    // rather than sit on "Refreshing…" forever — the "not responding" report.
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 15_000);
     try {
-      const res = await fetch('/api/status', { cache: 'no-store' });
+      const res = await fetch('/api/status', { cache: 'no-store', signal: controller.signal });
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
         setError(
@@ -119,9 +154,15 @@ export function StatusDashboard() {
       }
       setData(await res.json());
       setError(null);
-    } catch {
-      setError('Could not reach the server.');
+    } catch (err) {
+      setError(
+        err instanceof DOMException && err.name === 'AbortError'
+          ? 'The server took too long to answer. It may be under load — retrying shortly.'
+          : 'Could not reach the server.'
+      );
     } finally {
+      clearTimeout(timeout);
+      inFlight.current = false;
       setLoading(false);
     }
   }, []);
@@ -213,6 +254,7 @@ export function StatusDashboard() {
                     {job.rendersFailed > 0 && ` · ${job.rendersFailed} failed`}
                     {job.attempts > 0 && ` · retry ${job.attempts}`}
                   </div>
+                  <div className="st-time">Started <b>{ptTime(job.createdAt)}</b></div>
                   {job.status === 'rendering' && (
                     <div className="st-bar"><i style={{ width: `${pct}%` }} /></div>
                   )}
@@ -232,6 +274,21 @@ export function StatusDashboard() {
           </div>
 
           <div className="st-card">
+            <h2>Completed (24h)</h2>
+            {data.last24h.doneJobs.length === 0 && <div className="st-empty">Nothing finished yet.</div>}
+            {data.last24h.doneJobs.map((job) => (
+              <div key={job.id} className="st-row" style={{ display: 'block' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10 }}>
+                  <strong>{job.productName}</strong>
+                  <span style={{ whiteSpace: 'nowrap', opacity: 0.7 }}>{job.variationCount} videos</span>
+                </div>
+                <div className="st-time">Started <b>{ptTime(job.createdAt)}</b></div>
+                <div className="st-time">Completed <b>{ptTime(job.completedAt)}</b></div>
+              </div>
+            ))}
+          </div>
+
+          <div className="st-card">
             <h2>Errors (24h)</h2>
             {data.last24h.failedJobs.length === 0 && data.last24h.failedRenders.length === 0 && (
               <div className="st-empty">No failures.</div>
@@ -240,6 +297,8 @@ export function StatusDashboard() {
               <div key={job.id} className="st-row" style={{ display: 'block' }}>
                 <strong>{job.productName}</strong>
                 <div className="st-err">{job.failureReason ?? 'No reason recorded.'}</div>
+                <div className="st-time">Started <b>{ptTime(job.createdAt)}</b></div>
+                <div className="st-time">Failed <b>{ptTime(job.completedAt)}</b></div>
               </div>
             ))}
             {data.last24h.failedRenders.map((render) => (
@@ -282,8 +341,14 @@ export function StatusDashboard() {
           </div>
 
           <div className="st-sub">
-            Updated {new Date(data.generatedAt).toLocaleTimeString()} · auto-refreshes every{' '}
-            {REFRESH_MS / 1000}s
+            Updated{' '}
+            {new Date(data.generatedAt).toLocaleTimeString('en-US', {
+              timeZone: 'America/Los_Angeles',
+              hour: 'numeric',
+              minute: '2-digit',
+              hour12: true,
+            })}{' '}
+            PT · auto-refreshes every {REFRESH_MS / 1000}s
           </div>
         </>
       )}
